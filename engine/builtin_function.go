@@ -1,0 +1,121 @@
+package engine
+
+// installFunction fills Function.prototype. The Function
+// constructor keeps its deferred-feature stub: `new Function` is TODO.
+func installFunction(r *Realm) {
+	// +3: caller, arguments and @@hasInstance (installSymbol).
+	r.FunctionPrototype.ReserveSlots(r, len(functionPrototypeMethods)+3)
+	r.installBuiltins(r.FunctionPrototype, functionPrototypeMethods)
+	// AddRestrictedFunctionProperties: caller and arguments are accessors
+	// whose getter and setter are both %ThrowTypeError%.
+	thrower := r.NewNativeFunction(AtomEmpty, 0, throwTypeError)
+	thrower.Freeze(r)
+	r.restrictedAccessor = &Accessor{Get: thrower, Set: thrower}
+	restricted := accessorValue(r.restrictedAccessor)
+	r.installOrReplace(r.FunctionPrototype, StringKey(AtomCaller), propCell{value: restricted, attrs: attrConfigurable | attrAccessor})
+	r.installOrReplace(r.FunctionPrototype, StringKey(AtomArguments), propCell{value: restricted, attrs: attrConfigurable | attrAccessor})
+}
+
+// throwTypeError is %ThrowTypeError%, the frozen anonymous function behind
+// the restricted caller and arguments properties.
+func throwTypeError(r *Realm, this Value, args []Value) (Value, error) {
+	return Undefined(), r.TypeError("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them")
+}
+
+var functionPrototypeMethods = []builtinDef{
+	{AtomApply, functionProtoApply, 2},
+	{AtomBind, functionProtoBind, 1},
+	{AtomCall, functionProtoCall, 1},
+	{AtomToString, functionProtoToString, 0},
+}
+
+// functionCall and functionConstruct are the deferred `Function(...)` /
+// `new Function(...)` behaviours.
+func functionCall(r *Realm, this Value, args []Value) (Value, error) {
+	return Undefined(), r.TypeError("new Function is not supported yet (see TODO.md)")
+}
+
+func functionConstruct(r *Realm, args []Value, newTarget *Object) (Value, error) {
+	return Undefined(), r.TypeError("new Function is not supported yet (see TODO.md)")
+}
+
+// functionProtoApply implements Function.prototype.apply(thisArg, argArray).
+func functionProtoApply(r *Realm, this Value, args []Value) (Value, error) {
+	if !IsCallable(this) {
+		return Undefined(), r.TypeError("Function.prototype.apply was called on %s, which is not a function", r.DisplayString(this))
+	}
+	argArray := Arg(args, 1)
+	if argArray.IsNullish() {
+		return r.CallObject(this.AsObject(), Arg(args, 0), nil)
+	}
+	list, err := r.CreateListFromArrayLike(argArray)
+	if err != nil {
+		return Undefined(), err
+	}
+	return r.CallObject(this.AsObject(), Arg(args, 0), list)
+}
+
+// functionProtoCall implements Function.prototype.call(thisArg, ...args).
+// The remaining arguments are passed through without copying.
+func functionProtoCall(r *Realm, this Value, args []Value) (Value, error) {
+	if !IsCallable(this) {
+		return Undefined(), r.TypeError("Function.prototype.call was called on %s, which is not a function", r.DisplayString(this))
+	}
+	var rest []Value
+	if len(args) > 1 {
+		rest = args[1:]
+	}
+	return r.CallObject(this.AsObject(), Arg(args, 0), rest)
+}
+
+// functionProtoBind implements Function.prototype.bind(thisArg, ...args);
+// BoundFunctionCreate and the length/name steps live in NewBoundFunction.
+func functionProtoBind(r *Realm, this Value, args []Value) (Value, error) {
+	if !IsCallable(this) {
+		return Undefined(), r.TypeError("Bind must be called on a function")
+	}
+	var bound []Value
+	if len(args) > 1 {
+		bound = args[1:]
+	}
+	f, err := r.NewBoundFunction(this.AsObject(), Arg(args, 0), bound)
+	if err != nil {
+		return Undefined(), err
+	}
+	return ObjectValue(f), nil
+}
+
+// functionProtoToString implements Function.prototype.toString: the source
+// slice recorded by the compiler for bytecode functions, otherwise the
+// NativeFunction form `function name() { [native code] }` (bound functions
+// print no name, "bound f" not being a valid PropertyName).
+func functionProtoToString(r *Realm, this Value, args []Value) (Value, error) {
+	if !IsCallable(this) {
+		return Undefined(), r.TypeError("Function.prototype.toString requires that 'this' be a Function")
+	}
+	if src := functionSourceText(this.AsObject()); src != "" {
+		return StringValue(FromGoString(src)), nil
+	}
+	fd := this.AsObject().FunctionData() // nil for a callable proxy
+	name := AtomEmpty
+	if fd != nil && fd.kind != FuncBound && fd.name != nil {
+		name = fd.name
+	}
+	var sb StringBuilder
+	sb.Grow(name.Len() + 32)
+	sb.WriteGoString("function ")
+	sb.WriteString(name)
+	sb.WriteGoString("() { [native code] }")
+	return StringValue(sb.String()), nil
+}
+
+// functionSourceText is the source slice the compiler recorded for a
+// bytecode function (a range into the one retained copy of its file), or ""
+// for natives, bound functions and code without a source.
+func functionSourceText(fn *Object) string {
+	fd := fn.FunctionData()
+	if fd == nil || fd.kind != FuncBytecode || fd.code == nil {
+		return ""
+	}
+	return fd.code.SourceText()
+}

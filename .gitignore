@@ -1,0 +1,21 @@
+# Build and test artifacts
+*.test
+*.out
+*.prof
+/bench/results/
+/bench/testdata/plugins/*.pgo
+# new-api plugins, fetched by bench/testdata/plugins/fetch.sh (AGPL-3.0)
+/bench/testdata/plugins/*/
+coverage.*
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local development notes (not published)
+/docs/DESIGN.md
+/docs/engine-api.md
+/docs/NOTES.md
+/bench/RESULTS.md
+/bench/scripts/run_rerun.sh

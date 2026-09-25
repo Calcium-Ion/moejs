@@ -1,0 +1,1646 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode video",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "doubao-seedance-1-0-pro-250528",
+        "requestBody": {
+          "metadata": {
+            "resolution": "720p"
+          },
+          "model": "doubao-seedance-1-0-pro-250528",
+          "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+          "seconds": 5,
+          "size": "1280x720"
+        }
+      }
+    },
+    {
+      "name": "responses decode image seedream 5 lite",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "Poster of a jazz trio, art deco style",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/cat.jpg"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "doubao-seedream-5-0-lite-260128",
+              "sequential_image_generation": "auto",
+              "sequential_image_generation_options": {
+                "max_images": 3
+              },
+              "size": "2K",
+              "tools": [
+                {
+                  "type": "web_search"
+                },
+                {
+                  "name": "x",
+                  "type": "function"
+                }
+              ]
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedream-5-0-lite-260128",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_image",
+        "kind": "submit",
+        "model": "doubao-seedream-5-0-lite-260128",
+        "requestBody": {
+          "image": [
+            "https://img.example.com/reference/cat.jpg"
+          ],
+          "model": "doubao-seedream-5-0-lite-260128",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nPoster of a jazz trio, art deco style",
+          "sequential_image_generation": "auto",
+          "sequential_image_generation_options": {
+            "max_images": 3
+          },
+          "size": "2K",
+          "tools": [
+            {
+              "type": "web_search"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects tools on seedream 4",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "a cat",
+              "model": "doubao-seedream-4-0-250828",
+              "tools": [
+                {
+                  "type": "web_search"
+                }
+              ]
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "tools are not supported by this model"
+    },
+    {
+      "name": "video decode json image-to-video",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "image": "https://img.example.com/reference/cat.jpg",
+              "model": "doubao-seedance-2-0-260128",
+              "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedance-2-0-260128",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "doubao-seedance-2-0-260128",
+        "requestBody": {
+          "image": "https://img.example.com/reference/cat.jpg",
+          "model": "doubao-seedance-2-0-260128",
+          "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "video decode rejects out-of-range seconds",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedance-1-0-pro-250528",
+              "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "seconds": 5000
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "seconds must be between 1 and 3600"
+    },
+    {
+      "name": "native create task",
+      "hook": "native",
+      "member": "createTask",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "content": [
+                {
+                  "text": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+                  "type": "text"
+                },
+                {
+                  "image_url": {
+                    "url": "https://img.example.com/reference/cat.jpg"
+                  },
+                  "type": "image_url"
+                }
+              ],
+              "duration": 5,
+              "model": "doubao-seedance-1-0-pro-250528",
+              "ratio": "16:9",
+              "resolution": "720p"
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/doubao/api/v3/contents/generations/tasks",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "doubao-seedance-1-0-pro-250528",
+        "requestBody": {
+          "metadata": {
+            "content": [
+              {
+                "text": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+                "type": "text"
+              },
+              {
+                "image_url": {
+                  "url": "https://img.example.com/reference/cat.jpg"
+                },
+                "type": "image_url"
+              }
+            ],
+            "duration": 5,
+            "model": "doubao-seedance-1-0-pro-250528",
+            "ratio": "16:9",
+            "resolution": "720p"
+          },
+          "model": "doubao-seedance-1-0-pro-250528",
+          "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "native create image",
+      "hook": "native",
+      "member": "createImage",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/doubao/api/v3/images/generations",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "action": "text_to_image",
+        "kind": "submit",
+        "model": "doubao-seedream-4-0-250828",
+        "requestBody": {
+          "model": "doubao-seedream-4-0-250828",
+          "prompt": "Poster of a jazz trio, art deco style",
+          "response_format": "url",
+          "size": "2K",
+          "watermark": true
+        }
+      }
+    },
+    {
+      "name": "build submit video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "ratio": "16:9",
+              "resolution": "720p"
+            },
+            "model": "doubao-seedance-1-0-pro-250528",
+            "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+            "seconds": 5
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "content": [
+            {
+              "text": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "type": "text"
+            }
+          ],
+          "duration": 5,
+          "model": "doubao-seedance-1-0-pro-250528",
+          "ratio": "16:9",
+          "resolution": "720p"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer ark-0123456789abcdef-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "rewriteModel": "doubao-seedance-1-0-pro-250528",
+        "url": "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
+      }
+    },
+    {
+      "name": "build submit image",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "doubao-seedream-4-0-250828",
+            "prompt": "Poster of a jazz trio, art deco style",
+            "response_format": "url",
+            "size": "2K",
+            "watermark": true
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_image",
+        "body": {
+          "model": "doubao-seedream-4-0-250828",
+          "prompt": "Poster of a jazz trio, art deco style",
+          "response_format": "url",
+          "size": "2K",
+          "watermark": true
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer ark-0123456789abcdef-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "rewriteModel": "doubao-seedream-4-0-250828",
+        "url": "https://ark.cn-beijing.volces.com/api/v3/images/generations"
+      }
+    },
+    {
+      "name": "build submit rejects 4k on seedance 1.0",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "resolution": "4k"
+            },
+            "model": "doubao-seedance-1-0-pro-250528",
+            "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "doubao-seedance-1-0-pro-250528 resolution must be one of 480p, 720p, 1080p"
+    },
+    {
+      "name": "parse submit video",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "ratio": "16:9",
+              "resolution": "720p"
+            },
+            "model": "doubao-seedance-1-0-pro-250528",
+            "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+            "seconds": 5
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "id": "cgt-20231114-abcdef"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "id": "cgt-20231114-abcdef"
+        },
+        "taskId": "cgt-20231114-abcdef"
+      }
+    },
+    {
+      "name": "parse submit image immediate",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "doubao-seedream-4-0-250828",
+            "prompt": "Poster of a jazz trio, art deco style",
+            "response_format": "url",
+            "size": "2K",
+            "watermark": true
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "created": 1700000100,
+            "data": [
+              {
+                "size": "2048x2048",
+                "url": "https://ark-content.example.com/img/1.png"
+              },
+              {
+                "size": "1024x1024",
+                "url": "https://ark-content.example.com/img/2.png"
+              }
+            ],
+            "model": "doubao-seedream-4-0-250828",
+            "usage": {
+              "generated_images": 2,
+              "input_images": 1,
+              "output_tokens": 8192,
+              "total_tokens": 8192
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "immediate": {
+          "progress": "100%",
+          "status": "SUCCESS",
+          "url": "https://ark-content.example.com/img/1.png"
+        },
+        "taskData": {
+          "created": 1700000100,
+          "data": [
+            {
+              "size": "2048x2048",
+              "url": "https://ark-content.example.com/img/1.png"
+            },
+            {
+              "size": "1024x1024",
+              "url": "https://ark-content.example.com/img/2.png"
+            }
+          ],
+          "model": "doubao-seedream-4-0-250828",
+          "usage": {
+            "generated_images": 2,
+            "input_images": 1,
+            "output_tokens": 8192,
+            "total_tokens": 8192
+          }
+        },
+        "taskId": "task_pub_0001"
+      }
+    },
+    {
+      "name": "parse submit image error",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "doubao-seedream-4-0-250828",
+            "prompt": "Poster of a jazz trio, art deco style",
+            "response_format": "url",
+            "size": "2K",
+            "watermark": true
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "error": {
+              "code": "InvalidParameter",
+              "message": "The parameter `size` specified in the request are not valid"
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 400
+        }
+      ],
+      "expectedError": "InvalidParameter: The parameter `size` specified in the request are not valid"
+    },
+    {
+      "name": "usage facts video",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "ratio": "16:9",
+              "resolution": "720p"
+            },
+            "model": "doubao-seedance-1-0-pro-250528",
+            "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+            "seconds": 5
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "resolution": "720p",
+        "tokens": 108000
+      }
+    },
+    {
+      "name": "usage facts image",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "doubao-seedream-4-0-250828",
+            "prompt": "Poster of a jazz trio, art deco style",
+            "response_format": "url",
+            "size": "2K",
+            "watermark": true
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "images_above_1_5k": 1,
+        "images_up_to_1_5k": 0,
+        "input_images": 0,
+        "layer_decomposition": false
+      }
+    },
+    {
+      "name": "usage billing ratios video input",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedance-2-0-260128",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "content": [
+                {
+                  "type": "video_url",
+                  "video_url": {
+                    "url": "https://img.example.com/ref.mp4"
+                  }
+                }
+              ],
+              "resolution": "1080p"
+            },
+            "model": "doubao-seedance-2-0-260128",
+            "prompt": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+            "seconds": 5
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-2-0-260128",
+          "usagePurpose": "billing_ratios",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "video_input_ratio": 0.6739130434782609
+      }
+    },
+    {
+      "name": "usage on submit image count",
+      "hook": "extractUsageOnSubmit",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "doubao-seedream-4-0-250828",
+            "prompt": "Poster of a jazz trio, art deco style",
+            "response_format": "url",
+            "size": "2K",
+            "watermark": true
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828",
+          "userSetting": null
+        },
+        {
+          "created": 1700000100,
+          "data": [
+            {
+              "size": "2048x2048",
+              "url": "https://ark-content.example.com/img/1.png"
+            },
+            {
+              "size": "1024x1024",
+              "url": "https://ark-content.example.com/img/2.png"
+            }
+          ],
+          "model": "doubao-seedream-4-0-250828",
+          "usage": {
+            "generated_images": 2,
+            "input_images": 1,
+            "output_tokens": 8192,
+            "total_tokens": 8192
+          }
+        }
+      ],
+      "expected": {
+        "image_count": 2
+      }
+    },
+    {
+      "name": "build query",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "data": null,
+          "model": "doubao-seedance-1-0-pro-250528",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "cgt-20231114-abcdef",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer ark-0123456789abcdef-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "GET",
+        "url": "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-20231114-abcdef"
+      }
+    },
+    {
+      "name": "parse task succeeded",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "data": null,
+          "model": "doubao-seedance-1-0-pro-250528",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "cgt-20231114-abcdef",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528"
+        },
+        {
+          "content": {
+            "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+            "video_url": "https://ark-content.example.com/video/x.mp4"
+          },
+          "created_at": 1700000000,
+          "id": "cgt-20231114-abcdef",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "resolution": "720p",
+          "status": "succeeded",
+          "updated_at": 1700000120,
+          "usage": {
+            "completion_tokens": 108000,
+            "total_tokens": 108000
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "completionTokens": 108000,
+        "progress": "100%",
+        "status": "SUCCESS",
+        "totalTokens": 108000,
+        "url": "https://ark-content.example.com/video/x.mp4"
+      }
+    },
+    {
+      "name": "parse task failed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "data": null,
+          "model": "doubao-seedance-1-0-pro-250528",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "cgt-20231114-abcdef",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528"
+        },
+        {
+          "error": {
+            "code": "OutputVideoSensitiveContentDetected",
+            "message": "The generated video may contain sensitive information."
+          },
+          "id": "cgt-20231114-abcdef",
+          "status": "failed"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "progress": "100%",
+        "reason": "The generated video may contain sensitive information.",
+        "status": "FAILURE"
+      }
+    },
+    {
+      "name": "usage on complete video",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "data": null,
+          "model": "doubao-seedance-1-0-pro-250528",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "cgt-20231114-abcdef",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedance-1-0-pro-250528"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "cgt-20231114-abcdef",
+          "url": "https://ark-content.example.com/video/x.mp4"
+        },
+        {
+          "content": {
+            "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+            "video_url": "https://ark-content.example.com/video/x.mp4"
+          },
+          "created_at": 1700000000,
+          "id": "cgt-20231114-abcdef",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "resolution": "720p",
+          "status": "succeeded",
+          "updated_at": 1700000120,
+          "usage": {
+            "completion_tokens": 108000,
+            "total_tokens": 108000
+          }
+        }
+      ],
+      "expected": {
+        "resolution": "720p",
+        "tokens": 108000
+      }
+    },
+    {
+      "name": "usage on complete image tiers",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "data": null,
+          "model": "doubao-seedream-4-0-250828",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "doubao-seedream-4-0-250828"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001"
+        },
+        {
+          "created": 1700000100,
+          "data": [
+            {
+              "size": "2048x2048",
+              "url": "https://ark-content.example.com/img/1.png"
+            },
+            {
+              "size": "1024x1024",
+              "url": "https://ark-content.example.com/img/2.png"
+            }
+          ],
+          "model": "doubao-seedream-4-0-250828",
+          "usage": {
+            "generated_images": 2,
+            "input_images": 1,
+            "output_tokens": 8192,
+            "total_tokens": 8192
+          }
+        }
+      ],
+      "expected": {
+        "images_above_1_5k": 1,
+        "images_up_to_1_5k": 1,
+        "input_images": 1
+      }
+    },
+    {
+      "name": "render events success video",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "content": {
+              "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+              "video_url": "https://ark-content.example.com/video/x.mp4"
+            },
+            "created_at": 1700000000,
+            "id": "cgt-20231114-abcdef",
+            "model": "doubao-seedance-1-0-pro-250528",
+            "resolution": "720p",
+            "status": "succeeded",
+            "updated_at": 1700000120,
+            "usage": {
+              "completion_tokens": 108000,
+              "total_tokens": 108000
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "doubao",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render events queued",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ginger cat leaping between rooftops in a rainy neon city, slow motion",
+              "model": "doubao-seedance-1-0-pro-250528",
+              "seconds": 5,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedance-1-0-pro-250528",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "",
+          "platform": "doubao",
+          "progress": "10%",
+          "status": "QUEUED",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        },
+        null
+      ],
+      "expected": {
+        "done": false,
+        "events": [
+          {
+            "message": "queued",
+            "progress": 10,
+            "type": "progress"
+          }
+        ],
+        "state": {
+          "progress": 10,
+          "status": "QUEUED"
+        }
+      }
+    },
+    {
+      "name": "render final images",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "image-1": {
+              "key": "image-1",
+              "type": "image",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-1?sig=YWJj\u0026exp=1700003600"
+            },
+            "image-2": {
+              "key": "image-2",
+              "type": "image",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-2?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "doubao-seedream-4-0-250828",
+              "prompt": "Poster of a jazz trio, art deco style",
+              "response_format": "url",
+              "size": "2K",
+              "watermark": true
+            }
+          },
+          "method": "POST",
+          "model": "doubao-seedream-4-0-250828",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "created": 1700000100,
+            "data": [
+              {
+                "size": "2048x2048",
+                "url": "https://ark-content.example.com/img/1.png"
+              },
+              {
+                "size": "1024x1024",
+                "url": "https://ark-content.example.com/img/2.png"
+              }
+            ],
+            "model": "doubao-seedream-4-0-250828",
+            "usage": {
+              "generated_images": 2,
+              "input_images": 1,
+              "output_tokens": 8192,
+              "total_tokens": 8192
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "doubao",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "doubao"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "![Image 1](\u003chttps://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-1?sig=YWJj\u0026exp=1700003600\u003e)\n\n![Image 2](\u003chttps://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-2?sig=YWJj\u0026exp=1700003600\u003e)",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native task status",
+      "hook": "native",
+      "member": "taskStatus",
+      "args": [
+        {
+          "body": null,
+          "method": "GET",
+          "params": {
+            "task_id": "task_pub_0001"
+          },
+          "path": "/doubao/api/v3/contents/generations/tasks/task_pub_0001",
+          "query": {}
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "content": {
+              "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+              "video_url": "https://ark-content.example.com/video/x.mp4"
+            },
+            "created_at": 1700000000,
+            "id": "cgt-20231114-abcdef",
+            "model": "doubao-seedance-1-0-pro-250528",
+            "resolution": "720p",
+            "status": "succeeded",
+            "updated_at": 1700000120,
+            "usage": {
+              "completion_tokens": 108000,
+              "total_tokens": 108000
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "doubao",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "content": {
+          "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+          "video_url": "https://ark-content.example.com/video/x.mp4"
+        },
+        "created_at": 1700000000,
+        "id": "task_pub_0001",
+        "model": "doubao-seedance-1-0-pro-250528",
+        "resolution": "720p",
+        "status": "succeeded",
+        "updated_at": 1700000120,
+        "usage": {
+          "completion_tokens": 108000,
+          "total_tokens": 108000
+        }
+      }
+    },
+    {
+      "name": "video render",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "error": {
+              "code": "OutputVideoSensitiveContentDetected",
+              "message": "sensitive"
+            },
+            "status": "failed"
+          },
+          "fail_reason": "sensitive",
+          "finished_at": 1700000123,
+          "platform": "doubao",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "error": {
+          "code": "OutputVideoSensitiveContentDetected",
+          "message": "sensitive"
+        },
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "list artifacts video",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "text_to_video",
+          "data": {
+            "content": {
+              "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+              "video_url": "https://ark-content.example.com/video/x.mp4"
+            },
+            "created_at": 1700000000,
+            "id": "cgt-20231114-abcdef",
+            "model": "doubao-seedance-1-0-pro-250528",
+            "resolution": "720p",
+            "status": "succeeded",
+            "updated_at": 1700000120,
+            "usage": {
+              "completion_tokens": 108000,
+              "total_tokens": 108000
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "video",
+          "type": "video"
+        },
+        {
+          "key": "last_frame",
+          "mimeType": "image/png",
+          "type": "image"
+        }
+      ]
+    },
+    {
+      "name": "build content request last frame",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "ark-0123456789abcdef-0123456789abcdef",
+          "artifactKey": "last_frame",
+          "auth": {
+            "authHeader": "ark-0123456789abcdef-0123456789abcdef"
+          },
+          "authHeader": "ark-0123456789abcdef-0123456789abcdef",
+          "baseUrl": "https://ark.cn-beijing.volces.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "content": {
+              "last_frame_url": "https://ark-content.example.com/video/x-last.png",
+              "video_url": "https://ark-content.example.com/video/x.mp4"
+            },
+            "created_at": 1700000000,
+            "id": "cgt-20231114-abcdef",
+            "model": "doubao-seedance-1-0-pro-250528",
+            "resolution": "720p",
+            "status": "succeeded",
+            "updated_at": 1700000120,
+            "usage": {
+              "completion_tokens": 108000,
+              "total_tokens": 108000
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "cgt-20231114-abcdef"
+        }
+      ],
+      "expected": {
+        "credentialless": true,
+        "method": "GET",
+        "url": "https://ark-content.example.com/video/x-last.png"
+      }
+    }
+  ]
+}

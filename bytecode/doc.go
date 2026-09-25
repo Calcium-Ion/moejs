@@ -1,0 +1,213 @@
+// Package bytecode: instruction set reference.
+//
+// # Machine model
+//
+// moejs runs a register machine. A function executes in a window of
+// NumRegs registers R[0..NumRegs-1] carved out of one contiguous per-realm
+// value stack. Arguments arrive in R[0..argc-1]; missing parameters are
+// undefined; when HasRest is set the surplus arguments are collected into an
+// array in R[NumParams] before any other instruction runs, and when
+// HasArguments is set an unmapped arguments object holding every argument
+// is created in the next register (R[NumParams], or R[NumParams+1] after a
+// rest array). `this` is held in the frame, not in a register. Registers
+// above the parameters hold locals (un-captured let/const/var/function
+// bindings) and expression temporaries; the compiler allocates them
+// stack-like so that a call block (callee, this, args) is always the
+// highest live group of registers.
+//
+// Captured bindings never live in registers: they live in closure
+// environments (Env). env^0 is the innermost environment; env^d is its d-th
+// parent. A function whose CaptureLayout has n > 0 slots creates its own Env
+// of n slots at entry (with the parameter registers listed in the layout
+// copied in); otherwise it runs directly in the environment captured by its
+// closure. Block scopes with captured bindings push and pop nested Envs.
+//
+// Every instruction is one 32-bit word: op:8 | A:8 | B:8 | C:8, or
+// op:8 | A:8 | Bx:16 (unsigned) / sBx:16 (signed). Ops marked +X below are
+// followed by one ExtraArg word (a raw uint32); GetEnvChkW has two. Jump
+// offsets are relative to the pc of the following word. Constants K[i] are
+// Function.Consts; F[i] are Function.Children.
+//
+// Exceptions unwind through Function.Handlers without panic/recover: the
+// interpreter takes the first row whose [Start, End) covers the faulting pc,
+// pops closure environments down to StackDepth, stores the thrown value as
+// described by Kind, and resumes at Handler. Rows without a match propagate
+// the error to the caller's frame. Interrupts (Realm.Interrupt) are checked
+// at function entry and at every backward Jmp and are not catchable.
+//
+// # Opcodes
+//
+// Loads and moves
+//
+//	LoadConst  A Bx        R[A] = K[Bx] (number, string or bigint constant)
+//	LoadInt    A sBx       R[A] = sBx (small integer)
+//	LoadUndef  A           R[A] = undefined
+//	LoadNull   A           R[A] = null
+//	LoadTrue   A           R[A] = true
+//	LoadFalse  A           R[A] = false
+//	LoadHole   A           R[A] = hole (the TDZ marker; never observable)
+//	LoadThis   A           R[A] = this (undefined at module top level; lexical in arrows)
+//	LoadCallee A           R[A] = the function object being executed (named function expressions)
+//	Move       A B         R[A] = R[B]
+//	UndefRange A B         R[A .. A+B-1] = undefined (var bindings at entry)
+//
+// Closure environments
+//
+//	GetEnv     A B C       R[A] = env^B[C]
+//	GetEnvChk  A B C +X    R[A] = env^B[C]; ReferenceError "K[X] is not defined" if hole
+//	SetEnv     A B C       env^B[C] = R[A]
+//	GetEnvW    A B +X      R[A] = env^B[X]              (slot >= 256)
+//	GetEnvChkW A B +X +X   R[A] = env^B[X1] with TDZ check; X2 = name constant
+//	SetEnvW    A B +X      env^B[X] = R[A]
+//	PushEnv    Bx          env = new Env(env, Bx slots initialized to undefined)
+//	PopEnv                 env = env.parent
+//	CopyEnv                env = copy of env with the same parent (per-iteration let bindings)
+//	CheckTDZ   A +X        ReferenceError "Cannot access 'K[X]' before initialization" if R[A] is hole
+//
+// Globals (X = name constant:16 | inline cache:16)
+//
+//	GetGlobal        A +X  R[A] = globalThis[name]; ReferenceError if absent
+//	GetGlobalOrUndef A +X  R[A] = globalThis[name] or undefined (typeof operand)
+//	SetGlobal        A +X  globalThis[name] = R[A]; ReferenceError if absent (strict)
+//
+// Properties
+//
+//	GetProp    A B +X      R[A] = R[B].name (X = name:16 | ic:16; TypeError on null/undefined base)
+//	GetLen     A B +X      R[A] = R[B].length (array and string fast paths; X = ic in the high half)
+//	SetProp    A B +X      R[A].name = R[B] (strict PutValue)
+//	GetElem    A B C       R[A] = R[B][R[C]] (dense array and string index fast paths)
+//	SetElem    A B C       R[A][R[B]] = R[C]
+//	DelProp    A B +X      R[A] = delete R[B].name (strict: TypeError when not configurable)
+//	DelElem    A B C       R[A] = delete R[B][R[C]]
+//	In         A B C       R[A] = R[B] in R[C]
+//	InstanceOf A B C       R[A] = R[B] instanceof R[C]
+//
+// Literals
+//
+//	NewObject       A Bx   R[A] = {} (ordinary object, Bx = property count hint)
+//	NewArray        A Bx   R[A] = [] (Bx = capacity hint)
+//	DefineField     A B +X CreateDataProperty(R[A], K[name], R[B]) (X = name:16 | ic:16; the IC caches the shape transition)
+//	DefineElem      A B C  CreateDataProperty(R[A], ToPropertyKey(R[B]), R[C])
+//	DefineMethod    A B C  DefineElem for an object-literal method with a computed key: SetFunctionName(R[C], key) first
+//	DefineAccessor  A B C +X  DefinePropertyOrThrow(R[A], ToPropertyKey(R[B]), {[[Get]] or [[Set]]: R[C], [[Enumerable]], [[Configurable]]: true}),
+//	                       merging with an existing accessor half; X = AccessorSetter | AccessorEnumerable | AccessorNameKey
+//	                       (AccessorNameKey: SetFunctionName(R[C], key, "get"/"set") first, for computed keys)
+//	SetProto        A B    if R[B] is an object or null, R[A].[[Prototype]] = R[B] (the __proto__: v literal form)
+//	CopyDataProps   A B    copy own enumerable properties of R[B] into R[A] (object spread)
+//	CopyDataPropsEx A B C  same, skipping the keys listed in array R[C] (object rest pattern)
+//	ArrayPush       A B    append R[B] to array R[A]
+//	ArrayHole       A      append a hole to array R[A] (length += 1)
+//	AppendSpread    A B    append every value produced by iterating R[B] to array R[A]
+//	Closure         A Bx   R[A] = new function object over F[Bx] closing over env (and this for arrows)
+//	NewRegExp       A Bx   R[A] = new RegExp(K[Bx].pattern, K[Bx].flags)
+//	GetTemplate     A +X   R[A] = the template object of K[X lo] (GetTemplateObject: frozen cooked strings with a frozen raw array), created on the site's first evaluation in the realm and cached in IC slot X hi
+//
+// Arithmetic (number fast paths; BigInt operands take the slow path)
+//
+//	Add       A B C        R[A] = R[B] + R[C] (numbers, string concatenation, ToPrimitive)
+//	Sub       A B C        R[A] = R[B] - R[C]
+//	Mul       A B C        R[A] = R[B] * R[C]
+//	Div       A B C        R[A] = R[B] / R[C]
+//	Mod       A B C        R[A] = R[B] % R[C]
+//	Exp       A B C        R[A] = R[B] ** R[C]
+//	AddImm    A B C        R[A] = R[B] + int8(C) (Add semantics: strings concatenate)
+//	SubImm    A B C        R[A] = R[B] - int8(C)
+//	Inc       A B          R[A] = ToNumeric(R[B]) + 1 (++; never concatenates)
+//	Dec       A B          R[A] = ToNumeric(R[B]) - 1 (--)
+//	Neg       A B          R[A] = -R[B]
+//	Plus      A B          R[A] = +R[B] (ToNumber)
+//	Not       A B          R[A] = !ToBoolean(R[B])
+//	BitNot    A B          R[A] = ~R[B]
+//	ToNumeric A B          R[A] = ToNumeric(R[B]) (postfix update result)
+//	RequireObjectCoercible A  throw TypeError when R[A] is null or undefined (empty or rest-only destructuring pattern)
+//	ToStr     A B          R[A] = ToString(R[B]) (template substitutions)
+//	Concat    A B C        R[A] = R[B] + R[C], both already strings (rope above the threshold)
+//	Typeof    A B          R[A] = typeof R[B]
+//	TypeofIs  A B C        R[A] = typeof R[B] === TypeNames[C]
+//	BitAnd    A B C        R[A] = R[B] & R[C]
+//	BitOr     A B C        R[A] = R[B] | R[C]
+//	BitXor    A B C        R[A] = R[B] ^ R[C]
+//	Shl       A B C        R[A] = R[B] << R[C]
+//	Shr       A B C        R[A] = R[B] >> R[C]
+//	UShr      A B C        R[A] = R[B] >>> R[C]
+//
+// Comparison
+//
+//	Eq       A B C         R[A] = R[B] == R[C]
+//	Ne       A B C         R[A] = R[B] != R[C]
+//	StrictEq A B C         R[A] = R[B] === R[C]
+//	StrictNe A B C         R[A] = R[B] !== R[C]
+//	Lt       A B C         R[A] = R[B] < R[C]
+//	Le       A B C         R[A] = R[B] <= R[C]
+//	Gt       A B C         R[A] = R[B] > R[C]
+//	Ge       A B C         R[A] = R[B] >= R[C]
+//
+// Control flow (offsets relative to the next pc)
+//
+//	Jmp           sBx      pc += sBx; a negative offset is a loop back-edge and checks the interrupt flag
+//	JmpT          A sBx    if ToBoolean(R[A]) pc += sBx
+//	JmpF          A sBx    if !ToBoolean(R[A]) pc += sBx
+//	JmpNullish    A sBx    if R[A] is null or undefined pc += sBx
+//	JmpNotNullish A sBx    if R[A] is neither null nor undefined pc += sBx
+//	JmpNotUndef   A sBx    if R[A] is not undefined pc += sBx
+//
+// Calls
+//
+//	Call       A B         R[A] = R[A](this = R[A+1], args R[A+2 .. A+1+B]); TypeError if not callable
+//	CallSpread A           R[A] = R[A](this = R[A+1], ...array R[A+2])
+//	New        A B         R[A] = new R[A](R[A+2 .. A+1+B]); TypeError if not a constructor
+//	NewSpread  A           R[A] = new R[A](...array R[A+2])
+//	Ret        A           return R[A]
+//	RetUndef               return undefined
+//	Throw      A           throw R[A]
+//	ThrowConstAssign +X    throw TypeError("Assignment to constant variable.") (K[X] names the binding)
+//
+// Iteration (for-of, spread and array destructuring share GetIterator and
+// IteratorStepValue; R[A], R[A+1] hold the Iterator Record: the iterator
+// and its next method, or, while the protocol is unobservable, the array or
+// string itself and the next index; R[A] is undefined once done or closed)
+//
+//	IterInit  A B          R[A], R[A+1] = GetIterator(R[B]); TypeError if not iterable
+//	IterNext  A sBx        R[A+2] = next value; when exhausted pc += sBx
+//	IterValue A B          R[B] = next value or undefined when exhausted (destructuring)
+//	IterRest  A B          R[B] = array of the remaining values (rest element)
+//	IterClose A sBx        IteratorClose(R[A], normal completion) unless done; pc += sBx
+//	IterThrow A B          IteratorClose(R[A], throw completion) unless done; throw R[B]
+//	ForInInit A B          R[A] = enumerable string keys of R[B] (prototype chain, deduplicated), R[A+1] = 0, R[A+2] = the object
+//	ForInNext A sBx        R[A+3] = next key still present as a property; when exhausted pc += sBx
+//
+// Classes, super, new.target and private names (off the interpreter's jump
+// table: they only run while classes are defined and in class code)
+//
+//	CtorEntry     A        R[A] = new.target; TypeError "Class constructor X cannot be invoked without 'new'" in a [[Call]] (first op of every class constructor)
+//	LoadNewTarget A        R[A] = new.target, undefined in a [[Call]] (first op of a function with NewTarget set)
+//	LoadHome      A        R[A] = [[HomeObject]] of the running function
+//	SetHome       A B      [[HomeObject]] of function R[A] = R[B]
+//	CreateClass   A B C    finish class constructor R[A] (the Closure of a class-constructor template):
+//	                       R[A+1] = the new prototype object, R[A].prototype = R[A+1] (read-only),
+//	                       R[A+1].constructor = R[A] (non-enumerable), [[HomeObject]] of R[A] = R[A+1];
+//	                       C&1: R[B] is the heritage (null, or a constructor whose prototype is an object or null);
+//	                       C&2: first name R[A] after property key R[A+1] (an anonymous class field value)
+//	DefineClassMethod A B C  R[A][R[B]] := R[C] non-enumerable, [[HomeObject]] of R[C] = R[A];
+//	                       an unnamed function is named after the key
+//	ToPropertyKey A B      R[A] = ToPropertyKey(R[B]) (computed field keys)
+//	GetProtoOf    A B      R[A] = R[B].[[GetPrototypeOf]]() or null: the super base of home object R[B],
+//	                       or the super constructor of active function R[B]
+//	GetSuper      A B C    R[A] = super property R[C] of base R[B] read with receiver R[B+1];
+//	                       TypeError if the base is null (A may equal B)
+//	SetSuper      A B C    set super property R[B] of base R[A] to R[C] with receiver R[A+1]; TypeError if refused
+//	SuperCall     A B      R[A] = Construct(R[A], args R[A+2 .. A+1+B], new.target R[A+1]); TypeError if not a constructor
+//	SuperCallSpread A      same with the argument array R[A+2] (AppendSpread-built, or the default constructor's rest array)
+//	CheckSuper    A        ReferenceError "Super constructor may only be called once" unless R[A] is hole
+//	DerivedResult A B      R[A] = the value a derived constructor returns for return value R[A] and raw `this` R[B]:
+//	                       an object as is; undefined gives `this` (ReferenceError if still hole); otherwise TypeError
+//	NewPrivateName A Bx    R[A] = a new private name described by K[Bx] ("#x", or the class name for a brand)
+//	SetPrivateMethod A B C +X  make R[B] the method, getter or setter of private name R[A], checked against
+//	                       the brand R[C] (or, with PrivateStatic, the class constructor R[C]); X = Private* flags
+//	GetPrivate    A B C    R[A] = R[B].#R[C]; TypeError when R[B] lacks it
+//	SetPrivate    A B C    R[A].#R[B] = R[C]; TypeError when R[A] lacks it or it is a method
+//	DefPrivate    A B C    add private field #R[B] = R[C] to object R[A]; TypeError if already present
+//	AddBrand      A B      add class brand R[B] to object R[A]; TypeError if already present
+//	InPrivate     A B C    R[A] = #R[B] in R[C]; TypeError if R[C] is not an object
+//	ThrowError    A Bx     throw a new TypeError (A=ThrowTypeError) or ReferenceError (A=ThrowReferenceError) with message K[Bx]
+package bytecode

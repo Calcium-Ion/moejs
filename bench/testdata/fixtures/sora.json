@@ -1,0 +1,1494 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode text",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "sora-2",
+        "requestBody": {
+          "metadata": {
+            "trace": "t1"
+          },
+          "model": "sora-2",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nA corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+          "seconds": 8,
+          "size": "1280x720"
+        }
+      }
+    },
+    {
+      "name": "responses decode image reference",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 4,
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/corgi.png"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "sora-2"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "sora-2",
+        "requestBody": {
+          "input_reference": "https://img.example.com/reference/corgi.png",
+          "model": "sora-2",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nA corgi surfing a huge wave at sunset, golden light, cinematic",
+          "seconds": 4
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects missing input",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "metadata": {},
+              "model": "sora-2"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "input is required"
+    },
+    {
+      "name": "video decode json",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input_reference": "https://img.example.com/reference/corgi.png",
+              "model": "sora-2",
+              "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+              "seconds": "4",
+              "size": "720x1280"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "sora-2",
+        "requestBody": {
+          "input_reference": "https://img.example.com/reference/corgi.png",
+          "model": "sora-2",
+          "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+          "seconds": "4",
+          "size": "720x1280"
+        }
+      }
+    },
+    {
+      "name": "video decode multipart",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "metadata": [
+                "{\"trace\":\"t2\"}"
+              ],
+              "prompt": [
+                "A corgi surfing a huge wave at sunset, golden light, cinematic"
+              ],
+              "seconds": [
+                "8"
+              ],
+              "size": [
+                "1280x720"
+              ]
+            },
+            "files": [
+              {
+                "field": "input_reference",
+                "filename": "ref.png",
+                "mimeType": "image/png",
+                "ref": "request_file:input_reference:0",
+                "size": 2048
+              }
+            ],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "sora-2",
+        "requestBody": {
+          "metadata": {
+            "trace": "t2"
+          },
+          "model": "sora-2",
+          "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+          "seconds": 8,
+          "size": "1280x720"
+        }
+      }
+    },
+    {
+      "name": "video decode rejects seconds",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "sora-2",
+              "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+              "seconds": 5000
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "seconds must be between 1 and 3600"
+    },
+    {
+      "name": "build submit json",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "trace": "t1"
+            },
+            "model": "sora-2",
+            "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+            "seconds": 8,
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "body": {
+          "metadata": {
+            "trace": "t1"
+          },
+          "model": "sora-2",
+          "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+          "seconds": 8,
+          "size": "1280x720"
+        },
+        "headers": {
+          "Authorization": "Bearer sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.openai.com/v1/videos"
+      }
+    },
+    {
+      "name": "build submit multipart with file",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [
+            {
+              "field": "input_reference",
+              "filename": "ref.png",
+              "mimeType": "image/png",
+              "ref": "request_file:input_reference:0",
+              "size": 2048
+            }
+          ],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/videos",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "trace": "t2"
+            },
+            "model": "sora-2",
+            "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+            "seconds": 8,
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "bodyType": "multipart",
+        "headers": {
+          "Authorization": "Bearer sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+        },
+        "method": "POST",
+        "parts": [
+          {
+            "name": "model",
+            "value": "sora-2"
+          },
+          {
+            "name": "prompt",
+            "value": "A corgi surfing a huge wave at sunset, golden light, cinematic"
+          },
+          {
+            "name": "seconds",
+            "value": 8
+          },
+          {
+            "name": "size",
+            "value": "1280x720"
+          },
+          {
+            "name": "metadata",
+            "value": "{\"trace\":\"t2\"}"
+          },
+          {
+            "fileRef": "request_file:input_reference:0",
+            "filename": "ref.png",
+            "name": "input_reference"
+          }
+        ],
+        "url": "https://api.openai.com/v1/videos"
+      }
+    },
+    {
+      "name": "build submit remix",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "remix",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "video_origin_1",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "prompt": "make it snow"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "remix",
+        "body": {
+          "model": "sora-2",
+          "prompt": "make it snow"
+        },
+        "headers": {
+          "Authorization": "Bearer sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.openai.com/v1/videos/video_origin_1/remix"
+      }
+    },
+    {
+      "name": "build submit rejects empty prompt",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "sora-2",
+            "prompt": "   "
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "field prompt is required"
+    },
+    {
+      "name": "parse submit",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "trace": "t1"
+            },
+            "model": "sora-2",
+            "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+            "seconds": 8,
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 0,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "queued"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "created_at": 1700000000,
+          "id": "video_68a1b2c3d4e5f6",
+          "model": "sora-2",
+          "object": "video",
+          "progress": 0,
+          "seconds": "8",
+          "size": "1280x720",
+          "status": "queued"
+        },
+        "taskId": "video_68a1b2c3d4e5f6"
+      }
+    },
+    {
+      "name": "parse submit rejects empty id",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "trace": "t1"
+            },
+            "model": "sora-2",
+            "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+            "seconds": 8,
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "error": {
+              "message": "bad"
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expectedError": "task_id is empty"
+    },
+    {
+      "name": "usage facts",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "metadata": {
+              "trace": "t1"
+            },
+            "model": "sora-2",
+            "prompt": "A corgi surfing a huge wave at sunset, golden light, cinematic\nKeep the palette warm.",
+            "seconds": 8,
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "seconds": 8,
+        "size": "1280x720"
+      }
+    },
+    {
+      "name": "usage remix empty",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "remix",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "sora-2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "prompt": "make it snow"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {}
+    },
+    {
+      "name": "build query",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "data": null,
+          "model": "sora-2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "video_68a1b2c3d4e5f6",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Authorization": "Bearer sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+        },
+        "method": "GET",
+        "url": "https://api.openai.com/v1/videos/video_68a1b2c3d4e5f6"
+      }
+    },
+    {
+      "name": "parse task in progress",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "data": null,
+          "model": "sora-2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "video_68a1b2c3d4e5f6",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2"
+        },
+        {
+          "id": "video_68a1b2c3d4e5f6",
+          "progress": 42,
+          "status": "in_progress"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "progress": "42%",
+        "status": "IN_PROGRESS"
+      }
+    },
+    {
+      "name": "parse task completed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "data": null,
+          "model": "sora-2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "video_68a1b2c3d4e5f6",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2"
+        },
+        {
+          "completed_at": 1700000300,
+          "created_at": 1700000000,
+          "id": "video_68a1b2c3d4e5f6",
+          "model": "sora-2",
+          "object": "video",
+          "progress": 100,
+          "seconds": "8",
+          "size": "1280x720",
+          "status": "completed"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "status": "SUCCESS"
+      }
+    },
+    {
+      "name": "parse task failed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "data": null,
+          "model": "sora-2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "video_68a1b2c3d4e5f6",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2"
+        },
+        {
+          "error": {
+            "code": "moderation_blocked",
+            "message": "Your request was blocked by our moderation system."
+          },
+          "id": "video_68a1b2c3d4e5f6",
+          "status": "failed"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "Your request was blocked by our moderation system.",
+        "status": "FAILURE"
+      }
+    },
+    {
+      "name": "usage on complete",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "data": null,
+          "model": "sora-2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "video_68a1b2c3d4e5f6",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "sora-2"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "video_68a1b2c3d4e5f6"
+        },
+        {
+          "completed_at": 1700000300,
+          "created_at": 1700000000,
+          "id": "video_68a1b2c3d4e5f6",
+          "model": "sora-2",
+          "object": "video",
+          "progress": 100,
+          "seconds": "8",
+          "size": "1280x720",
+          "status": "completed"
+        }
+      ],
+      "expected": {
+        "seconds": 8,
+        "size": "1280x720"
+      }
+    },
+    {
+      "name": "render events success",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "completed_at": 1700000300,
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 100,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "completed"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sora",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        {
+          "progress": 42,
+          "status": "IN_PROGRESS"
+        }
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render events progress",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "",
+          "platform": "sora",
+          "progress": "42%",
+          "status": "IN_PROGRESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        },
+        null
+      ],
+      "expected": {
+        "done": false,
+        "events": [
+          {
+            "message": "in_progress",
+            "progress": 42,
+            "type": "progress"
+          }
+        ],
+        "state": {
+          "progress": 42,
+          "status": "IN_PROGRESS"
+        }
+      }
+    },
+    {
+      "name": "render final",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A corgi surfing a huge wave at sunset, golden light, cinematic",
+                      "type": "input_text"
+                    },
+                    {
+                      "text": "Keep the palette warm.",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "metadata": {
+                "trace": "t1"
+              },
+              "model": "sora-2",
+              "seconds": 8,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "sora-2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "completed_at": 1700000300,
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 100,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "completed"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sora",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "sora"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "video render with data",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "completed_at": 1700000300,
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 100,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "completed"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sora",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000300,
+        "created_at": 1700000000,
+        "id": "video_68a1b2c3d4e5f6",
+        "model": "sora-2",
+        "object": "video",
+        "progress": 100,
+        "seconds": "8",
+        "size": "1280x720",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "video render legacy",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "blocked",
+          "finished_at": 1700000123,
+          "platform": "sora",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "error": {
+          "code": "video_generation_failed",
+          "message": "The video generation task failed."
+        },
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "list artifacts",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "text_to_video",
+          "data": {
+            "completed_at": 1700000300,
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 100,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "completed"
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "video",
+          "type": "video"
+        }
+      ]
+    },
+    {
+      "name": "build content request",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+          },
+          "authHeader": "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789",
+          "baseUrl": "https://api.openai.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "completed_at": 1700000300,
+            "created_at": 1700000000,
+            "id": "video_68a1b2c3d4e5f6",
+            "model": "sora-2",
+            "object": "video",
+            "progress": 100,
+            "seconds": "8",
+            "size": "1280x720",
+            "status": "completed"
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "video_68a1b2c3d4e5f6"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Authorization": "Bearer sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+        },
+        "method": "GET",
+        "url": "https://api.openai.com/v1/videos/video_68a1b2c3d4e5f6/content"
+      }
+    }
+  ]
+}

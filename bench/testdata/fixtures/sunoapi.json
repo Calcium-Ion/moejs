@@ -1,0 +1,1567 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode music",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "method": "POST",
+          "model": "suno_music",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "MUSIC",
+        "kind": "submit",
+        "model": "suno_music",
+        "requestBody": {
+          "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+          "mv": "chirp-v4",
+          "tags": "jazz, upbeat",
+          "title": "Lisbon Mornings"
+        }
+      }
+    },
+    {
+      "name": "responses decode lyrics",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "a lullaby about the sea",
+                      "type": "input_text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "suno_lyrics"
+            }
+          },
+          "method": "POST",
+          "model": "suno_lyrics",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "LYRICS",
+        "kind": "submit",
+        "model": "suno_lyrics",
+        "requestBody": {
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\na lullaby about the sea"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects model",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "model": "suno_video"
+            }
+          },
+          "method": "POST",
+          "model": "suno_video",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "model must be suno_music or suno_lyrics"
+    },
+    {
+      "name": "native decode submit",
+      "hook": "native",
+      "member": "decodeSubmit",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "make_instrumental": false,
+              "mv": "chirp-v4",
+              "prompt": "An upbeat jazz song about morning coffee in Lisbon"
+            }
+          },
+          "method": "POST",
+          "params": {
+            "action": "music"
+          },
+          "path": "/suno/submit/music",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "action": "MUSIC",
+        "kind": "submit",
+        "model": "suno_music",
+        "requestBody": {
+          "make_instrumental": false,
+          "mv": "chirp-v4",
+          "prompt": "An upbeat jazz song about morning coffee in Lisbon"
+        }
+      }
+    },
+    {
+      "name": "native decode batch",
+      "hook": "native",
+      "member": "decodeBatch",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "ids": [
+                "suno-task-1",
+                "suno-task-2"
+              ]
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/suno/fetch",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "kind": "query",
+        "taskIds": [
+          "suno-task-1",
+          "suno-task-2"
+        ]
+      }
+    },
+    {
+      "name": "native decode rejects action",
+      "hook": "native",
+      "member": "decodeSubmit",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "prompt": "An upbeat jazz song about morning coffee in Lisbon"
+            }
+          },
+          "method": "POST",
+          "params": {
+            "action": "video"
+          },
+          "path": "/suno/submit/video",
+          "query": {}
+        }
+      ],
+      "expectedError": "invalid_action"
+    },
+    {
+      "name": "build submit music",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_music",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+            "mv": "chirp-v4",
+            "tags": "jazz, upbeat",
+            "title": "Lisbon Mornings"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "MUSIC",
+        "body": {
+          "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+          "make_instrumental": false,
+          "mv": "chirp-v4",
+          "tags": "jazz, upbeat",
+          "title": "Lisbon Mornings"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer sk-suno-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://suno.example.com/suno/submit/MUSIC"
+      }
+    },
+    {
+      "name": "build submit rejects empty lyrics prompt",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "LYRICS",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_lyrics",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {},
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_lyrics",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "prompt_empty"
+    },
+    {
+      "name": "parse submit",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_music",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+            "mv": "chirp-v4",
+            "tags": "jazz, upbeat",
+            "title": "Lisbon Mornings"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "code": "success",
+            "data": "suno-task-1",
+            "message": ""
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "message": ""
+        },
+        "taskId": "suno-task-1"
+      }
+    },
+    {
+      "name": "parse submit rejects failure",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_music",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+            "mv": "chirp-v4",
+            "tags": "jazz, upbeat",
+            "title": "Lisbon Mornings"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "code": "fail",
+            "data": null,
+            "message": "insufficient credits"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expectedError": "insufficient credits"
+    },
+    {
+      "name": "usage facts music",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_music",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+            "mv": "chirp-v4",
+            "tags": "jazz, upbeat",
+            "title": "Lisbon Mornings"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "music",
+        "clips": 2
+      }
+    },
+    {
+      "name": "usage billing ratios is null",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "suno_music",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "gpt_description_prompt": "An upbeat jazz song about morning coffee in Lisbon",
+            "mv": "chirp-v4",
+            "tags": "jazz, upbeat",
+            "title": "Lisbon Mornings"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music",
+          "usagePurpose": "billing_ratios",
+          "userSetting": null
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "build batch query",
+      "hook": "buildBatchQueryRequest",
+      "args": [
+        {
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "tasks": [
+            {
+              "action": "MUSIC",
+              "apiKey": "sk-suno-0123456789abcdef",
+              "auth": {
+                "authHeader": "sk-suno-0123456789abcdef"
+              },
+              "authHeader": "sk-suno-0123456789abcdef",
+              "baseUrl": "https://suno.example.com",
+              "data": null,
+              "model": "suno_music",
+              "publicTaskId": "task_pub_0001",
+              "state": null,
+              "taskId": "suno-task-1",
+              "upstream": {
+                "kind": "vendor"
+              },
+              "upstreamModel": "suno_music"
+            },
+            {
+              "action": "LYRICS",
+              "apiKey": "sk-suno-0123456789abcdef",
+              "auth": {
+                "authHeader": "sk-suno-0123456789abcdef"
+              },
+              "authHeader": "sk-suno-0123456789abcdef",
+              "baseUrl": "https://suno.example.com",
+              "data": null,
+              "model": "suno_lyrics",
+              "publicTaskId": "task_pub_0001",
+              "state": null,
+              "taskId": "suno-task-2",
+              "upstream": {
+                "kind": "vendor"
+              },
+              "upstreamModel": "suno_lyrics"
+            }
+          ],
+          "upstream": {
+            "kind": "vendor"
+          }
+        },
+        [
+          {
+            "action": "MUSIC",
+            "apiKey": "sk-suno-0123456789abcdef",
+            "auth": {
+              "authHeader": "sk-suno-0123456789abcdef"
+            },
+            "authHeader": "sk-suno-0123456789abcdef",
+            "baseUrl": "https://suno.example.com",
+            "data": null,
+            "model": "suno_music",
+            "publicTaskId": "task_pub_0001",
+            "state": null,
+            "taskId": "suno-task-1",
+            "upstream": {
+              "kind": "vendor"
+            },
+            "upstreamModel": "suno_music"
+          },
+          {
+            "action": "LYRICS",
+            "apiKey": "sk-suno-0123456789abcdef",
+            "auth": {
+              "authHeader": "sk-suno-0123456789abcdef"
+            },
+            "authHeader": "sk-suno-0123456789abcdef",
+            "baseUrl": "https://suno.example.com",
+            "data": null,
+            "model": "suno_lyrics",
+            "publicTaskId": "task_pub_0001",
+            "state": null,
+            "taskId": "suno-task-2",
+            "upstream": {
+              "kind": "vendor"
+            },
+            "upstreamModel": "suno_lyrics"
+          }
+        ]
+      ],
+      "expected": {
+        "body": {
+          "ids": [
+            "suno-task-1",
+            "suno-task-2"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer sk-suno-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://suno.example.com/suno/fetch"
+      }
+    },
+    {
+      "name": "build query single",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "data": null,
+          "model": "suno_music",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "suno-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music"
+        }
+      ],
+      "expected": {
+        "body": {
+          "ids": [
+            "suno-task-1"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer sk-suno-0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://suno.example.com/suno/fetch"
+      }
+    },
+    {
+      "name": "parse batch result",
+      "hook": "parseBatchResult",
+      "args": [
+        {
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "tasks": [
+            {
+              "action": "MUSIC",
+              "apiKey": "sk-suno-0123456789abcdef",
+              "auth": {
+                "authHeader": "sk-suno-0123456789abcdef"
+              },
+              "authHeader": "sk-suno-0123456789abcdef",
+              "baseUrl": "https://suno.example.com",
+              "data": null,
+              "model": "suno_music",
+              "publicTaskId": "task_pub_0001",
+              "state": null,
+              "taskId": "suno-task-1",
+              "upstream": {
+                "kind": "vendor"
+              },
+              "upstreamModel": "suno_music"
+            }
+          ],
+          "upstream": {
+            "kind": "vendor"
+          }
+        },
+        {
+          "code": "success",
+          "data": [
+            {
+              "action": "MUSIC",
+              "data": [
+                {
+                  "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+                  "duration": 187.2,
+                  "id": "song-aaa111",
+                  "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+                  "model_name": "chirp-v4",
+                  "status": "complete",
+                  "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+                  "title": "Lisbon Mornings",
+                  "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+                },
+                {
+                  "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+                  "duration": 201.4,
+                  "id": "song-bbb222",
+                  "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+                  "model_name": "chirp-v4",
+                  "status": "complete",
+                  "text": "[Verse]\nSunlight on the tiles",
+                  "title": "Lisbon Mornings"
+                }
+              ],
+              "fail_reason": "",
+              "finish_time": 1700000190,
+              "progress": "100%",
+              "start_time": 1700000005,
+              "status": "SUCCESS",
+              "submit_time": 1700000000,
+              "task_id": "suno-task-1"
+            },
+            {
+              "action": "LYRICS",
+              "progress": "40%",
+              "status": "IN_PROGRESS",
+              "task_id": "suno-task-2"
+            }
+          ],
+          "message": ""
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": [
+        {
+          "action": "MUSIC",
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "finishTime": 1700000190,
+          "reason": "",
+          "startTime": 1700000005,
+          "status": "SUCCESS",
+          "submitTime": 1700000000,
+          "taskId": "suno-task-1"
+        },
+        {
+          "action": "LYRICS",
+          "data": null,
+          "finishTime": 0,
+          "reason": "",
+          "startTime": 0,
+          "status": "IN_PROGRESS",
+          "submitTime": 0,
+          "taskId": "suno-task-2"
+        }
+      ]
+    },
+    {
+      "name": "parse batch rejects failure",
+      "hook": "parseBatchResult",
+      "args": [
+        {
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "tasks": [
+            {
+              "action": "MUSIC",
+              "apiKey": "sk-suno-0123456789abcdef",
+              "auth": {
+                "authHeader": "sk-suno-0123456789abcdef"
+              },
+              "authHeader": "sk-suno-0123456789abcdef",
+              "baseUrl": "https://suno.example.com",
+              "data": null,
+              "model": "suno_music",
+              "publicTaskId": "task_pub_0001",
+              "state": null,
+              "taskId": "suno-task-1",
+              "upstream": {
+                "kind": "vendor"
+              },
+              "upstreamModel": "suno_music"
+            }
+          ],
+          "upstream": {
+            "kind": "vendor"
+          }
+        },
+        {
+          "code": "fail",
+          "message": "unauthorized"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 401
+        }
+      ],
+      "expectedError": "unauthorized"
+    },
+    {
+      "name": "usage on complete music",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "data": null,
+          "model": "suno_music",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "suno-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "suno-task-1"
+        },
+        [
+          {
+            "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+            "duration": 187.2,
+            "id": "song-aaa111",
+            "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+            "model_name": "chirp-v4",
+            "status": "complete",
+            "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+            "title": "Lisbon Mornings",
+            "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+          },
+          {
+            "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+            "duration": 201.4,
+            "id": "song-bbb222",
+            "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+            "model_name": "chirp-v4",
+            "status": "complete",
+            "text": "[Verse]\nSunlight on the tiles",
+            "title": "Lisbon Mornings"
+          }
+        ]
+      ],
+      "expected": {
+        "action": "music",
+        "clips": 2
+      }
+    },
+    {
+      "name": "usage on complete lyrics",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "data": null,
+          "model": "suno_music",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "suno-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "suno_music"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "suno-task-2"
+        },
+        {
+          "id": "lyr-1",
+          "text": "la la la",
+          "title": "Lullaby"
+        }
+      ],
+      "expected": {
+        "action": "lyrics",
+        "clips": 1
+      }
+    },
+    {
+      "name": "list artifacts",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "MUSIC",
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619",
+          "mimeType": "audio/mpeg",
+          "type": "audio"
+        },
+        {
+          "key": "cover-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619",
+          "type": "image"
+        },
+        {
+          "key": "audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8",
+          "mimeType": "audio/mpeg",
+          "type": "audio"
+        },
+        {
+          "key": "cover-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8",
+          "type": "image"
+        }
+      ]
+    },
+    {
+      "name": "build content request cover",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "artifactKey": "cover-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "suno-task-1"
+        }
+      ],
+      "expected": {
+        "credentialless": true,
+        "method": "GET",
+        "url": "https://cdn.suno.ai/image_song-bbb222.jpeg"
+      }
+    },
+    {
+      "name": "build content request rejects unknown",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "MUSIC",
+          "apiKey": "sk-suno-0123456789abcdef",
+          "artifactKey": "audio-deadbeef",
+          "auth": {
+            "authHeader": "sk-suno-0123456789abcdef"
+          },
+          "authHeader": "sk-suno-0123456789abcdef",
+          "baseUrl": "https://suno.example.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "suno-task-1"
+        }
+      ],
+      "expectedError": "artifact_not_found"
+    },
+    {
+      "name": "render events success",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8": {
+              "key": "audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8",
+              "mimeType": "audio/mpeg",
+              "type": "audio",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8?sig=YWJj\u0026exp=1700003600"
+            },
+            "audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619": {
+              "key": "audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619",
+              "mimeType": "audio/mpeg",
+              "type": "audio",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "method": "POST",
+          "model": "suno_music",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sunoapi",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "Lisbon Mornings\n[Verse]\nSteam rises from the cup\nTram bells ring the morning up\n\nLisbon Mornings\n[Verse]\nSunlight on the tiles\n\n\u003caudio controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/audio\u003e\n\n\u003caudio controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/audio\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render final music",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8": {
+              "key": "audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8",
+              "mimeType": "audio/mpeg",
+              "type": "audio",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8?sig=YWJj\u0026exp=1700003600"
+            },
+            "audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619": {
+              "key": "audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619",
+              "mimeType": "audio/mpeg",
+              "type": "audio",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An upbeat jazz song about morning coffee in Lisbon",
+              "metadata": {
+                "mv": "chirp-v4",
+                "tags": "jazz, upbeat",
+                "title": "Lisbon Mornings"
+              },
+              "model": "suno_music"
+            }
+          },
+          "method": "POST",
+          "model": "suno_music",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": [
+            {
+              "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+              "duration": 187.2,
+              "id": "song-aaa111",
+              "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+              "title": "Lisbon Mornings",
+              "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+            },
+            {
+              "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+              "duration": 201.4,
+              "id": "song-bbb222",
+              "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+              "model_name": "chirp-v4",
+              "status": "complete",
+              "text": "[Verse]\nSunlight on the tiles",
+              "title": "Lisbon Mornings"
+            }
+          ],
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sunoapi",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "sunoapi"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "Lisbon Mornings\n[Verse]\nSteam rises from the cup\nTram bells ring the morning up\n\nLisbon Mornings\n[Verse]\nSunlight on the tiles",
+                "type": "output_text"
+              },
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003caudio controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-a197e83430d58fd3f9aae1b1142f8ba16069f8eb5653f2fa62b447d4106a5619?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/audio\u003e",
+                "type": "output_text"
+              },
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003caudio controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/audio-472a19bf81cf561f58296b2731e6142a9d6fccd9845907259106efea22e2dbb8?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/audio\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "render final lyrics",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {},
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "suno_lyrics"
+            }
+          },
+          "method": "POST",
+          "model": "suno_lyrics",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": [
+            {
+              "id": "lyr-1",
+              "text": "la la la",
+              "title": "Lullaby"
+            }
+          ],
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "sunoapi",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "sunoapi"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "Lullaby\nla la la",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native render submit",
+      "hook": "native",
+      "member": "renderSubmit",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "method": "POST",
+          "params": {
+            "action": "music"
+          },
+          "path": "/suno/submit/music",
+          "query": {}
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "message": "submitted"
+          },
+          "fail_reason": "",
+          "platform": "sunoapi",
+          "progress": "",
+          "status": "SUBMITTED",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        }
+      ],
+      "expected": {
+        "code": "success",
+        "data": "task_pub_0001",
+        "message": "submitted"
+      }
+    },
+    {
+      "name": "native render tasks",
+      "hook": "native",
+      "member": "renderTasks",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "ids": [
+                "task_pub_0001"
+              ]
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/suno/fetch",
+          "query": {}
+        },
+        [
+          {
+            "created_at": 1700000000,
+            "data": [
+              {
+                "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+                "duration": 187.2,
+                "id": "song-aaa111",
+                "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+                "model_name": "chirp-v4",
+                "status": "complete",
+                "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+                "title": "Lisbon Mornings",
+                "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+              },
+              {
+                "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+                "duration": 201.4,
+                "id": "song-bbb222",
+                "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+                "model_name": "chirp-v4",
+                "status": "complete",
+                "text": "[Verse]\nSunlight on the tiles",
+                "title": "Lisbon Mornings"
+              }
+            ],
+            "fail_reason": "",
+            "finished_at": 1700000123,
+            "platform": "sunoapi",
+            "progress": "100%",
+            "status": "SUCCESS",
+            "task_id": "task_pub_0001",
+            "updated_at": 1700000123
+          },
+          {
+            "created_at": 1700000000,
+            "fail_reason": "",
+            "platform": "sunoapi",
+            "progress": "40%",
+            "status": "IN_PROGRESS",
+            "task_id": "task_pub_0001",
+            "updated_at": 1700000050
+          }
+        ]
+      ],
+      "expected": {
+        "code": "success",
+        "data": [
+          {
+            "created_at": 1700000000,
+            "data": [
+              {
+                "audio_url": "https://cdn.suno.ai/song-aaa111.mp3",
+                "duration": 187.2,
+                "id": "song-aaa111",
+                "image_url": "https://cdn.suno.ai/image_song-aaa111.jpeg",
+                "model_name": "chirp-v4",
+                "status": "complete",
+                "text": "[Verse]\nSteam rises from the cup\nTram bells ring the morning up",
+                "title": "Lisbon Mornings",
+                "video_url": "https://cdn.suno.ai/song-aaa111.mp4"
+              },
+              {
+                "audio_url": "https://cdn.suno.ai/song-bbb222.mp3",
+                "duration": 201.4,
+                "id": "song-bbb222",
+                "image_url": "https://cdn.suno.ai/image_song-bbb222.jpeg",
+                "model_name": "chirp-v4",
+                "status": "complete",
+                "text": "[Verse]\nSunlight on the tiles",
+                "title": "Lisbon Mornings"
+              }
+            ],
+            "fail_reason": "",
+            "finish_time": 1700000123,
+            "platform": "sunoapi",
+            "progress": "100%",
+            "status": "SUCCESS",
+            "submit_time": 1700000000,
+            "task_id": "task_pub_0001",
+            "updated_at": 1700000123
+          },
+          {
+            "created_at": 1700000000,
+            "data": null,
+            "fail_reason": "",
+            "finish_time": 0,
+            "platform": "sunoapi",
+            "progress": "40%",
+            "status": "IN_PROGRESS",
+            "submit_time": 1700000000,
+            "task_id": "task_pub_0001",
+            "updated_at": 1700000050
+          }
+        ],
+        "message": ""
+      }
+    }
+  ]
+}

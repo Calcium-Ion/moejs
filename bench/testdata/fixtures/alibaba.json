@@ -1,0 +1,2326 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode text-to-video",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "wan2.6-t2v",
+        "requestBody": {
+          "duration": 5,
+          "model": "wan2.6-t2v",
+          "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+          "size": "1280x720"
+        }
+      }
+    },
+    {
+      "name": "responses decode image edit wan2.7-image",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "Turn this photo into a watercolor painting",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/panda.png"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "wan2.7-image",
+              "n": 2,
+              "size": "1280*1280"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.7-image",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_image",
+        "kind": "submit",
+        "model": "wan2.7-image",
+        "requestBody": {
+          "images": [
+            "https://img.example.com/reference/panda.png"
+          ],
+          "model": "wan2.7-image",
+          "n": 2,
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nTurn this photo into a watercolor painting",
+          "size": "1280*1280"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects empty input",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [],
+              "model": "wan2.6-t2v"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "input is required"
+    },
+    {
+      "name": "video decode json image-to-video",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "image": "https://img.example.com/reference/panda.png",
+              "model": "wan2.6-i2v",
+              "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "resolution": "720p",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "wan2.6-i2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "wan2.6-i2v",
+        "requestBody": {
+          "image": "https://img.example.com/reference/panda.png",
+          "model": "wan2.6-i2v",
+          "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+          "resolution": "720P",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "video decode multipart fields",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "prompt": [
+                "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+              ],
+              "prompt_extend": [
+                "false"
+              ],
+              "seconds": [
+                "10"
+              ],
+              "size": [
+                "1920x1080"
+              ]
+            },
+            "files": [],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "wan2.6-t2v",
+        "requestBody": {
+          "model": "wan2.6-t2v",
+          "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+          "prompt_extend": false,
+          "seconds": 10,
+          "size": "1920x1080"
+        }
+      }
+    },
+    {
+      "name": "image decode qwen-image-plus",
+      "hook": "protocols",
+      "path": [
+        "openai_image",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "response_format": "url",
+              "size": "1024x1024"
+            }
+          },
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/images/generations",
+          "protocol": "openai_image",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_image",
+        "kind": "submit",
+        "model": "qwen-image-plus",
+        "requestBody": {
+          "model": "qwen-image-plus",
+          "n": 1,
+          "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+          "size": "1024x1024"
+        }
+      }
+    },
+    {
+      "name": "image decode edit requires image",
+      "hook": "protocols",
+      "path": [
+        "openai_image",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-edit",
+              "prompt": "make it night"
+            }
+          },
+          "method": "POST",
+          "model": "qwen-image-edit",
+          "operation": "edit",
+          "params": {},
+          "path": "/v1/images/generations",
+          "protocol": "openai_image",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "image is required"
+    },
+    {
+      "name": "build submit text-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "wan2.6-t2v",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "input": {
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+          },
+          "model": "wan2.6-t2v",
+          "parameters": {
+            "duration": 5,
+            "prompt_extend": true,
+            "size": "1280*720"
+          }
+        },
+        "headers": {
+          "Authorization": "Bearer sk-ali-0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json",
+          "X-DashScope-Async": "enable"
+        },
+        "method": "POST",
+        "url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis"
+      }
+    },
+    {
+      "name": "build submit qwen sync image",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "size": "1024x1024"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/images/generations",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-plus",
+            "n": 1,
+            "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-plus",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_image",
+        "body": {
+          "input": {
+            "messages": [
+              {
+                "content": [
+                  {
+                    "text": "一只戴着墨镜的柴犬在海边冲浪"
+                  }
+                ],
+                "role": "user"
+              }
+            ]
+          },
+          "model": "qwen-image-plus",
+          "parameters": {
+            "n": 1,
+            "size": "1024*1024"
+          }
+        },
+        "headers": {
+          "Authorization": "Bearer sk-ali-0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "responseType": "json",
+        "url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+      }
+    },
+    {
+      "name": "build submit wan2.7 async image edit",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "images": [
+                "https://img.example.com/reference/panda.png"
+              ],
+              "model": "wan2.7-image",
+              "n": 2,
+              "prompt": "Turn this photo into a watercolor painting",
+              "size": "1280*1280"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.7-image",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "images": [
+              "https://img.example.com/reference/panda.png"
+            ],
+            "model": "wan2.7-image",
+            "n": 2,
+            "prompt": "Turn this photo into a watercolor painting",
+            "size": "1280*1280"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.7-image",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_image",
+        "body": {
+          "input": {
+            "messages": [
+              {
+                "content": [
+                  {
+                    "image": "https://img.example.com/reference/panda.png"
+                  },
+                  {
+                    "text": "Turn this photo into a watercolor painting"
+                  }
+                ],
+                "role": "user"
+              }
+            ]
+          },
+          "model": "wan2.7-image",
+          "parameters": {
+            "n": 2,
+            "size": "1280*1280"
+          }
+        },
+        "headers": {
+          "Authorization": "Bearer sk-ali-0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json",
+          "X-DashScope-Async": "enable"
+        },
+        "method": "POST",
+        "responseType": "json",
+        "url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation"
+      }
+    },
+    {
+      "name": "build submit via gateway",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-gw-0123456789abcdef",
+          "auth": {
+            "authHeader": "Bearer sk-gw-0123456789abcdef"
+          },
+          "authHeader": "Bearer sk-gw-0123456789abcdef",
+          "baseUrl": "https://gateway.example.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "wan2.6-t2v",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "new_api"
+          },
+          "upstreamModel": "wan2.6-t2v",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "input": {
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+          },
+          "model": "wan2.6-t2v",
+          "parameters": {
+            "duration": 5,
+            "prompt_extend": true,
+            "size": "1280*720"
+          }
+        },
+        "headers": {
+          "Authorization": "Bearer sk-gw-0123456789abcdef",
+          "Content-Type": "application/json",
+          "X-DashScope-Async": "enable"
+        },
+        "method": "POST",
+        "url": "https://gateway.example.com/ali/api/v1/services/aigc/video-generation/video-synthesis"
+      }
+    },
+    {
+      "name": "build submit rejects unsupported resolution",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.2-t2v-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "wan2.2-t2v-plus",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "resolution": "720P"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.2-t2v-plus",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "wan2.2-t2v-plus resolution must be one of 480P, 1080P"
+    },
+    {
+      "name": "sse delta first event",
+      "hook": "parseSubmitEventDelta",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "size": "1024x1024"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-plus",
+            "n": 1,
+            "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-plus",
+          "userSetting": null
+        },
+        {
+          "data": "{\"output\":{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"Here is\"}]},\"finish_reason\":\"null\"}]},\"usage\":{\"image_count\":0},\"request_id\":\"req-sse-1\"}",
+          "event": "result",
+          "id": "1"
+        },
+        null
+      ],
+      "expected": {
+        "changes": [
+          {
+            "op": "set",
+            "path": [],
+            "value": {
+              "output": {
+                "choices": [],
+                "finished": false
+              }
+            }
+          },
+          {
+            "op": "set",
+            "path": [
+              "request_id"
+            ],
+            "value": "req-sse-1"
+          },
+          {
+            "op": "set",
+            "path": [
+              "usage"
+            ],
+            "value": {}
+          },
+          {
+            "op": "set",
+            "path": [
+              "usage",
+              "image_count"
+            ],
+            "value": 0
+          },
+          {
+            "op": "append",
+            "path": [
+              "output",
+              "choices"
+            ],
+            "value": {
+              "message": {
+                "content": [],
+                "role": "assistant"
+              }
+            }
+          },
+          {
+            "op": "append",
+            "path": [
+              "output",
+              "choices",
+              0,
+              "message",
+              "content"
+            ],
+            "value": {
+              "text": "Here is"
+            }
+          },
+          {
+            "op": "set",
+            "path": [
+              "output",
+              "finished"
+            ],
+            "value": false
+          }
+        ],
+        "done": false,
+        "state": {
+          "choices": [
+            {
+              "count": 1,
+              "finishReason": "",
+              "lastText": true
+            }
+          ],
+          "hasUsage": true
+        }
+      }
+    },
+    {
+      "name": "sse delta final event",
+      "hook": "parseSubmitEventDelta",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "size": "1024x1024"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-plus",
+            "n": 1,
+            "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-plus",
+          "userSetting": null
+        },
+        {
+          "data": "{\"output\":{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\" your image.\"},{\"image\":\"https://dashscope-result.oss.aliyuncs.com/img/1.png\"}]},\"finish_reason\":\"stop\"}]},\"usage\":{\"image_count\":1},\"request_id\":\"req-sse-1\"}",
+          "event": "result",
+          "id": "2"
+        },
+        {
+          "choices": [
+            {
+              "count": 1,
+              "finishReason": "",
+              "lastText": true
+            }
+          ],
+          "hasUsage": true
+        }
+      ],
+      "expected": {
+        "changes": [
+          {
+            "op": "set",
+            "path": [
+              "request_id"
+            ],
+            "value": "req-sse-1"
+          },
+          {
+            "op": "set",
+            "path": [
+              "usage",
+              "image_count"
+            ],
+            "value": 1
+          },
+          {
+            "op": "appendText",
+            "path": [
+              "output",
+              "choices",
+              0,
+              "message",
+              "content",
+              0,
+              "text"
+            ],
+            "value": " your image."
+          },
+          {
+            "op": "append",
+            "path": [
+              "output",
+              "choices",
+              0,
+              "message",
+              "content"
+            ],
+            "value": {
+              "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+            }
+          },
+          {
+            "op": "set",
+            "path": [
+              "output",
+              "choices",
+              0,
+              "finish_reason"
+            ],
+            "value": "stop"
+          },
+          {
+            "op": "set",
+            "path": [
+              "output",
+              "finished"
+            ],
+            "value": true
+          }
+        ],
+        "done": true,
+        "state": {
+          "choices": [
+            {
+              "count": 2,
+              "finishReason": "stop",
+              "lastText": false
+            }
+          ],
+          "hasUsage": true
+        }
+      }
+    },
+    {
+      "name": "sse delta rejects upstream error",
+      "hook": "parseSubmitEventDelta",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "size": "1024x1024"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-plus",
+            "n": 1,
+            "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-plus",
+          "userSetting": null
+        },
+        {
+          "data": "{\"code\":\"Throttling.RateQuota\",\"message\":\"Requests rate limit exceeded\"}",
+          "event": "error"
+        },
+        null
+      ],
+      "expectedError": "Throttling.RateQuota: Requests rate limit exceeded"
+    },
+    {
+      "name": "parse submit video task",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "wan2.6-t2v",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "output": {
+              "task_id": "ali-task-1",
+              "task_status": "PENDING"
+            },
+            "request_id": "req-ali-1"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "output": {
+            "task_id": "ali-task-1",
+            "task_status": "PENDING"
+          },
+          "request_id": "req-ali-1"
+        },
+        "taskId": "ali-task-1"
+      }
+    },
+    {
+      "name": "parse submit sync image immediate",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-plus",
+              "n": 1,
+              "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+              "size": "1024x1024"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-plus",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/images/generations",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-plus",
+            "n": 1,
+            "prompt": "一只戴着墨镜的柴犬在海边冲浪",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-plus",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "output": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": [
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                      }
+                    ],
+                    "role": "assistant"
+                  }
+                }
+              ]
+            },
+            "request_id": "req-ali-img",
+            "usage": {
+              "height": 1024,
+              "image_count": 1,
+              "width": 1024
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "immediate": {
+          "progress": "100%",
+          "status": "SUCCESS",
+          "url": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+        },
+        "taskData": {
+          "output": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "message": {
+                  "content": [
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                    }
+                  ],
+                  "role": "assistant"
+                }
+              }
+            ]
+          },
+          "request_id": "req-ali-img",
+          "usage": {
+            "height": 1024,
+            "image_count": 1,
+            "width": 1024
+          }
+        },
+        "taskId": "task_pub_0001"
+      }
+    },
+    {
+      "name": "parse submit rejects error envelope",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "wan2.6-t2v",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "code": "InvalidParameter",
+            "message": "The size is not supported",
+            "request_id": "req-ali-2"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 400
+        }
+      ],
+      "expectedError": "InvalidParameter: The size is not supported"
+    },
+    {
+      "name": "usage facts video",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "wan2.6-t2v",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "resolution": "720P",
+        "seconds": 5
+      }
+    },
+    {
+      "name": "usage facts qwen-image-3.0",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "qwen-image-3.0",
+              "n": 2,
+              "prompt": "A poster for a jazz festival",
+              "size": "1328*1328"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "qwen-image-3.0",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/images/generations",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "model": "qwen-image-3.0",
+            "n": 2,
+            "prompt": "A poster for a jazz festival",
+            "size": "1328*1328"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "qwen-image-3.0",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "image_count": 2,
+        "input_image_count": 0,
+        "output_image_type": "qima_output_1k"
+      }
+    },
+    {
+      "name": "usage billing ratios wan2.5 1080P",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "wan2.5-t2v-preview",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "model": "wan2.5-t2v-preview",
+            "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+            "resolution": "1080P"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.5-t2v-preview",
+          "usagePurpose": "billing_ratios",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "resolution-1080P": 3.3333333333333335,
+        "seconds": 10
+      }
+    },
+    {
+      "name": "build query",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.6-t2v",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Authorization": "Bearer sk-ali-0123456789abcdef0123456789abcdef"
+        },
+        "method": "GET",
+        "url": "https://dashscope.aliyuncs.com/api/v1/tasks/ali-task-1"
+      }
+    },
+    {
+      "name": "parse task succeeded video",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.6-t2v",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v"
+        },
+        {
+          "output": {
+            "end_time": "2023-11-14 22:15:00",
+            "submit_time": "2023-11-14 22:13:20",
+            "task_id": "ali-task-1",
+            "task_status": "SUCCEEDED",
+            "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+          },
+          "request_id": "req-ali-1",
+          "usage": {
+            "SR": "720P",
+            "duration": 5,
+            "video_count": 1
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "status": "SUCCESS",
+        "url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+      }
+    },
+    {
+      "name": "parse task failed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.6-t2v",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v"
+        },
+        {
+          "output": {
+            "code": "DataInspectionFailed",
+            "message": "Input data may contain inappropriate content.",
+            "task_id": "ali-task-1",
+            "task_status": "FAILED"
+          },
+          "request_id": "req-ali-1"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "task failed, code: DataInspectionFailed , message: Input data may contain inappropriate content.",
+        "status": "FAILURE"
+      }
+    },
+    {
+      "name": "parse task succeeded image choices",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.7-image",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-img",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.7-image"
+        },
+        {
+          "output": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "message": {
+                  "content": [
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                    },
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                    }
+                  ],
+                  "role": "assistant"
+                }
+              }
+            ],
+            "task_status": "SUCCEEDED"
+          },
+          "request_id": "req-ali-img",
+          "usage": {
+            "image_count": 2
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "status": "SUCCESS",
+        "url": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+      }
+    },
+    {
+      "name": "usage on complete video",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.6-t2v",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.6-t2v"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "ali-task-1"
+        },
+        {
+          "output": {
+            "end_time": "2023-11-14 22:15:00",
+            "submit_time": "2023-11-14 22:13:20",
+            "task_id": "ali-task-1",
+            "task_status": "SUCCEEDED",
+            "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+          },
+          "request_id": "req-ali-1",
+          "usage": {
+            "SR": "720P",
+            "duration": 5,
+            "video_count": 1
+          }
+        }
+      ],
+      "expected": {
+        "resolution": "720P",
+        "seconds": 5
+      }
+    },
+    {
+      "name": "usage on complete wan3.0 sums durations",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan3.0-video",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-3",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan3.0-video"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "ali-task-3"
+        },
+        {
+          "output": {
+            "task_status": "SUCCEEDED",
+            "video_url": "https://x/y.mp4"
+          },
+          "usage": {
+            "SR": "1080P",
+            "input_video_duration": 4,
+            "output_video_duration": 8
+          }
+        }
+      ],
+      "expected": {
+        "resolution": "1080P",
+        "seconds": 12
+      }
+    },
+    {
+      "name": "usage on complete image count",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "image_to_image",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "data": null,
+          "model": "wan2.7-image",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "ali-task-img",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "wan2.7-image"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "ali-task-img"
+        },
+        {
+          "output": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "message": {
+                  "content": [
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                    },
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                    }
+                  ],
+                  "role": "assistant"
+                }
+              }
+            ],
+            "task_status": "SUCCEEDED"
+          },
+          "request_id": "req-ali-img",
+          "usage": {
+            "image_count": 2
+          }
+        }
+      ],
+      "expected": {
+        "image_count": 2
+      }
+    },
+    {
+      "name": "render events success video",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "output": {
+              "end_time": "2023-11-14 22:15:00",
+              "submit_time": "2023-11-14 22:13:20",
+              "task_id": "ali-task-1",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+            },
+            "request_id": "req-ali-1",
+            "usage": {
+              "SR": "720P",
+              "duration": 5,
+              "video_count": 1
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "alibaba",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        {
+          "progress": null,
+          "status": "IN_PROGRESS"
+        }
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render events progress unchanged",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "duration": 5,
+              "input": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting",
+              "model": "wan2.6-t2v",
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.6-t2v",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "",
+          "platform": "alibaba",
+          "progress": "",
+          "status": "IN_PROGRESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        },
+        {
+          "progress": null,
+          "status": "IN_PROGRESS"
+        }
+      ],
+      "expected": {
+        "done": false,
+        "events": [
+          {
+            "message": "in_progress",
+            "progress": 0,
+            "type": "progress"
+          }
+        ],
+        "state": {
+          "progress": 0,
+          "status": "IN_PROGRESS"
+        }
+      }
+    },
+    {
+      "name": "render final images",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "image-1": {
+              "key": "image-1",
+              "type": "image",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-1?sig=YWJj\u0026exp=1700003600"
+            },
+            "image-2": {
+              "key": "image-2",
+              "type": "image",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-2?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "images": [
+                "https://img.example.com/reference/panda.png"
+              ],
+              "model": "wan2.7-image",
+              "n": 2,
+              "prompt": "Turn this photo into a watercolor painting",
+              "size": "1280*1280"
+            }
+          },
+          "method": "POST",
+          "model": "wan2.7-image",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "output": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": [
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                      },
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                      }
+                    ],
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "task_status": "SUCCEEDED"
+            },
+            "request_id": "req-ali-img",
+            "usage": {
+              "image_count": 2
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "alibaba",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "ali"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "![Image 1](\u003chttps://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-1?sig=YWJj\u0026exp=1700003600\u003e)\n\n![Image 2](\u003chttps://gateway.example.com/v1/tasks/task_pub_0001/artifacts/image-2?sig=YWJj\u0026exp=1700003600\u003e)",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native create video task",
+      "hook": "native",
+      "member": "createVideoTask",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": {
+                "img_url": "https://img.example.com/reference/panda.png",
+                "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+              },
+              "model": "wan2.6-i2v",
+              "parameters": {
+                "duration": 5,
+                "prompt_extend": true,
+                "resolution": "720p"
+              }
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/ali/api/v1/services/aigc/video-generation/video-synthesis",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "wan2.6-i2v",
+        "requestBody": {
+          "image": "https://img.example.com/reference/panda.png",
+          "metadata": {
+            "input": {
+              "img_url": "https://img.example.com/reference/panda.png",
+              "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+            },
+            "parameters": {
+              "duration": 5,
+              "prompt_extend": true,
+              "resolution": "720P"
+            }
+          },
+          "model": "wan2.6-i2v",
+          "prompt": "A giant panda practising tai chi in a misty bamboo forest at dawn, cinematic lighting"
+        }
+      }
+    },
+    {
+      "name": "native create image task sync",
+      "hook": "native",
+      "member": "createImageTask",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": {
+                "messages": [
+                  {
+                    "content": [
+                      {
+                        "text": "a cat"
+                      }
+                    ],
+                    "role": "user"
+                  }
+                ]
+              },
+              "model": "qwen-image-plus",
+              "parameters": {
+                "n": 1,
+                "size": "1024*1024"
+              }
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/ali/api/v1/services/aigc/multimodal-generation/generation",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "kind": "submit",
+        "model": "qwen-image-plus",
+        "requestBody": {
+          "metadata": {
+            "input": {
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "a cat"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ]
+            },
+            "parameters": {
+              "n": 1,
+              "size": "1024*1024"
+            },
+            "upstream_mode": "sync"
+          },
+          "model": "qwen-image-plus"
+        }
+      }
+    },
+    {
+      "name": "native task status",
+      "hook": "native",
+      "member": "taskStatus",
+      "args": [
+        {
+          "body": null,
+          "method": "GET",
+          "params": {
+            "task_id": "task_pub_0001"
+          },
+          "path": "/ali/api/v1/tasks/task_pub_0001",
+          "query": {}
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "output": {
+              "end_time": "2023-11-14 22:15:00",
+              "submit_time": "2023-11-14 22:13:20",
+              "task_id": "ali-task-1",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+            },
+            "request_id": "req-ali-1",
+            "usage": {
+              "SR": "720P",
+              "duration": 5,
+              "video_count": 1
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "alibaba",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "output": {
+          "end_time": "2023-11-14 22:15:00",
+          "submit_time": "2023-11-14 22:13:20",
+          "task_id": "task_pub_0001",
+          "task_status": "SUCCEEDED",
+          "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+        },
+        "request_id": "req-ali-1",
+        "usage": {
+          "SR": "720P",
+          "duration": 5,
+          "video_count": 1
+        }
+      }
+    },
+    {
+      "name": "video render",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "output": {
+              "end_time": "2023-11-14 22:15:00",
+              "submit_time": "2023-11-14 22:13:20",
+              "task_id": "ali-task-1",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+            },
+            "request_id": "req-ali-1",
+            "usage": {
+              "SR": "720P",
+              "duration": 5,
+              "video_count": 1
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "alibaba",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "status": "completed"
+      }
+    },
+    {
+      "name": "image render",
+      "hook": "protocols",
+      "path": [
+        "openai_image",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_image"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "output": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": [
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                      },
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                      }
+                    ],
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "task_status": "SUCCEEDED"
+            },
+            "request_id": "req-ali-img",
+            "usage": {
+              "image_count": 2
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "alibaba",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "created": 1700000000,
+        "data": [
+          {
+            "url": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+          },
+          {
+            "url": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+          }
+        ],
+        "metadata": {
+          "output": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "message": {
+                  "content": [
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                    },
+                    {
+                      "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                    }
+                  ],
+                  "role": "assistant"
+                }
+              }
+            ],
+            "task_status": "SUCCEEDED"
+          },
+          "request_id": "req-ali-img",
+          "usage": {
+            "image_count": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "list artifacts images",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "image_to_image",
+          "data": {
+            "output": {
+              "choices": [
+                {
+                  "finish_reason": "stop",
+                  "message": {
+                    "content": [
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/1.png"
+                      },
+                      {
+                        "image": "https://dashscope-result.oss.aliyuncs.com/img/2.png"
+                      }
+                    ],
+                    "role": "assistant"
+                  }
+                }
+              ],
+              "task_status": "SUCCEEDED"
+            },
+            "request_id": "req-ali-img",
+            "usage": {
+              "image_count": 2
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "image-1",
+          "type": "image"
+        },
+        {
+          "key": "image-2",
+          "type": "image"
+        }
+      ]
+    },
+    {
+      "name": "build content request video",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "sk-ali-0123456789abcdef0123456789abcdef",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "sk-ali-0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "sk-ali-0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://dashscope.aliyuncs.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "output": {
+              "end_time": "2023-11-14 22:15:00",
+              "submit_time": "2023-11-14 22:13:20",
+              "task_id": "ali-task-1",
+              "task_status": "SUCCEEDED",
+              "video_url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+            },
+            "request_id": "req-ali-1",
+            "usage": {
+              "SR": "720P",
+              "duration": 5,
+              "video_count": 1
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "ali-task-1"
+        }
+      ],
+      "expected": {
+        "credentialless": true,
+        "method": "GET",
+        "url": "https://dashscope-result.oss.aliyuncs.com/video/abc.mp4?Expires=1700003600\u0026Signature=x"
+      }
+    }
+  ]
+}

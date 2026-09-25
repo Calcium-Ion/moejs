@@ -1,0 +1,1391 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode text",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "MiniMax-Hailuo-2.3",
+        "requestBody": {
+          "duration": 6,
+          "metadata": {},
+          "model": "MiniMax-Hailuo-2.3",
+          "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+          "size": "1080p"
+        }
+      }
+    },
+    {
+      "name": "responses decode first and last frame",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A lighthouse keeper walks along the cliff as a storm rolls in",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/first.jpg"
+                      },
+                      "type": "input_image"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/last.jpg"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "MiniMax-Hailuo-02",
+              "seconds": 6
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-02",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "MiniMax-Hailuo-02",
+        "requestBody": {
+          "duration": 6,
+          "images": [
+            "https://img.example.com/reference/first.jpg",
+            "https://img.example.com/reference/last.jpg"
+          ],
+          "metadata": {
+            "first_frame_image": "https://img.example.com/reference/first.jpg",
+            "last_frame_image": "https://img.example.com/reference/last.jpg"
+          },
+          "model": "MiniMax-Hailuo-02",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nA lighthouse keeper walks along the cliff as a storm rolls in"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects missing input",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "MiniMax-Hailuo-2.3"
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "input is required"
+    },
+    {
+      "name": "video decode rejects 10s 1080P",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "MiniMax-Hailuo-2.3",
+              "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "resolution": "1080P",
+              "seconds": 10
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "MiniMax-Hailuo-2.3 duration 10 only allows resolution 768P"
+    },
+    {
+      "name": "video decode image 10s 512P",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input_reference": "https://img.example.com/reference/first.jpg",
+              "model": "MiniMax-Hailuo-02",
+              "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "resolution": "512P",
+              "seconds": 10
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-02",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "MiniMax-Hailuo-02",
+        "requestBody": {
+          "duration": 10,
+          "input_reference": "https://img.example.com/reference/first.jpg",
+          "metadata": {
+            "first_frame_image": "https://img.example.com/reference/first.jpg"
+          },
+          "model": "MiniMax-Hailuo-02",
+          "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+          "resolution": "512P",
+          "seconds": 10
+        }
+      }
+    },
+    {
+      "name": "video decode multipart file",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "prompt": [
+                "A lighthouse keeper walks along the cliff as a storm rolls in"
+              ],
+              "seconds": [
+                "6"
+              ]
+            },
+            "files": [
+              {
+                "field": "input_reference",
+                "filename": "f.jpg",
+                "mimeType": "image/jpeg",
+                "ref": "request_file:input_reference:0",
+                "size": 2048
+              }
+            ],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-02",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "MiniMax-Hailuo-02",
+        "requestBody": {
+          "duration": 6,
+          "metadata": {
+            "first_frame_image": {
+              "__fileRef": "request_file:input_reference",
+              "encoding": "dataUrl",
+              "maxBytes": 20971520
+            }
+          },
+          "model": "MiniMax-Hailuo-02",
+          "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+          "seconds": 6
+        }
+      }
+    },
+    {
+      "name": "build submit v1 image-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 6,
+            "images": [
+              "https://img.example.com/reference/first.jpg"
+            ],
+            "metadata": {
+              "first_frame_image": "https://img.example.com/reference/first.jpg"
+            },
+            "model": "MiniMax-Hailuo-2.3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+            "size": "1080p"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "body": {
+          "duration": 6,
+          "first_frame_image": "https://img.example.com/reference/first.jpg",
+          "model": "MiniMax-Hailuo-2.3",
+          "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+          "resolution": "1080P"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.minimax.chat/v1/video_generation"
+      }
+    },
+    {
+      "name": "build submit H3 reference video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-H3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "metadata": {
+              "aigc_watermark": false,
+              "ratio": "16:9",
+              "reference_video": "https://img.example.com/reference/ref.mp4",
+              "resolution": "2K"
+            },
+            "model": "MiniMax-H3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "body": {
+          "aigc_watermark": false,
+          "content": [
+            {
+              "text": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "type": "text"
+            },
+            {
+              "role": "reference_video",
+              "type": "video_url",
+              "video_url": {
+                "url": "https://img.example.com/reference/ref.mp4"
+              }
+            }
+          ],
+          "duration": 5,
+          "model": "MiniMax-H3",
+          "ratio": "16:9",
+          "resolution": "2K"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.minimax.chat/v2/video_generation"
+      }
+    },
+    {
+      "name": "build submit H3 rejects duration",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-H3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 3,
+            "model": "MiniMax-H3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "MiniMax-H3 duration must be an integer between 4 and 15 seconds"
+    },
+    {
+      "name": "parse submit v1",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 6,
+            "images": [
+              "https://img.example.com/reference/first.jpg"
+            ],
+            "metadata": {
+              "first_frame_image": "https://img.example.com/reference/first.jpg"
+            },
+            "model": "MiniMax-Hailuo-2.3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+            "size": "1080p"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "base_resp": {
+              "status_code": 0,
+              "status_msg": "success"
+            },
+            "task_id": "204312345678901234"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "base_resp": {
+            "status_code": 0,
+            "status_msg": "success"
+          },
+          "task_id": "204312345678901234"
+        },
+        "taskId": "204312345678901234"
+      }
+    },
+    {
+      "name": "parse submit v1 rejects base_resp",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 6,
+            "images": [
+              "https://img.example.com/reference/first.jpg"
+            ],
+            "metadata": {
+              "first_frame_image": "https://img.example.com/reference/first.jpg"
+            },
+            "model": "MiniMax-Hailuo-2.3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+            "size": "1080p"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "base_resp": {
+              "status_code": 1002,
+              "status_msg": "rate limit exceeded"
+            },
+            "task_id": ""
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expectedError": "rate limit exceeded"
+    },
+    {
+      "name": "parse submit H3 rejects api error",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-H3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "metadata": {
+              "aigc_watermark": false,
+              "ratio": "16:9",
+              "reference_video": "https://img.example.com/reference/ref.mp4",
+              "resolution": "2K"
+            },
+            "model": "MiniMax-H3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "error": {
+              "http_code": 429,
+              "message": "Too many requests"
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 429
+        }
+      ],
+      "expectedError": "Too many requests"
+    },
+    {
+      "name": "usage facts v1",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 6,
+            "images": [
+              "https://img.example.com/reference/first.jpg"
+            ],
+            "metadata": {
+              "first_frame_image": "https://img.example.com/reference/first.jpg"
+            },
+            "model": "MiniMax-Hailuo-2.3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in",
+            "size": "1080p"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "input_images": 0,
+        "input_video_seconds": 0,
+        "resolution": "1080P",
+        "seconds": 6
+      }
+    },
+    {
+      "name": "usage facts H3",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "MiniMax-H3",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "metadata": {
+              "aigc_watermark": false,
+              "ratio": "16:9",
+              "reference_video": "https://img.example.com/reference/ref.mp4",
+              "resolution": "2K"
+            },
+            "model": "MiniMax-H3",
+            "prompt": "A lighthouse keeper walks along the cliff as a storm rolls in"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "input_images": 0,
+        "input_video_seconds": 15,
+        "resolution": "2K",
+        "seconds": 5
+      }
+    },
+    {
+      "name": "build query v1",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-Hailuo-2.3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "204312345678901234",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+        },
+        "method": "GET",
+        "url": "https://api.minimax.chat/v1/query/video_generation?task_id=204312345678901234"
+      }
+    },
+    {
+      "name": "build query H3",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-H3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "h3-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+        },
+        "method": "GET",
+        "url": "https://api.minimax.chat/v2/query/video_generation/h3-task-1"
+      }
+    },
+    {
+      "name": "parse task v1 success",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-Hailuo-2.3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "204312345678901234",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3"
+        },
+        {
+          "base_resp": {
+            "status_code": 0,
+            "status_msg": "success"
+          },
+          "file_id": "205312345678901234",
+          "status": "Success",
+          "task_id": "204312345678901234",
+          "video_height": 1080,
+          "video_width": 1920
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "progress": "100%",
+        "reason": "",
+        "status": "SUCCESS"
+      }
+    },
+    {
+      "name": "parse task v1 processing",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-Hailuo-2.3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "204312345678901234",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3"
+        },
+        {
+          "base_resp": {
+            "status_code": 0,
+            "status_msg": "success"
+          },
+          "status": "Processing",
+          "task_id": "204312345678901234"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "progress": "50%",
+        "reason": "",
+        "status": "IN_PROGRESS"
+      }
+    },
+    {
+      "name": "parse task H3 success",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-H3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "h3-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3"
+        },
+        {
+          "task": {
+            "content": {
+              "url": "https://cdn.minimax.chat/video/h3.mp4?sig=abc"
+            },
+            "id": "h3-task-1",
+            "resolution": "2K",
+            "status": "succeeded",
+            "usage": {
+              "input_image_count": 2,
+              "input_seconds": 0,
+              "output_seconds": 5
+            }
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "progress": "100%",
+        "status": "SUCCESS",
+        "url": "https://cdn.minimax.chat/video/h3.mp4?sig=abc"
+      }
+    },
+    {
+      "name": "parse task H3 server error throws",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-H3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "h3-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3"
+        },
+        {
+          "error": {
+            "http_code": 503,
+            "message": "service unavailable"
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 503
+        }
+      ],
+      "expectedError": "service unavailable"
+    },
+    {
+      "name": "usage on complete v1 resolution",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-Hailuo-2.3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "204312345678901234",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-Hailuo-2.3"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "204312345678901234"
+        },
+        {
+          "base_resp": {
+            "status_code": 0,
+            "status_msg": "success"
+          },
+          "file_id": "205312345678901234",
+          "status": "Success",
+          "task_id": "204312345678901234",
+          "video_height": 1080,
+          "video_width": 1920
+        }
+      ],
+      "expected": {
+        "resolution": "1080P"
+      }
+    },
+    {
+      "name": "usage on complete H3",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "data": null,
+          "model": "MiniMax-H3",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "h3-task-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "MiniMax-H3"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "h3-task-1"
+        },
+        {
+          "task": {
+            "content": {
+              "url": "https://cdn.minimax.chat/video/h3.mp4?sig=abc"
+            },
+            "id": "h3-task-1",
+            "resolution": "2K",
+            "status": "succeeded",
+            "usage": {
+              "input_image_count": 2,
+              "input_seconds": 0,
+              "output_seconds": 5
+            }
+          }
+        }
+      ],
+      "expected": {
+        "input_images": 2,
+        "input_video_seconds": 0,
+        "resolution": "2K",
+        "seconds": 5
+      }
+    },
+    {
+      "name": "render events failure",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "task failed",
+          "finished_at": 1700000123,
+          "platform": "hailuo",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "code": "task_failed",
+            "message": "task failed",
+            "type": "error"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "FAILURE"
+        }
+      }
+    },
+    {
+      "name": "render final",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A lighthouse keeper walks along the cliff as a storm rolls in",
+              "model": "MiniMax-Hailuo-2.3",
+              "seconds": 6,
+              "size": "1080p"
+            }
+          },
+          "method": "POST",
+          "model": "MiniMax-Hailuo-2.3",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "base_resp": {
+              "status_code": 0,
+              "status_msg": "success"
+            },
+            "file_id": "205312345678901234",
+            "status": "Success",
+            "task_id": "204312345678901234",
+            "video_height": 1080,
+            "video_width": 1920
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "hailuo",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "hailuo"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "video render base_resp error",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "base_resp": {
+              "status_code": 1026,
+              "status_msg": "sensitive content"
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "hailuo",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "error": {
+          "code": "1026",
+          "message": "sensitive content"
+        },
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "list artifacts file id",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "image_to_video",
+          "data": {
+            "base_resp": {
+              "status_code": 0,
+              "status_msg": "success"
+            },
+            "file_id": "205312345678901234",
+            "status": "Success",
+            "task_id": "204312345678901234",
+            "video_height": 1080,
+            "video_width": 1920
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "video",
+          "mimeType": "video/mp4",
+          "type": "video"
+        }
+      ]
+    },
+    {
+      "name": "build content request file download",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+          },
+          "authHeader": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token",
+          "baseUrl": "https://api.minimax.chat",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "base_resp": {
+              "status_code": 0,
+              "status_msg": "success"
+            },
+            "file_id": "205312345678901234",
+            "status": "Success",
+            "task_id": "204312345678901234",
+            "video_height": 1080,
+            "video_width": 1920
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "204312345678901234"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "video/*",
+          "Authorization": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.minimax-test-token"
+        },
+        "method": "GET",
+        "url": "https://api.minimax.chat/v1/files/download?file_id=205312345678901234"
+      }
+    }
+  ]
+}

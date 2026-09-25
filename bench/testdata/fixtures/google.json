@@ -1,0 +1,1286 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode text-to-video",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "veo-3.0-generate-001",
+        "requestBody": {
+          "duration": 8,
+          "metadata": {
+            "resolution": "1080p"
+          },
+          "model": "veo-3.0-generate-001",
+          "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+          "size": "1920x1080"
+        }
+      }
+    },
+    {
+      "name": "responses decode image-to-video data url",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "veo-3.0-generate-001",
+              "seconds": 8
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "veo-3.0-generate-001",
+        "requestBody": {
+          "duration": 8,
+          "images": [
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+          ],
+          "metadata": {},
+          "model": "veo-3.0-generate-001",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nDrone shot over a glacier lagoon at golden hour, icebergs glowing"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects http image",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "image": "https://img.example.com/a.png",
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001"
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "input image must be a data URL or base64 value"
+    },
+    {
+      "name": "video decode json",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "veo-3.0-generate-001",
+              "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "resolution": "720p",
+              "seconds": 6
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "veo-3.0-generate-001",
+        "requestBody": {
+          "duration": 6,
+          "model": "veo-3.0-generate-001",
+          "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+          "resolution": "720p",
+          "seconds": 6
+        }
+      }
+    },
+    {
+      "name": "video decode multipart with file",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "metadata": [
+                "{\"resolution\":\"1080p\"}"
+              ],
+              "prompt": [
+                "Drone shot over a glacier lagoon at golden hour, icebergs glowing"
+              ],
+              "seconds": [
+                "8"
+              ]
+            },
+            "files": [
+              {
+                "field": "input_reference",
+                "filename": "frame.png",
+                "mimeType": "image/png",
+                "ref": "request_file:input_reference:0",
+                "size": 12345
+              }
+            ],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "veo-3.0-generate-001",
+        "requestBody": {
+          "duration": 8,
+          "images": [
+            {
+              "__fileRef": "request_file:input_reference",
+              "encoding": "base64",
+              "maxBytes": 20971520
+            }
+          ],
+          "metadata": {
+            "resolution": "1080p"
+          },
+          "model": "veo-3.0-generate-001",
+          "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+          "seconds": 8
+        }
+      }
+    },
+    {
+      "name": "video decode rejects seconds",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "veo-3.0-generate-001",
+              "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "seconds must be one of 4, 6, or 8"
+    },
+    {
+      "name": "build submit text-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "metadata": {
+              "resolution": "1080p"
+            },
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "userSetting": {
+            "geminiVersion": "v1beta"
+          }
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "instances": [
+            {
+              "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing"
+            }
+          ],
+          "parameters": {
+            "aspectRatio": "16:9",
+            "durationSeconds": 8,
+            "numberOfVideos": 1,
+            "resolution": "1080p"
+          }
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "x-goog-api-key": "google-test-api-key-0123456789abcdef"
+        },
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/veo-3.0-generate-001:predictLongRunning"
+      }
+    },
+    {
+      "name": "build submit image-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "images": [
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            ],
+            "metadata": {},
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "body": {
+          "instances": [
+            {
+              "image": {
+                "inlineData": {
+                  "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                  "mimeType": "image/png"
+                }
+              },
+              "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing"
+            }
+          ],
+          "parameters": {
+            "durationSeconds": 8,
+            "numberOfVideos": 1
+          }
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "x-goog-api-key": "google-test-api-key-0123456789abcdef"
+        },
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/veo-3.0-generate-001:predictLongRunning"
+      }
+    },
+    {
+      "name": "parse submit operation",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "metadata": {
+              "resolution": "1080p"
+            },
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "name": "models/veo-3.0-generate-001/operations/abc123def456"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "name": "models/veo-3.0-generate-001/operations/abc123def456"
+        },
+        "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+      }
+    },
+    {
+      "name": "parse submit done immediate",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "metadata": {
+              "resolution": "1080p"
+            },
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "immediate": {
+          "progress": "100%",
+          "remoteUrl": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media",
+          "status": "SUCCESS",
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+        },
+        "taskData": {
+          "done": true,
+          "name": "models/veo-3.0-generate-001/operations/abc123def456",
+          "response": {
+            "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+            "generateVideoResponse": {
+              "generatedVideos": [
+                {
+                  "video": {
+                    "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+      }
+    },
+    {
+      "name": "parse submit rejects missing name",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "metadata": {
+              "resolution": "1080p"
+            },
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "error": {
+              "code": 400,
+              "message": "Invalid argument"
+            }
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expectedError": "missing operation name"
+    },
+    {
+      "name": "usage facts",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 8,
+            "metadata": {
+              "resolution": "1080p"
+            },
+            "model": "veo-3.0-generate-001",
+            "prompt": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "resolution": "1080p",
+        "seconds": 8
+      }
+    },
+    {
+      "name": "build query",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "data": null,
+          "model": "veo-3.0-generate-001",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "x-goog-api-key": "google-test-api-key-0123456789abcdef"
+        },
+        "method": "GET",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/veo-3.0-generate-001/operations/abc123def456"
+      }
+    },
+    {
+      "name": "parse task in progress",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "data": null,
+          "model": "veo-3.0-generate-001",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001"
+        },
+        {
+          "name": "models/veo-3.0-generate-001/operations/abc123def456"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "progress": "50%",
+        "status": "IN_PROGRESS"
+      }
+    },
+    {
+      "name": "parse task done",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "data": null,
+          "model": "veo-3.0-generate-001",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001"
+        },
+        {
+          "done": true,
+          "name": "models/veo-3.0-generate-001/operations/abc123def456",
+          "response": {
+            "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+            "generateVideoResponse": {
+              "generatedVideos": [
+                {
+                  "video": {
+                    "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "progress": "100%",
+        "remoteUrl": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media",
+        "status": "SUCCESS",
+        "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+      }
+    },
+    {
+      "name": "parse task error",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "data": null,
+          "model": "veo-3.0-generate-001",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001"
+        },
+        {
+          "done": true,
+          "error": {
+            "code": 3,
+            "message": "Prompt violates usage guidelines"
+          },
+          "name": "models/veo-3.0-generate-001/operations/abc123def456"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "progress": "100%",
+        "reason": "Prompt violates usage guidelines",
+        "status": "FAILURE"
+      }
+    },
+    {
+      "name": "usage on complete is null",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "data": null,
+          "model": "veo-3.0-generate-001",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "veo-3.0-generate-001"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+        },
+        {
+          "done": true,
+          "name": "models/veo-3.0-generate-001/operations/abc123def456",
+          "response": {
+            "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+            "generateVideoResponse": {
+              "generatedVideos": [
+                {
+                  "video": {
+                    "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "render events success",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "google",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render events failure",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "Prompt violates usage guidelines",
+          "finished_at": 1700000123,
+          "platform": "google",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        {
+          "progress": 50,
+          "status": "IN_PROGRESS"
+        }
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "code": "task_failed",
+            "message": "Prompt violates usage guidelines",
+            "type": "error"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "FAILURE"
+        }
+      }
+    },
+    {
+      "name": "render final",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "Drone shot over a glacier lagoon at golden hour, icebergs glowing",
+              "model": "veo-3.0-generate-001",
+              "resolution": "1080p",
+              "seconds": 8,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "veo-3.0-generate-001",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "google",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "gemini"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "video render",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "google",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "id": "task_pub_0001",
+        "model": "veo-3.0-generate-001",
+        "object": "video",
+        "progress": 100,
+        "status": "completed"
+      }
+    },
+    {
+      "name": "list artifacts",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "text_to_video",
+          "data": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "video",
+          "type": "video"
+        }
+      ]
+    },
+    {
+      "name": "build content request",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "google-test-api-key-0123456789abcdef",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "google-test-api-key-0123456789abcdef"
+          },
+          "authHeader": "google-test-api-key-0123456789abcdef",
+          "baseUrl": "https://generativelanguage.googleapis.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "done": true,
+            "name": "models/veo-3.0-generate-001/operations/abc123def456",
+            "response": {
+              "@type": "type.googleapis.com/google.ai.generativelanguage.v1beta.PredictLongRunningResponse",
+              "generateVideoResponse": {
+                "generatedVideos": [
+                  {
+                    "video": {
+                      "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "bW9kZWxzL3Zlby0zLjAtZ2VuZXJhdGUtMDAxL29wZXJhdGlvbnMvYWJjMTIzZGVmNDU2"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "x-goog-api-key": "google-test-api-key-0123456789abcdef"
+        },
+        "method": "GET",
+        "url": "https://generativelanguage.googleapis.com/v1beta/files/abc:download?alt=media"
+      }
+    }
+  ]
+}

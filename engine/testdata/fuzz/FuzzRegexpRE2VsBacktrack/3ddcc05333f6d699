@@ -1,0 +1,4 @@
+go test fuzz v1
+string("[\\s-0-A]")
+string("y")
+string("1")

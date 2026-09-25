@@ -1,0 +1,1265 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode q2 text",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "viduq2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "viduq2",
+        "requestBody": {
+          "duration": 5,
+          "model": "viduq2",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "size": "1920x1080"
+        }
+      }
+    },
+    {
+      "name": "responses decode 2.0 first tail",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "An astronaut planting a flag on a candy-colored planet",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/astronaut.png"
+                      },
+                      "type": "input_image"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/astronaut-end.png"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "vidu2.0",
+              "seconds": 4
+            }
+          },
+          "method": "POST",
+          "model": "vidu2.0",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "first_tail_to_video",
+        "kind": "submit",
+        "model": "vidu2.0",
+        "requestBody": {
+          "duration": 4,
+          "images": [
+            "https://img.example.com/reference/astronaut.png",
+            "https://img.example.com/reference/astronaut-end.png"
+          ],
+          "model": "vidu2.0",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nAn astronaut planting a flag on a candy-colored planet"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects 2.0 text",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "vidu2.0"
+            }
+          },
+          "method": "POST",
+          "model": "vidu2.0",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "vidu2.0 does not support text-to-video"
+    },
+    {
+      "name": "video decode q1 image",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "image": "https://img.example.com/reference/astronaut.png",
+              "model": "viduq1",
+              "prompt": "An astronaut planting a flag on a candy-colored planet",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "viduq1",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "viduq1",
+        "requestBody": {
+          "duration": 5,
+          "image": "https://img.example.com/reference/astronaut.png",
+          "images": [
+            "https://img.example.com/reference/astronaut.png"
+          ],
+          "model": "viduq1",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "1080p",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "video decode rejects q1 duration",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "viduq1",
+              "prompt": "An astronaut planting a flag on a candy-colored planet",
+              "seconds": 8
+            }
+          },
+          "method": "POST",
+          "model": "viduq1",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "viduq1 duration must be 5"
+    },
+    {
+      "name": "video decode multipart file",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "metadata": [
+                "{\"resolution\":\"720p\"}"
+              ],
+              "prompt": [
+                "An astronaut planting a flag on a candy-colored planet"
+              ],
+              "seconds": [
+                "5"
+              ]
+            },
+            "files": [
+              {
+                "field": "input_reference",
+                "filename": "a.png",
+                "mimeType": "image/png",
+                "ref": "request_file:input_reference:0",
+                "size": 1234
+              }
+            ],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "viduq2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "viduq2",
+        "requestBody": {
+          "duration": 5,
+          "images": [
+            {
+              "__fileRef": "request_file:input_reference",
+              "encoding": "dataUrl",
+              "maxBytes": 15728640
+            }
+          ],
+          "metadata": {
+            "resolution": "720p"
+          },
+          "model": "viduq2",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "720p",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "build submit image-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "images": [
+              "https://img.example.com/reference/astronaut.png"
+            ],
+            "metadata": {
+              "bgm": false,
+              "resolution": "720p",
+              "seed": 42
+            },
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "body": {
+          "duration": 5,
+          "images": [
+            "https://img.example.com/reference/astronaut.png"
+          ],
+          "model": "viduq2",
+          "movement_amplitude": "auto",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "720p",
+          "seed": 42
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Token vda_0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.vidu.com/ent/v2/img2video"
+      }
+    },
+    {
+      "name": "build submit reference-to-video",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "reference_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "images": [
+              "https://img.example.com/reference/astronaut.png",
+              "https://img.example.com/reference/astronaut-end.png",
+              "https://img.example.com/reference/helmet.png"
+            ],
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "reference_to_video",
+        "body": {
+          "duration": 5,
+          "images": [
+            "https://img.example.com/reference/astronaut.png",
+            "https://img.example.com/reference/astronaut-end.png",
+            "https://img.example.com/reference/helmet.png"
+          ],
+          "model": "viduq2",
+          "movement_amplitude": "auto",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "720p"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Token vda_0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.vidu.com/ent/v2/reference2video"
+      }
+    },
+    {
+      "name": "build submit text q1",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq1",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "viduq1",
+            "prompt": "An astronaut planting a flag on a candy-colored planet"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq1",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "duration": 5,
+          "images": null,
+          "model": "viduq1",
+          "movement_amplitude": "auto",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "1080p"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Token vda_0123456789abcdef0123456789abcdef",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "url": "https://api.vidu.com/ent/v2/text2video"
+      }
+    },
+    {
+      "name": "parse submit",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "created_at": "2023-11-14T22:13:20Z",
+            "duration": 5,
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet",
+            "resolution": "720p",
+            "state": "created",
+            "task_id": "vd-1"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "created_at": "2023-11-14T22:13:20Z",
+          "duration": 5,
+          "model": "viduq2",
+          "prompt": "An astronaut planting a flag on a candy-colored planet",
+          "resolution": "720p",
+          "state": "created",
+          "task_id": "vd-1"
+        },
+        "taskId": "vd-1"
+      }
+    },
+    {
+      "name": "parse submit rejects failed state",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet",
+            "size": "1920x1080"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "err_code": "ContentModeration",
+            "state": "failed",
+            "task_id": "vd-2"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expectedError": "task failed"
+    },
+    {
+      "name": "usage facts",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "images": [
+              "https://img.example.com/reference/astronaut.png"
+            ],
+            "metadata": {
+              "bgm": false,
+              "resolution": "720p",
+              "seed": 42
+            },
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "duration": 5,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "usage billing ratios is null",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "viduq2",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "images": [
+              "https://img.example.com/reference/astronaut.png"
+            ],
+            "metadata": {
+              "bgm": false,
+              "resolution": "720p",
+              "seed": 42
+            },
+            "model": "viduq2",
+            "prompt": "An astronaut planting a flag on a candy-colored planet"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2",
+          "usagePurpose": "billing_ratios",
+          "userSetting": null
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "build query",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "data": null,
+          "model": "viduq2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "vd-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Token vda_0123456789abcdef0123456789abcdef"
+        },
+        "method": "GET",
+        "url": "https://api.vidu.com/ent/v2/tasks/vd-1/creations"
+      }
+    },
+    {
+      "name": "parse task success",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "data": null,
+          "model": "viduq2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "vd-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2"
+        },
+        {
+          "creations": [
+            {
+              "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+              "id": "cr-1",
+              "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+            }
+          ],
+          "credits": 40,
+          "err_code": "",
+          "id": "vd-1",
+          "payload": "",
+          "state": "success"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "",
+        "status": "SUCCESS",
+        "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+      }
+    },
+    {
+      "name": "parse task failed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "data": null,
+          "model": "viduq2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "vd-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2"
+        },
+        {
+          "creations": [],
+          "err_code": "ContentModeration",
+          "id": "vd-1",
+          "state": "failed"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "ContentModeration",
+        "status": "FAILURE"
+      }
+    },
+    {
+      "name": "parse task unknown",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "data": null,
+          "model": "viduq2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "vd-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2"
+        },
+        {
+          "id": "vd-1",
+          "state": "scheduled"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "unknown task state: scheduled",
+        "status": "UNKNOWN"
+      }
+    },
+    {
+      "name": "usage on complete credits",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "data": null,
+          "model": "viduq2",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "vd-1",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "viduq2"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "vd-1"
+        },
+        {
+          "creations": [
+            {
+              "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+              "id": "cr-1",
+              "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+            }
+          ],
+          "credits": 40,
+          "err_code": "",
+          "id": "vd-1",
+          "payload": "",
+          "state": "success"
+        }
+      ],
+      "expected": {
+        "credits": 40
+      }
+    },
+    {
+      "name": "render events success",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "viduq2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "creations": [
+              {
+                "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+                "id": "cr-1",
+                "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+              }
+            ],
+            "credits": 40,
+            "err_code": "",
+            "id": "vd-1",
+            "payload": "",
+            "state": "success"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "vidu",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render events submitted",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "viduq2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "",
+          "platform": "vidu",
+          "progress": "",
+          "status": "SUBMITTED",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        },
+        null
+      ],
+      "expected": {
+        "done": false,
+        "events": [
+          {
+            "message": "submitted",
+            "progress": 0,
+            "type": "progress"
+          }
+        ],
+        "state": {
+          "progress": 0,
+          "status": "SUBMITTED"
+        }
+      }
+    },
+    {
+      "name": "render final",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "An astronaut planting a flag on a candy-colored planet",
+              "model": "viduq2",
+              "seconds": 5,
+              "size": "1920x1080"
+            }
+          },
+          "method": "POST",
+          "model": "viduq2",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "creations": [
+              {
+                "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+                "id": "cr-1",
+                "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+              }
+            ],
+            "credits": 40,
+            "err_code": "",
+            "id": "vd-1",
+            "payload": "",
+            "state": "success"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "vidu",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "vidu"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "video render failed",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "err_code": "ContentModeration",
+            "state": "failed"
+          },
+          "fail_reason": "ContentModeration",
+          "finished_at": 1700000123,
+          "platform": "vidu",
+          "progress": "100%",
+          "status": "FAILURE",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000123,
+        "created_at": 1700000000,
+        "error": {
+          "code": "ContentModeration",
+          "message": "ContentModeration"
+        },
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "status": "failed"
+      }
+    },
+    {
+      "name": "list artifacts",
+      "hook": "listArtifacts",
+      "args": [
+        {
+          "action": "image_to_video",
+          "data": {
+            "creations": [
+              {
+                "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+                "id": "cr-1",
+                "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+              }
+            ],
+            "credits": 40,
+            "err_code": "",
+            "id": "vd-1",
+            "payload": "",
+            "state": "success"
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001"
+        }
+      ],
+      "expected": [
+        {
+          "key": "video",
+          "type": "video"
+        }
+      ]
+    },
+    {
+      "name": "build content request",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "vda_0123456789abcdef0123456789abcdef",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "vda_0123456789abcdef0123456789abcdef"
+          },
+          "authHeader": "vda_0123456789abcdef0123456789abcdef",
+          "baseUrl": "https://api.vidu.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "creations": [
+              {
+                "cover_url": "https://prod-ss-vidu.example.com/cr-1.jpg",
+                "id": "cr-1",
+                "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+              }
+            ],
+            "credits": 40,
+            "err_code": "",
+            "id": "vd-1",
+            "payload": "",
+            "state": "success"
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "vd-1"
+        }
+      ],
+      "expected": {
+        "credentialless": true,
+        "method": "GET",
+        "url": "https://prod-ss-vidu.example.com/cr-1.mp4?Expires=1700003600"
+      }
+    }
+  ]
+}

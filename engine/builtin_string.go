@@ -1,0 +1,1304 @@
+package engine
+
+import (
+	"slices"
+	"strings"
+	"unicode"
+	"unicode/utf16"
+)
+
+// String builtins. Every method coerces `this` in spec order,
+// works on all three string kinds and produces zero-copy slices for
+// substrings of ASCII strings.
+
+var stringCtorMethods = []builtinDef{
+	{AtomFromCharCode, stringFromCharCode, 1},
+	{AtomFromCodePoint, stringFromCodePoint, 1},
+	{AtomRaw, stringRaw, 1},
+}
+
+var stringProtoMethods = []builtinDef{
+	{AtomToString, stringProtoToString, 0},
+	{AtomValueOf, stringProtoValueOf, 0},
+	{AtomAnchor, stringProtoAnchor, 1},
+	{AtomAt, stringProtoAt, 1},
+	{AtomBig, stringProtoBig, 0},
+	{AtomBlink, stringProtoBlink, 0},
+	{AtomBold, stringProtoBold, 0},
+	{AtomCharAt, stringProtoCharAt, 1},
+	{AtomCharCodeAt, stringProtoCharCodeAt, 1},
+	{AtomCodePointAt, stringProtoCodePointAt, 1},
+	{AtomConcat, stringProtoConcat, 1},
+	{AtomEndsWith, stringProtoEndsWith, 1},
+	{AtomFixed, stringProtoFixed, 0},
+	{AtomFontcolor, stringProtoFontcolor, 1},
+	{AtomFontsize, stringProtoFontsize, 1},
+	{AtomIncludes, stringProtoIncludes, 1},
+	{AtomIndexOf, stringProtoIndexOf, 1},
+	{AtomIsWellFormed, stringProtoIsWellFormed, 0},
+	{AtomItalics, stringProtoItalics, 0},
+	{AtomLastIndexOf, stringProtoLastIndexOf, 1},
+	{AtomLink, stringProtoLink, 1},
+	{AtomLocaleCompare, stringProtoLocaleCompare, 1},
+	{AtomMatch, stringProtoMatch, 1},
+	{AtomMatchAll, stringProtoMatchAll, 1},
+	{AtomNormalize, stringProtoNormalize, 0},
+	{AtomPadEnd, stringProtoPadEnd, 1},
+	{AtomPadStart, stringProtoPadStart, 1},
+	{AtomRepeat, stringProtoRepeat, 1},
+	{AtomReplace, stringProtoReplace, 2},
+	{AtomReplaceAll, stringProtoReplaceAll, 2},
+	{AtomSearch, stringProtoSearch, 1},
+	{AtomSlice, stringProtoSlice, 2},
+	{AtomSmall, stringProtoSmall, 0},
+	{AtomSplit, stringProtoSplit, 2},
+	{AtomStartsWith, stringProtoStartsWith, 1},
+	{AtomStrike, stringProtoStrike, 0},
+	{AtomSub, stringProtoSub, 0},
+	{AtomSubstr, stringProtoSubstr, 2},
+	{AtomSubstring, stringProtoSubstring, 2},
+	{AtomSup, stringProtoSup, 0},
+	{AtomToLocaleLowerCase, stringProtoToLocaleLowerCase, 0},
+	{AtomToLocaleUpperCase, stringProtoToLocaleUpperCase, 0},
+	{AtomToLowerCase, stringProtoToLowerCase, 0},
+	{AtomToUpperCase, stringProtoToUpperCase, 0},
+	{AtomToWellFormed, stringProtoToWellFormed, 0},
+	{AtomTrim, stringProtoTrim, 0},
+	{AtomTrimEnd, stringProtoTrimEnd, 0},
+	{AtomTrimStart, stringProtoTrimStart, 0},
+}
+
+func installString(r *Realm) {
+	r.installBuiltins(r.StringCtor, stringCtorMethods)
+	r.StringPrototype.ReserveSlots(r, len(stringProtoMethods)+stringAliasCount)
+	r.installBuiltins(r.StringPrototype, stringProtoMethods)
+	installStringAliases(r)
+}
+
+// thisStringPrimitive implements the spec's thisStringValue: the receiver is
+// a string primitive or a String wrapper, else a TypeError naming method.
+func thisStringPrimitive(r *Realm, this Value, method string) (Value, error) {
+	if this.IsString() {
+		return this, nil
+	}
+	if this.IsObject() && this.AsObject().class == ClassString {
+		return StringValue(this.AsObject().internal.(*String)), nil
+	}
+	return Undefined(), r.TypeError("String.prototype.%s requires that 'this' be a String", method)
+}
+
+func stringProtoToString(r *Realm, this Value, args []Value) (Value, error) {
+	return thisStringPrimitive(r, this, "toString")
+}
+
+func stringProtoValueOf(r *Realm, this Value, args []Value) (Value, error) {
+	return thisStringPrimitive(r, this, "valueOf")
+}
+
+// singleCharStrings are the 128 one-character ASCII strings, shared by all
+// realms so charAt/split("") on ASCII input allocate nothing per character.
+var singleCharStrings = func() [128]*String {
+	var a [128]*String
+	for i := range a {
+		a[i] = asciiString(string(rune(i)))
+	}
+	return a
+}()
+
+// charString returns the one-unit string for c.
+func charString(c uint16) *String {
+	if c < 0x80 {
+		return singleCharStrings[c]
+	}
+	return &String{u: []uint16{c}, n: 1, kind: strUTF16}
+}
+
+// writeSlice appends s[start:end) to sb without materializing a *String.
+func writeSlice(sb *StringBuilder, s *String, start, end int) {
+	if start >= end {
+		return
+	}
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if s.kind == strASCII {
+		writeASCIIString(sb, s.s[start:end])
+		return
+	}
+	sb.upgrade()
+	sb.u = append(sb.u, s.u[start:end]...)
+}
+
+// writeASCIIString appends a Go string known to be ASCII.
+func writeASCIIString(sb *StringBuilder, s string) { sb.writeASCIIBytes(s) }
+
+// thisStringValue implements RequireObjectCoercible(this) + ToString(this).
+func thisStringValue(r *Realm, this Value, method string) (*String, error) {
+	if this.IsString() {
+		return this.AsString(), nil
+	}
+	if this.IsNullish() {
+		return nil, r.TypeError("String.prototype.%s called on null or undefined", method)
+	}
+	return r.ToString(this)
+}
+
+// argIntegerOrInfinity coerces args[i], returning def when it is undefined.
+func argIntegerOrInfinity(r *Realm, args []Value, i int, def float64) (float64, error) {
+	v := Arg(args, i)
+	if v.IsUndefined() {
+		return def, nil
+	}
+	if v.IsNumber() {
+		return ToIntegerOrInfinityFloat(v.AsNumber()), nil
+	}
+	return r.ToIntegerOrInfinity(v)
+}
+
+// clampPos clamps an integer-or-infinity to [0, n].
+func clampPos(f float64, n int) int {
+	if f <= 0 {
+		return 0
+	}
+	if f >= float64(n) {
+		return n
+	}
+	return int(f)
+}
+
+// relativePos resolves a relative index (negative counts from the end) into
+// [0, n].
+func relativePos(f float64, n int) int {
+	if f < 0 {
+		if -f >= float64(n) {
+			return 0
+		}
+		return n + int(f)
+	}
+	if f >= float64(n) {
+		return n
+	}
+	return int(f)
+}
+
+// hasSubstringAt reports whether sub occurs in s at unit offset at.
+func hasSubstringAt(s, sub *String, at int) bool {
+	n := sub.Len()
+	if at < 0 || at+n > s.Len() {
+		return false
+	}
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if sub.kind == strRope {
+		sub.flatten()
+	}
+	if s.kind == strASCII && sub.kind == strASCII {
+		return s.s[at:at+n] == sub.s
+	}
+	for i := range n {
+		if s.At(at+i) != sub.At(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// lastIndexOfString returns the last index <= start at which sub occurs in s.
+func lastIndexOfString(s, sub *String, start int) int {
+	n, m := s.Len(), sub.Len()
+	start = min(start, n-m)
+	if start < 0 {
+		return -1
+	}
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if sub.kind == strRope {
+		sub.flatten()
+	}
+	if s.kind == strASCII && sub.kind == strASCII {
+		return strings.LastIndex(s.s[:start+m], sub.s)
+	}
+	for i := start; i >= 0; i-- {
+		if hasSubstringAt(s, sub, i) {
+			return i
+		}
+	}
+	return -1
+}
+
+// --- String constructor methods ---------------------------------------------------------
+
+func stringFromCharCode(r *Realm, this Value, args []Value) (Value, error) {
+	if len(args) == 1 {
+		u, err := r.ToUint32(args[0])
+		if err != nil {
+			return Undefined(), err
+		}
+		return StringValue(charString(uint16(u))), nil
+	}
+	units := make([]uint16, len(args))
+	for i, a := range args {
+		u, err := r.ToUint32(a)
+		if err != nil {
+			return Undefined(), err
+		}
+		units[i] = uint16(u)
+	}
+	return StringValue(FromUTF16(units)), nil
+}
+
+// --- positions and code units ---------------------------------------------------------------
+
+func stringProtoAt(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "at")
+	if err != nil {
+		return Undefined(), err
+	}
+	f, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	k := f
+	if f < 0 {
+		k = float64(n) + f
+	}
+	if k < 0 || k >= float64(n) {
+		return Undefined(), nil
+	}
+	return StringValue(charString(s.At(int(k)))), nil
+}
+
+func stringProtoCharAt(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "charAt")
+	if err != nil {
+		return Undefined(), err
+	}
+	f, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	if f < 0 || f >= float64(s.Len()) {
+		return StringValue(emptyString), nil
+	}
+	return StringValue(charString(s.At(int(f)))), nil
+}
+
+func stringProtoCharCodeAt(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "charCodeAt")
+	if err != nil {
+		return Undefined(), err
+	}
+	f, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	if f < 0 || f >= float64(s.Len()) {
+		return NaN(), nil
+	}
+	return IntValue(int(s.At(int(f)))), nil
+}
+
+func stringProtoCodePointAt(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "codePointAt")
+	if err != nil {
+		return Undefined(), err
+	}
+	f, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	if f < 0 || f >= float64(n) {
+		return Undefined(), nil
+	}
+	i := int(f)
+	c := s.At(i)
+	if c >= 0xD800 && c < 0xDC00 && i+1 < n {
+		if lo := s.At(i + 1); lo >= 0xDC00 && lo < 0xE000 {
+			return IntValue(int(utf16.DecodeRune(rune(c), rune(lo)))), nil
+		}
+	}
+	return IntValue(int(c)), nil
+}
+
+// --- searching -----------------------------------------------------------------------
+
+func stringProtoIndexOf(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "indexOf")
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := r.ToString(Arg(args, 0))
+	if err != nil {
+		return Undefined(), err
+	}
+	pos, err := argIntegerOrInfinity(r, args, 1, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	return IntValue(s.IndexOf(search, clampPos(pos, s.Len()))), nil
+}
+
+func stringProtoLastIndexOf(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "lastIndexOf")
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := r.ToString(Arg(args, 0))
+	if err != nil {
+		return Undefined(), err
+	}
+	numPos, err := r.ToNumber(Arg(args, 1))
+	if err != nil {
+		return Undefined(), err
+	}
+	pos := posInf
+	if numPos == numPos {
+		pos = ToIntegerOrInfinityFloat(numPos)
+	}
+	return IntValue(lastIndexOfString(s, search, clampPos(pos, s.Len()))), nil
+}
+
+// searchStringArg coerces the searchString argument of includes/startsWith/
+// endsWith, rejecting RegExp objects.
+func searchStringArg(r *Realm, v Value, method string) (*String, error) {
+	isRx, err := r.isRegExp(v)
+	if err != nil {
+		return nil, err
+	}
+	if isRx {
+		return nil, r.TypeError("First argument to String.prototype.%s must not be a regular expression", method)
+	}
+	return r.ToString(v)
+}
+
+func stringProtoIncludes(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "includes")
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := searchStringArg(r, Arg(args, 0), "includes")
+	if err != nil {
+		return Undefined(), err
+	}
+	pos, err := argIntegerOrInfinity(r, args, 1, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	return Bool(s.IndexOf(search, clampPos(pos, s.Len())) >= 0), nil
+}
+
+func stringProtoStartsWith(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "startsWith")
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := searchStringArg(r, Arg(args, 0), "startsWith")
+	if err != nil {
+		return Undefined(), err
+	}
+	pos, err := argIntegerOrInfinity(r, args, 1, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	return Bool(hasSubstringAt(s, search, clampPos(pos, s.Len()))), nil
+}
+
+func stringProtoEndsWith(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "endsWith")
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := searchStringArg(r, Arg(args, 0), "endsWith")
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	end, err := argIntegerOrInfinity(r, args, 1, float64(n))
+	if err != nil {
+		return Undefined(), err
+	}
+	start := clampPos(end, n) - search.Len()
+	if start < 0 {
+		return False(), nil
+	}
+	return Bool(hasSubstringAt(s, search, start)), nil
+}
+
+// --- slicing --------------------------------------------------------------------------
+
+func stringProtoSlice(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "slice")
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	start, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	end, err := argIntegerOrInfinity(r, args, 1, float64(n))
+	if err != nil {
+		return Undefined(), err
+	}
+	from, to := relativePos(start, n), relativePos(end, n)
+	if from >= to {
+		return StringValue(emptyString), nil
+	}
+	return StringValue(s.Substring(from, to)), nil
+}
+
+func stringProtoSubstring(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "substring")
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	start, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	end, err := argIntegerOrInfinity(r, args, 1, float64(n))
+	if err != nil {
+		return Undefined(), err
+	}
+	a, b := clampPos(start, n), clampPos(end, n)
+	if a > b {
+		a, b = b, a
+	}
+	return StringValue(s.Substring(a, b)), nil
+}
+
+func stringProtoSubstr(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "substr")
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	start, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	from := relativePos(start, n)
+	length, err := argIntegerOrInfinity(r, args, 1, float64(n-from))
+	if err != nil {
+		return Undefined(), err
+	}
+	to := from + clampPos(length, n-from)
+	if from >= to {
+		return StringValue(emptyString), nil
+	}
+	return StringValue(s.Substring(from, to)), nil
+}
+
+// --- case conversion -------------------------------------------------------------------
+
+func stringProtoToLowerCase(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "toLowerCase")
+	if err != nil {
+		return Undefined(), err
+	}
+	out, err := stringToLower(r, s)
+	return caseConverted(r, out, err)
+}
+
+// caseConverted finishes a case conversion: the unconditional special
+// casings expand a code point to up to three, so the result is checked
+// against the string length limit before it is returned.
+func caseConverted(r *Realm, s *String, err error) (Value, error) {
+	if err != nil {
+		return Undefined(), err
+	}
+	if s.Len() > maxStringLength {
+		return Undefined(), r.invalidStringLength()
+	}
+	return StringValue(s), nil
+}
+
+func stringProtoToUpperCase(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "toUpperCase")
+	if err != nil {
+		return Undefined(), err
+	}
+	out, err := stringToUpper(r, s)
+	return caseConverted(r, out, err)
+}
+
+// stringToLower implements String.prototype.toLowerCase: simple mappings
+// from the Unicode tables plus the unconditional special casings (U+0130)
+// and the Final_Sigma context rule.
+func stringToLower(r *Realm, s *String) (*String, error) {
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if s.kind == strASCII {
+		i := 0
+		for i < len(s.s) && (s.s[i] < 'A' || s.s[i] > 'Z') {
+			i++
+		}
+		if i == len(s.s) {
+			return s, nil
+		}
+		out, b := newASCIIBuf(len(s.s))
+		copy(b, s.s)
+		for ; i < len(b); i++ {
+			if c := b[i]; c >= 'A' && c <= 'Z' {
+				b[i] = c + 'a' - 'A'
+			}
+		}
+		return out, nil
+	}
+	u := s.u
+	var sb StringBuilder
+	sb.Grow(len(u))
+	for i := 0; i < len(u); i++ {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return nil, err
+		}
+		c := u[i]
+		if c < 0x80 {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			sb.WriteASCII(byte(c))
+			continue
+		}
+		rn, w := decodeUnitAt(u, i)
+		switch rn {
+		case 0x0130: // LATIN CAPITAL LETTER I WITH DOT ABOVE
+			sb.WriteUnit('i')
+			sb.WriteUnit(0x0307)
+		case 0x03A3: // GREEK CAPITAL LETTER SIGMA
+			if isFinalSigma(u, i) {
+				sb.WriteUnit(0x03C2)
+			} else {
+				sb.WriteUnit(0x03C3)
+			}
+		default:
+			sb.WriteRune(unicode.ToLower(rn))
+		}
+		i += w - 1
+	}
+	return sb.String(), nil
+}
+
+// stringToUpper implements String.prototype.toUpperCase with the
+// unconditional SpecialCasing expansions (ß -> SS, ligatures, Greek with
+// ypogegrammeni, ...).
+func stringToUpper(r *Realm, s *String) (*String, error) {
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if s.kind == strASCII {
+		i := 0
+		for i < len(s.s) && (s.s[i] < 'a' || s.s[i] > 'z') {
+			i++
+		}
+		if i == len(s.s) {
+			return s, nil
+		}
+		out, b := newASCIIBuf(len(s.s))
+		copy(b, s.s)
+		for ; i < len(b); i++ {
+			if c := b[i]; c >= 'a' && c <= 'z' {
+				b[i] = c - ('a' - 'A')
+			}
+		}
+		return out, nil
+	}
+	u := s.u
+	var sb StringBuilder
+	sb.Grow(len(u) + 4)
+	for i := 0; i < len(u); i++ {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return nil, err
+		}
+		c := u[i]
+		if c < 0x80 {
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			sb.WriteASCII(byte(c))
+			continue
+		}
+		rn, w := decodeUnitAt(u, i)
+		if sp := specialUpper(rn); sp != "" {
+			sb.WriteGoString(sp)
+		} else {
+			sb.WriteRune(unicode.ToUpper(rn))
+		}
+		i += w - 1
+	}
+	return sb.String(), nil
+}
+
+// decodeUnitAt returns the code point at u[i] (a lone surrogate is returned
+// as is) and the number of units it spans.
+func decodeUnitAt(u []uint16, i int) (rune, int) {
+	c := u[i]
+	if c >= 0xD800 && c < 0xDC00 && i+1 < len(u) {
+		if lo := u[i+1]; lo >= 0xDC00 && lo < 0xE000 {
+			return utf16.DecodeRune(rune(c), rune(lo)), 2
+		}
+	}
+	return rune(c), 1
+}
+
+func isCased(r rune) bool { return unicode.IsUpper(r) || unicode.IsLower(r) || unicode.IsTitle(r) }
+
+// isCaseIgnorable approximates the Unicode Case_Ignorable property.
+func isCaseIgnorable(r rune) bool {
+	switch r {
+	case '\'', '.', ':', '^', '`', 0xAD, 0xB7, 0x2018, 0x2019, 0x2024, 0x2027:
+		return true
+	}
+	return unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, unicode.Lm, unicode.Sk)
+}
+
+// isFinalSigma implements the Final_Sigma condition for the sigma at u[i]:
+// preceded by a cased letter and not followed by one, skipping
+// case-ignorable characters.
+func isFinalSigma(u []uint16, i int) bool {
+	before := false
+	for j := i - 1; j >= 0; j-- {
+		c := u[j]
+		if c >= 0xDC00 && c < 0xE000 && j > 0 && u[j-1] >= 0xD800 && u[j-1] < 0xDC00 {
+			j--
+		}
+		rn, _ := decodeUnitAt(u, j)
+		if isCaseIgnorable(rn) {
+			continue
+		}
+		before = isCased(rn)
+		break
+	}
+	if !before {
+		return false
+	}
+	for j := i + 1; j < len(u); {
+		rn, w := decodeUnitAt(u, j)
+		j += w
+		if isCaseIgnorable(rn) {
+			continue
+		}
+		return !isCased(rn)
+	}
+	return true
+}
+
+// specialUpper returns the unconditional full uppercase mapping of r when
+// it differs from the simple mapping (SpecialCasing.txt), else "".
+func specialUpper(r rune) string {
+	switch {
+	case r == 0xDF, r == 0x149, r == 0x1F0, r == 0x390, r == 0x3B0, r == 0x587,
+		r >= 0x1E96 && r <= 0x1E9A, r >= 0x1F50 && r <= 0x1FFC, r >= 0xFB00 && r <= 0xFB17:
+		return specialUpperTable[r]
+	}
+	return ""
+}
+
+var specialUpperTable = map[rune]string{
+	0x00DF: "SS", 0x0149: "ʼN", 0x01F0: "J̌", 0x0390: "Ϊ́", 0x03B0: "Ϋ́",
+	0x0587: "ԵՒ", 0x1E96: "H̱", 0x1E97: "T̈", 0x1E98: "W̊", 0x1E99: "Y̊", 0x1E9A: "Aʾ",
+	0x1F50: "Υ̓", 0x1F52: "Υ̓̀", 0x1F54: "Υ̓́", 0x1F56: "Υ̓͂",
+	0x1F80: "ἈΙ", 0x1F81: "ἉΙ", 0x1F82: "ἊΙ", 0x1F83: "ἋΙ",
+	0x1F84: "ἌΙ", 0x1F85: "ἍΙ", 0x1F86: "ἎΙ", 0x1F87: "ἏΙ",
+	0x1F88: "ἈΙ", 0x1F89: "ἉΙ", 0x1F8A: "ἊΙ", 0x1F8B: "ἋΙ",
+	0x1F8C: "ἌΙ", 0x1F8D: "ἍΙ", 0x1F8E: "ἎΙ", 0x1F8F: "ἏΙ",
+	0x1F90: "ἨΙ", 0x1F91: "ἩΙ", 0x1F92: "ἪΙ", 0x1F93: "ἫΙ",
+	0x1F94: "ἬΙ", 0x1F95: "ἭΙ", 0x1F96: "ἮΙ", 0x1F97: "ἯΙ",
+	0x1F98: "ἨΙ", 0x1F99: "ἩΙ", 0x1F9A: "ἪΙ", 0x1F9B: "ἫΙ",
+	0x1F9C: "ἬΙ", 0x1F9D: "ἭΙ", 0x1F9E: "ἮΙ", 0x1F9F: "ἯΙ",
+	0x1FA0: "ὨΙ", 0x1FA1: "ὩΙ", 0x1FA2: "ὪΙ", 0x1FA3: "ὫΙ",
+	0x1FA4: "ὬΙ", 0x1FA5: "ὭΙ", 0x1FA6: "ὮΙ", 0x1FA7: "ὯΙ",
+	0x1FA8: "ὨΙ", 0x1FA9: "ὩΙ", 0x1FAA: "ὪΙ", 0x1FAB: "ὫΙ",
+	0x1FAC: "ὬΙ", 0x1FAD: "ὭΙ", 0x1FAE: "ὮΙ", 0x1FAF: "ὯΙ",
+	0x1FB2: "ᾺΙ", 0x1FB3: "ΑΙ", 0x1FB4: "ΆΙ", 0x1FB6: "Α͂",
+	0x1FB7: "Α͂Ι", 0x1FBC: "ΑΙ", 0x1FC2: "ῊΙ", 0x1FC3: "ΗΙ",
+	0x1FC4: "ΉΙ", 0x1FC6: "Η͂", 0x1FC7: "Η͂Ι", 0x1FCC: "ΗΙ",
+	0x1FD2: "Ϊ̀", 0x1FD3: "Ϊ́", 0x1FD6: "Ι͂", 0x1FD7: "Ϊ͂",
+	0x1FE2: "Ϋ̀", 0x1FE3: "Ϋ́", 0x1FE4: "Ρ̓", 0x1FE6: "Υ͂",
+	0x1FE7: "Ϋ͂", 0x1FF2: "ῺΙ", 0x1FF3: "ΩΙ", 0x1FF4: "ΏΙ",
+	0x1FF6: "Ω͂", 0x1FF7: "Ω͂Ι", 0x1FFC: "ΩΙ",
+	0xFB00: "FF", 0xFB01: "FI", 0xFB02: "FL", 0xFB03: "FFI", 0xFB04: "FFL", 0xFB05: "ST", 0xFB06: "ST",
+	0xFB13: "ՄՆ", 0xFB14: "ՄԵ", 0xFB15: "ՄԻ", 0xFB16: "ՎՆ", 0xFB17: "ՄԽ",
+}
+
+// --- trimming -------------------------------------------------------------------------
+
+// trimString implements the TrimString abstract operation.
+func trimString(s *String, start, end bool) *String {
+	if s.kind == strRope {
+		s.flatten()
+	}
+	n := s.Len()
+	a, b := 0, n
+	if s.kind == strASCII {
+		str := s.s
+		if start {
+			for a < b && isASCIIWhitespace(str[a]) {
+				a++
+			}
+		}
+		if end {
+			for b > a && isASCIIWhitespace(str[b-1]) {
+				b--
+			}
+		}
+	} else {
+		u := s.u
+		if start {
+			for a < b && isJSWhitespace(u[a]) {
+				a++
+			}
+		}
+		if end {
+			for b > a && isJSWhitespace(u[b-1]) {
+				b--
+			}
+		}
+	}
+	return s.Substring(a, b)
+}
+
+func isASCIIWhitespace(c byte) bool { return c == ' ' || (c >= 0x09 && c <= 0x0D) }
+
+func stringProtoTrim(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "trim")
+	if err != nil {
+		return Undefined(), err
+	}
+	return StringValue(trimString(s, true, true)), nil
+}
+
+func stringProtoTrimStart(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "trimStart")
+	if err != nil {
+		return Undefined(), err
+	}
+	return StringValue(trimString(s, true, false)), nil
+}
+
+func stringProtoTrimEnd(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "trimEnd")
+	if err != nil {
+		return Undefined(), err
+	}
+	return StringValue(trimString(s, false, true)), nil
+}
+
+// --- building --------------------------------------------------------------------------
+
+func stringProtoConcat(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "concat")
+	if err != nil {
+		return Undefined(), err
+	}
+	for _, a := range args {
+		t, err := r.ToString(a)
+		if err != nil {
+			return Undefined(), err
+		}
+		if s, err = r.Concat(s, t); err != nil {
+			return Undefined(), err
+		}
+	}
+	return StringValue(s), nil
+}
+
+func stringProtoRepeat(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "repeat")
+	if err != nil {
+		return Undefined(), err
+	}
+	n, err := argIntegerOrInfinity(r, args, 0, 0)
+	if err != nil {
+		return Undefined(), err
+	}
+	if n < 0 || n == posInf {
+		return Undefined(), r.RangeError("Invalid count value: %s", NumberToGoString(n))
+	}
+	if n == 0 || s.Len() == 0 {
+		return StringValue(emptyString), nil
+	}
+	if float64(s.Len())*n > float64(maxStringLength) {
+		return Undefined(), r.invalidStringLength()
+	}
+	res, err := repeatString(r, s, int(n))
+	if err != nil {
+		return Undefined(), err
+	}
+	return StringValue(res), nil
+}
+
+// repeatString returns s repeated count times (count >= 1, s non-empty),
+// checking for interrupts between 64 KiB chunks of the output.
+func repeatString(r *Realm, s *String, count int) (*String, error) {
+	if count == 1 {
+		return s, nil
+	}
+	if s.kind == strRope {
+		s.flatten()
+	}
+	total := s.Len() * count
+	if total <= 1<<16 {
+		if s.kind == strASCII {
+			return asciiString(strings.Repeat(s.s, count)), nil
+		}
+		return &String{u: slices.Repeat(s.u, count), n: int32(total), kind: strUTF16}, nil
+	}
+	chunk := max(1, (1<<16)/s.Len())
+	if s.kind == strASCII {
+		b := make([]byte, 0, total)
+		for done := 0; done < count; done += chunk {
+			for range min(chunk, count-done) {
+				b = append(b, s.s...)
+			}
+			if err := r.CheckInterrupt(); err != nil {
+				return nil, err
+			}
+		}
+		return asciiString(bytesToString(b)), nil
+	}
+	u := make([]uint16, 0, total)
+	for done := 0; done < count; done += chunk {
+		for range min(chunk, count-done) {
+			u = append(u, s.u...)
+		}
+		if err := r.CheckInterrupt(); err != nil {
+			return nil, err
+		}
+	}
+	return &String{u: u, n: int32(total), kind: strUTF16}, nil
+}
+
+func stringProtoPadStart(r *Realm, this Value, args []Value) (Value, error) {
+	return stringPad(r, this, args, true)
+}
+
+func stringProtoPadEnd(r *Realm, this Value, args []Value) (Value, error) {
+	return stringPad(r, this, args, false)
+}
+
+// stringPad implements StringPad for padStart (atStart) and padEnd.
+func stringPad(r *Realm, this Value, args []Value, atStart bool) (Value, error) {
+	method := "padEnd"
+	if atStart {
+		method = "padStart"
+	}
+	s, err := thisStringValue(r, this, method)
+	if err != nil {
+		return Undefined(), err
+	}
+	maxLen, err := r.ToLength(Arg(args, 0))
+	if err != nil {
+		return Undefined(), err
+	}
+	n := s.Len()
+	if maxLen <= int64(n) {
+		return StringValue(s), nil
+	}
+	filler := singleCharStrings[' ']
+	if fv := Arg(args, 1); !fv.IsUndefined() {
+		if filler, err = r.ToString(fv); err != nil {
+			return Undefined(), err
+		}
+	}
+	if filler.Len() == 0 {
+		return StringValue(s), nil
+	}
+	if maxLen > int64(maxStringLength) {
+		return Undefined(), r.invalidStringLength()
+	}
+	fillLen := int(maxLen) - n
+	var sb StringBuilder
+	sb.Grow(int(maxLen))
+	if !atStart {
+		sb.WriteString(s)
+	}
+	for k := int64(0); fillLen > 0; k++ {
+		if err := interruptEvery(r, k); err != nil {
+			return Undefined(), err
+		}
+		if fillLen >= filler.Len() {
+			sb.WriteString(filler)
+			fillLen -= filler.Len()
+			continue
+		}
+		sb.WriteString(filler.Substring(0, fillLen))
+		fillLen = 0
+	}
+	if atStart {
+		sb.WriteString(s)
+	}
+	return StringValue(sb.String()), nil
+}
+
+// --- comparison and unsupported ----------------------------------------------------------
+
+func stringProtoLocaleCompare(r *Realm, this Value, args []Value) (Value, error) {
+	s, err := thisStringValue(r, this, "localeCompare")
+	if err != nil {
+		return Undefined(), err
+	}
+	that, err := r.ToString(Arg(args, 0))
+	if err != nil {
+		return Undefined(), err
+	}
+	c, err := collateCompare(r, s, that)
+	if err != nil {
+		return Undefined(), err
+	}
+	return IntValue(c), nil
+}
+
+// stringProtoMatchAll implements String.prototype.matchAll.
+func stringProtoMatchAll(r *Realm, this Value, args []Value) (Value, error) {
+	if this.IsNullish() {
+		return Undefined(), r.TypeError("String.prototype.matchAll called on null or undefined")
+	}
+	regexp := Arg(args, 0)
+	if regexp.IsObject() {
+		o := regexp.AsObject()
+		isRx, err := r.isRegExp(regexp)
+		if err != nil {
+			return Undefined(), err
+		}
+		if isRx {
+			if err := r.regexpRequireGlobal(o, "matchAll"); err != nil {
+				return Undefined(), err
+			}
+		}
+		m, builtin, err := r.regexpSymbolMethod(o, rxgMatchAll)
+		if err != nil {
+			return Undefined(), err
+		}
+		if builtin {
+			return regexpSymMatchAll(r, o, this)
+		}
+		if !m.IsUndefined() {
+			return r.Call(m, regexp, []Value{this})
+		}
+	}
+	s, err := r.ToString(this)
+	if err != nil {
+		return Undefined(), err
+	}
+	rx, err := r.regexpCreateFrom(regexp, asciiString("g"))
+	if err != nil {
+		return Undefined(), err
+	}
+	m, builtin, err := r.regexpSymbolMethod(rx, rxgMatchAll)
+	if err != nil {
+		return Undefined(), err
+	}
+	if builtin {
+		return regexpSymMatchAll(r, rx, StringValue(s))
+	}
+	return r.Call(m, ObjectValue(rx), []Value{StringValue(s)})
+}
+
+// --- search -------------------------------------------------------------------------------
+
+// stringProtoSearch implements String.prototype.search.
+func stringProtoSearch(r *Realm, this Value, args []Value) (Value, error) {
+	if this.IsNullish() {
+		return Undefined(), r.TypeError("String.prototype.search called on null or undefined")
+	}
+	regexp := Arg(args, 0)
+	if regexp.IsObject() {
+		o := regexp.AsObject()
+		m, builtin, err := r.regexpSymbolMethod(o, rxgSearch)
+		if err != nil {
+			return Undefined(), err
+		}
+		if builtin {
+			return regexpSymSearch(r, o, this)
+		}
+		if !m.IsUndefined() {
+			return r.Call(m, regexp, []Value{this})
+		}
+	}
+	s, err := r.ToString(this)
+	if err != nil {
+		return Undefined(), err
+	}
+	rx, err := r.regexpCreateFrom(regexp, AtomEmpty)
+	if err != nil {
+		return Undefined(), err
+	}
+	m, builtin, err := r.regexpSymbolMethod(rx, rxgSearch)
+	if err != nil {
+		return Undefined(), err
+	}
+	if builtin {
+		return regexpSymSearch(r, rx, StringValue(s))
+	}
+	return r.Call(m, ObjectValue(rx), []Value{StringValue(s)})
+}
+
+// --- split ------------------------------------------------------------------------------
+
+func stringProtoSplit(r *Realm, this Value, args []Value) (Value, error) {
+	if this.IsNullish() {
+		return Undefined(), r.TypeError("String.prototype.split called on null or undefined")
+	}
+	separator, limit := Arg(args, 0), Arg(args, 1)
+	if separator.IsObject() {
+		o := separator.AsObject()
+		m, builtin, err := r.regexpSymbolMethod(o, rxgSplit)
+		if err != nil {
+			return Undefined(), err
+		}
+		if builtin {
+			return regexpSymSplit(r, o, this, limit)
+		}
+		if !m.IsUndefined() {
+			return r.Call(m, separator, []Value{this, limit})
+		}
+	}
+	s, err := r.ToString(this)
+	if err != nil {
+		return Undefined(), err
+	}
+	lim := uint32(0xFFFFFFFF)
+	if !limit.IsUndefined() {
+		if lim, err = r.ToUint32(limit); err != nil {
+			return Undefined(), err
+		}
+	}
+	sep, err := r.ToString(separator)
+	if err != nil {
+		return Undefined(), err
+	}
+	if lim == 0 {
+		return ObjectValue(r.NewArrayLen(0)), nil
+	}
+	if separator.IsUndefined() {
+		return ObjectValue(r.NewArray(StringValue(s))), nil
+	}
+	n := s.Len()
+	if n == 0 {
+		if sep.Len() != 0 {
+			return ObjectValue(r.NewArray(StringValue(s))), nil
+		}
+		return ObjectValue(r.NewArrayLen(0)), nil
+	}
+	if sep.Len() == 0 {
+		count := min(n, int(lim))
+		items := make([]Value, count)
+		for i := range items {
+			items[i] = StringValue(charString(s.At(i)))
+		}
+		return ObjectValue(r.NewArrayFromSlice(items)), nil
+	}
+	a, err := splitByString(r, s, sep, lim)
+	if err != nil {
+		return Undefined(), err
+	}
+	return ObjectValue(a), nil
+}
+
+// splitByString splits s at every occurrence of the non-empty sep, checking
+// the interrupt flag every interruptStride pieces.
+func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if sep.kind == strRope {
+		sep.flatten()
+	}
+	if s.kind == strASCII && sep.kind == strASCII {
+		str, sp := s.s, sep.s
+		count := strings.Count(str, sp) + 1
+		if uint32(count) > lim {
+			count = int(lim)
+		}
+		items := make([]Value, count)
+		pieces := make([]String, count) // one allocation for every piece
+		start := 0
+		for i := range count {
+			if err := interruptEvery(r, int64(i)); err != nil {
+				return nil, err
+			}
+			end := len(str)
+			if i < count-1 {
+				end = start + strings.Index(str[start:], sp)
+			} else if i == count-1 && uint32(count) == lim {
+				if j := strings.Index(str[start:], sp); j >= 0 {
+					end = start + j
+				}
+			}
+			if end == start {
+				items[i] = StringValue(emptyString)
+			} else {
+				pieces[i] = String{s: str[start:end], n: int32(end - start), kind: strASCII}
+				items[i] = StringValue(&pieces[i])
+			}
+			start = end + len(sp)
+		}
+		return r.NewArrayFromSlice(items), nil
+	}
+	var items []Value
+	p := 0
+	for {
+		q := s.IndexOf(sep, p)
+		if q < 0 {
+			break
+		}
+		items = append(items, StringValue(s.Substring(p, q)))
+		if uint32(len(items)) == lim {
+			return r.NewArrayFromSlice(items), nil
+		}
+		if err := interruptEvery(r, int64(len(items))); err != nil {
+			return nil, err
+		}
+		p = q + sep.Len()
+	}
+	items = append(items, StringValue(s.Substring(p, s.Len())))
+	return r.NewArrayFromSlice(items), nil
+}
+
+// --- replace -----------------------------------------------------------------------------
+
+func stringProtoReplace(r *Realm, this Value, args []Value) (Value, error) {
+	return stringReplace(r, this, args, false)
+}
+
+func stringProtoReplaceAll(r *Realm, this Value, args []Value) (Value, error) {
+	return stringReplace(r, this, args, true)
+}
+
+// stringReplace implements String.prototype.replace and replaceAll.
+func stringReplace(r *Realm, this Value, args []Value, all bool) (Value, error) {
+	method := "replace"
+	if all {
+		method = "replaceAll"
+	}
+	if this.IsNullish() {
+		return Undefined(), r.TypeError("String.prototype.%s called on null or undefined", method)
+	}
+	searchValue, replaceValue := Arg(args, 0), Arg(args, 1)
+	if searchValue.IsObject() {
+		o := searchValue.AsObject()
+		if all {
+			isRx, err := r.isRegExp(searchValue)
+			if err != nil {
+				return Undefined(), err
+			}
+			if isRx {
+				if err := r.regexpRequireGlobal(o, "replaceAll"); err != nil {
+					return Undefined(), err
+				}
+			}
+		}
+		m, builtin, err := r.regexpSymbolMethod(o, rxgReplace)
+		if err != nil {
+			return Undefined(), err
+		}
+		if builtin {
+			return regexpSymReplace(r, o, this, replaceValue)
+		}
+		if !m.IsUndefined() {
+			return r.Call(m, searchValue, []Value{this, replaceValue})
+		}
+	}
+	s, err := r.ToString(this)
+	if err != nil {
+		return Undefined(), err
+	}
+	search, err := r.ToString(searchValue)
+	if err != nil {
+		return Undefined(), err
+	}
+	functional := IsCallable(replaceValue)
+	var tmpl *String
+	if !functional {
+		if tmpl, err = r.ToString(replaceValue); err != nil {
+			return Undefined(), err
+		}
+	}
+	n, m := s.Len(), search.Len()
+	first := s.IndexOf(search, 0)
+	if first < 0 {
+		return StringValue(s), nil
+	}
+	var sb StringBuilder
+	sb.Grow(n + 16)
+	next := 0
+	pos := first
+	for pos >= 0 {
+		writeSlice(&sb, s, next, pos)
+		if functional {
+			rv, err := r.Call(replaceValue, Undefined(), []Value{StringValue(search), IntValue(pos), StringValue(s)})
+			if err != nil {
+				return Undefined(), err
+			}
+			rs, err := r.ToString(rv)
+			if err != nil {
+				return Undefined(), err
+			}
+			sb.WriteString(rs)
+		} else if err := r.appendSubstitution(&sb, s, pos, pos+m, nil, nil, Undefined(), tmpl); err != nil {
+			return Undefined(), err
+		}
+		if err := sb.checkLength(r); err != nil {
+			return Undefined(), err
+		}
+		next = pos + m
+		if !all {
+			break
+		}
+		from := pos + max(m, 1)
+		if from > n {
+			break
+		}
+		pos = s.IndexOf(search, from)
+	}
+	writeSlice(&sb, s, next, n)
+	if err := sb.checkLength(r); err != nil {
+		return Undefined(), err
+	}
+	return StringValue(sb.String()), nil
+}
+
+// --- match ---------------------------------------------------------------------------------
+
+func stringProtoMatch(r *Realm, this Value, args []Value) (Value, error) {
+	if this.IsNullish() {
+		return Undefined(), r.TypeError("String.prototype.match called on null or undefined")
+	}
+	regexp := Arg(args, 0)
+	if regexp.IsObject() {
+		o := regexp.AsObject()
+		m, builtin, err := r.regexpSymbolMethod(o, rxgMatch)
+		if err != nil {
+			return Undefined(), err
+		}
+		if builtin {
+			return regexpSymMatch(r, o, this)
+		}
+		if !m.IsUndefined() {
+			return r.Call(m, regexp, []Value{this})
+		}
+	}
+	s, err := r.ToString(this)
+	if err != nil {
+		return Undefined(), err
+	}
+	rx, err := r.regexpCreateFrom(regexp, AtomEmpty)
+	if err != nil {
+		return Undefined(), err
+	}
+	m, builtin, err := r.regexpSymbolMethod(rx, rxgMatch)
+	if err != nil {
+		return Undefined(), err
+	}
+	if builtin {
+		return regexpSymMatch(r, rx, StringValue(s))
+	}
+	return r.Call(m, ObjectValue(rx), []Value{StringValue(s)})
+}

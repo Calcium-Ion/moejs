@@ -1,0 +1,1431 @@
+{
+  "unixNow": 1700000000,
+  "cases": [
+    {
+      "name": "responses decode pro mode",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1-6",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "kind": "submit",
+        "model": "kling-v1-6",
+        "requestBody": {
+          "duration": 10,
+          "metadata": {
+            "mode": "pro"
+          },
+          "model": "kling-v1-6",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+          "size": "1280x720"
+        }
+      }
+    },
+    {
+      "name": "responses decode two images",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": [
+                {
+                  "content": "You are a helpful video generation assistant. 请根据用户描述生成内容。",
+                  "role": "system"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+                      "type": "input_text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/dancer.jpg"
+                      },
+                      "type": "input_image"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.example.com/reference/tail.jpg"
+                      },
+                      "type": "input_image"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "kling-v1",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "kling-v1",
+        "requestBody": {
+          "duration": 5,
+          "image": "https://img.example.com/reference/dancer.jpg",
+          "metadata": {
+            "image_tail": "https://img.example.com/reference/tail.jpg",
+            "mode": "std"
+          },
+          "model": "kling-v1",
+          "prompt": "You are a helpful video generation assistant. 请根据用户描述生成内容。\nA ballet dancer spinning on a rooftop at night, city lights bokeh"
+        }
+      }
+    },
+    {
+      "name": "responses decode rejects std on v2",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "std",
+              "model": "kling-v2-master"
+            }
+          },
+          "method": "POST",
+          "model": "kling-v2-master",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "kling-v2-master does not support mode std"
+    },
+    {
+      "name": "video decode image",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "image": "https://img.example.com/reference/dancer.jpg",
+              "model": "kling-v1",
+              "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "seconds": 5
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "kling-v1",
+        "requestBody": {
+          "duration": 5,
+          "image": "https://img.example.com/reference/dancer.jpg",
+          "mode": "std",
+          "model": "kling-v1",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "video decode rejects zero seconds",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "model": "kling-v1",
+              "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "seconds": 0
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expectedError": "seconds must be a positive integer at most 3600"
+    },
+    {
+      "name": "video decode multipart file",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "decodeRequest"
+      ],
+      "args": [
+        {
+          "body": {
+            "fields": {
+              "mode": [
+                "pro"
+              ],
+              "prompt": [
+                "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+              ],
+              "seconds": [
+                "5"
+              ]
+            },
+            "files": [
+              {
+                "field": "input_reference",
+                "filename": "d.jpg",
+                "mimeType": "image/jpeg",
+                "ref": "request_file:input_reference:0",
+                "size": 4096
+              }
+            ],
+            "kind": "multipart"
+          },
+          "method": "POST",
+          "model": "kling-v1-6",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/videos",
+          "protocol": "openai_video",
+          "query": {},
+          "stream": false
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "kind": "submit",
+        "model": "kling-v1-6",
+        "requestBody": {
+          "duration": 5,
+          "image": {
+            "__fileRef": "request_file:input_reference",
+            "encoding": "base64",
+            "maxBytes": 10485760
+          },
+          "mode": "pro",
+          "model": "kling-v1-6",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+          "seconds": 5
+        }
+      }
+    },
+    {
+      "name": "native decode submit",
+      "hook": "native",
+      "member": "decodeSubmit",
+      "args": [
+        {
+          "body": {
+            "kind": "json",
+            "value": {
+              "aspect_ratio": "16:9",
+              "cfg_scale": 0.5,
+              "duration": "5",
+              "mode": "std",
+              "model_name": "kling-v1",
+              "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+            }
+          },
+          "method": "POST",
+          "params": {},
+          "path": "/kling/v1/videos/text2video",
+          "query": {}
+        }
+      ],
+      "expected": {
+        "kind": "submit",
+        "model": "kling-v1",
+        "requestBody": {
+          "metadata": {
+            "aspect_ratio": "16:9",
+            "cfg_scale": 0.5,
+            "duration": "5",
+            "mode": "std",
+            "model_name": "kling-v1",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+          },
+          "model": "kling-v1",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+        }
+      }
+    },
+    {
+      "name": "build submit vendor jwt",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "text_to_video",
+        "body": {
+          "aspect_ratio": "16:9",
+          "cfg_scale": 0.5,
+          "duration": "10",
+          "mode": "pro",
+          "model": "kling-v1-6",
+          "model_name": "kling-v1-6",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDE4MDAsImlzcyI6IkFLYjJjM2Q0ZTVmNmE3YjhjOWQwZTFmMmEzYjRjNWQ2ZTciLCJuYmYiOjE2OTk5OTk5OTV9.J6T6hSUK5gRrzOI3RF78LqI0TMFqqWKAPIE5DzKNhFQ",
+          "Content-Type": "application/json",
+          "User-Agent": "kling-sdk/1.0"
+        },
+        "method": "POST",
+        "url": "https://api.klingai.com/v1/videos/text2video"
+      }
+    },
+    {
+      "name": "build submit image via gateway",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "image_to_video",
+          "apiKey": "sk-gw-0123456789abcdef",
+          "auth": {
+            "authHeader": "Bearer sk-gw-0123456789abcdef"
+          },
+          "authHeader": "Bearer sk-gw-0123456789abcdef",
+          "baseUrl": "https://gateway.example.com",
+          "body": {
+            "kind": "json",
+            "value": {}
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 5,
+            "image": "https://img.example.com/reference/dancer.jpg",
+            "metadata": {
+              "mode": "std"
+            },
+            "model": "kling-v1",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1024x1024"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "new_api"
+          },
+          "upstreamModel": "kling-v1",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "action": "image_to_video",
+        "body": {
+          "aspect_ratio": "1:1",
+          "cfg_scale": 0.5,
+          "duration": "5",
+          "image": "https://img.example.com/reference/dancer.jpg",
+          "mode": "std",
+          "model": "kling-v1",
+          "model_name": "kling-v1",
+          "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh"
+        },
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer sk-gw-0123456789abcdef",
+          "Content-Type": "application/json",
+          "User-Agent": "kling-sdk/1.0"
+        },
+        "method": "POST",
+        "url": "https://gateway.example.com/kling/v1/videos/image2video"
+      }
+    },
+    {
+      "name": "build submit rejects malformed key",
+      "hook": "buildSubmitRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "single-token",
+          "auth": {
+            "authHeader": "single-token"
+          },
+          "authHeader": "single-token",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "userSetting": null
+        }
+      ],
+      "expectedError": "invalid api_key, required format is accessKey|secretKey"
+    },
+    {
+      "name": "parse submit",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "task_id": "7381234567890123456",
+              "task_status": "submitted",
+              "updated_at": 1700000000000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 200
+        }
+      ],
+      "expected": {
+        "taskData": {
+          "code": 0,
+          "data": {
+            "created_at": 1700000000000,
+            "task_id": "7381234567890123456",
+            "task_status": "submitted",
+            "updated_at": 1700000000000
+          },
+          "message": "SUCCEED",
+          "request_id": "req-kling-1"
+        },
+        "taskId": "7381234567890123456"
+      }
+    },
+    {
+      "name": "parse submit rejects code",
+      "hook": "parseSubmitResponse",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "userSetting": null
+        },
+        {
+          "body": {
+            "code": 1201,
+            "message": "Invalid parameter: duration",
+            "request_id": "req-kling-2"
+          },
+          "headers": {
+            "Content-Type": [
+              "application/json"
+            ],
+            "X-Request-Id": [
+              "req_0123456789abcdef"
+            ]
+          },
+          "statusCode": 400
+        }
+      ],
+      "expectedError": "Invalid parameter: duration"
+    },
+    {
+      "name": "usage facts",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "usagePurpose": "facts",
+          "userSetting": null
+        }
+      ],
+      "expected": {
+        "units": 7
+      }
+    },
+    {
+      "name": "usage billing ratios is null",
+      "hook": "extractUsage",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "files": [],
+          "method": "POST",
+          "model": "kling-v1-6",
+          "originTaskId": "",
+          "params": {},
+          "path": "/v1/responses",
+          "publicTaskId": "task_pub_0001",
+          "query": {},
+          "requestBody": {
+            "duration": 10,
+            "metadata": {
+              "mode": "pro"
+            },
+            "model": "kling-v1-6",
+            "prompt": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+            "size": "1280x720"
+          },
+          "requestHeaders": {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+          },
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6",
+          "usagePurpose": "billing_ratios",
+          "userSetting": null
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "build query jwt",
+      "hook": "buildQueryRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        }
+      ],
+      "expected": {
+        "headers": {
+          "Accept": "application/json",
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDE4MDAsImlzcyI6IkFLYjJjM2Q0ZTVmNmE3YjhjOWQwZTFmMmEzYjRjNWQ2ZTciLCJuYmYiOjE2OTk5OTk5OTV9.J6T6hSUK5gRrzOI3RF78LqI0TMFqqWKAPIE5DzKNhFQ",
+          "User-Agent": "kling-sdk/1.0"
+        },
+        "method": "GET",
+        "url": "https://api.klingai.com/v1/videos/text2video/7381234567890123456"
+      }
+    },
+    {
+      "name": "parse task succeed with units",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        },
+        {
+          "code": 0,
+          "data": {
+            "created_at": 1700000000000,
+            "final_unit_deduction": "3.5",
+            "task_id": "7381234567890123456",
+            "task_result": {
+              "videos": [
+                {
+                  "duration": "5.1",
+                  "id": "vid-1",
+                  "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                }
+              ]
+            },
+            "task_status": "succeed",
+            "task_status_msg": "",
+            "updated_at": 1700000300000
+          },
+          "message": "SUCCEED",
+          "request_id": "req-kling-1"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "completionTokens": 4,
+        "reason": "",
+        "status": "SUCCESS",
+        "taskId": "7381234567890123456",
+        "totalTokens": 4,
+        "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+      }
+    },
+    {
+      "name": "parse task failed",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        },
+        {
+          "code": 0,
+          "data": {
+            "task_id": "7381234567890123456",
+            "task_status": "failed",
+            "task_status_msg": "content policy"
+          },
+          "message": "SUCCEED"
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "reason": "content policy",
+        "status": "FAILURE",
+        "taskId": "7381234567890123456"
+      }
+    },
+    {
+      "name": "parse task unknown",
+      "hook": "parseTaskResult",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        },
+        {
+          "code": 0,
+          "data": {
+            "task_id": "7381234567890123456",
+            "task_status": "paused"
+          }
+        },
+        {
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "status": 200
+        }
+      ],
+      "expected": {
+        "reason": "unknown task status: paused",
+        "status": "UNKNOWN"
+      }
+    },
+    {
+      "name": "usage on complete units",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "7381234567890123456"
+        },
+        {
+          "code": 0,
+          "data": {
+            "created_at": 1700000000000,
+            "final_unit_deduction": "3.5",
+            "task_id": "7381234567890123456",
+            "task_result": {
+              "videos": [
+                {
+                  "duration": "5.1",
+                  "id": "vid-1",
+                  "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                }
+              ]
+            },
+            "task_status": "succeed",
+            "task_status_msg": "",
+            "updated_at": 1700000300000
+          },
+          "message": "SUCCEED",
+          "request_id": "req-kling-1"
+        }
+      ],
+      "expected": {
+        "units": 3.5
+      }
+    },
+    {
+      "name": "usage on complete null",
+      "hook": "extractUsageOnComplete",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "data": null,
+          "model": "kling-v1-6",
+          "publicTaskId": "task_pub_0001",
+          "state": null,
+          "taskId": "7381234567890123456",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamModel": "kling-v1-6"
+        },
+        {
+          "code": 0,
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "7381234567890123456"
+        },
+        {
+          "code": 0,
+          "data": {
+            "task_id": "x",
+            "task_status": "succeed"
+          }
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "render events success",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderEvents"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1-6",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "final_unit_deduction": "3.5",
+              "task_id": "7381234567890123456",
+              "task_result": {
+                "videos": [
+                  {
+                    "duration": "5.1",
+                    "id": "vid-1",
+                    "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                  }
+                ]
+              },
+              "task_status": "succeed",
+              "task_status_msg": "",
+              "updated_at": 1700000300000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "kling",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        },
+        null
+      ],
+      "expected": {
+        "done": true,
+        "events": [
+          {
+            "data": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+            "type": "output"
+          }
+        ],
+        "state": {
+          "progress": 100,
+          "status": "SUCCESS"
+        }
+      }
+    },
+    {
+      "name": "render final",
+      "hook": "protocols",
+      "path": [
+        "openai_responses",
+        "renderFinal"
+      ],
+      "args": [
+        {
+          "artifacts": {
+            "video": {
+              "key": "video",
+              "type": "video",
+              "url": "https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026exp=1700003600"
+            }
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "input": "A ballet dancer spinning on a rooftop at night, city lights bokeh",
+              "mode": "pro",
+              "model": "kling-v1-6",
+              "seconds": 10,
+              "size": "1280x720"
+            }
+          },
+          "method": "POST",
+          "model": "kling-v1-6",
+          "operation": "create",
+          "params": {},
+          "path": "/v1/responses",
+          "protocol": "openai_responses",
+          "query": {},
+          "stream": false
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "final_unit_deduction": "3.5",
+              "task_id": "7381234567890123456",
+              "task_result": {
+                "videos": [
+                  {
+                    "duration": "5.1",
+                    "id": "vid-1",
+                    "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                  }
+                ]
+              },
+              "task_status": "succeed",
+              "task_status_msg": "",
+              "updated_at": 1700000300000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "kling",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "metadata": {
+          "vendor": "kling"
+        },
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "\u003cvideo controls src=\"https://gateway.example.com/v1/tasks/task_pub_0001/artifacts/video?sig=YWJj\u0026amp;exp=1700003600\"\u003e\u003c/video\u003e",
+                "type": "output_text"
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ]
+      }
+    },
+    {
+      "name": "native task status",
+      "hook": "native",
+      "member": "taskStatus",
+      "args": [
+        {
+          "body": null,
+          "method": "GET",
+          "params": {
+            "task_id": "task_pub_0001"
+          },
+          "path": "/kling/v1/videos/text2video/task_pub_0001",
+          "query": {}
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "final_unit_deduction": "3.5",
+              "task_id": "7381234567890123456",
+              "task_result": {
+                "videos": [
+                  {
+                    "duration": "5.1",
+                    "id": "vid-1",
+                    "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                  }
+                ]
+              },
+              "task_status": "succeed",
+              "task_status_msg": "",
+              "updated_at": 1700000300000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "kling",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "data": {
+          "created_at": 1700000000000,
+          "final_unit_deduction": "3.5",
+          "task_id": "task_pub_0001",
+          "task_result": {
+            "videos": [
+              {
+                "duration": "5.1",
+                "id": "vid-1",
+                "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+              }
+            ]
+          },
+          "task_status": "succeed",
+          "task_status_msg": "",
+          "updated_at": 1700000300000
+        },
+        "message": "SUCCEED",
+        "request_id": "req-kling-1"
+      }
+    },
+    {
+      "name": "native task status without data",
+      "hook": "native",
+      "member": "taskStatus",
+      "args": [
+        {
+          "body": null,
+          "method": "GET",
+          "params": {
+            "task_id": "task_pub_0001"
+          },
+          "path": "/kling/v1/videos/text2video/task_pub_0001",
+          "query": {}
+        },
+        {
+          "created_at": 1700000000,
+          "fail_reason": "",
+          "platform": "kling",
+          "progress": "50%",
+          "status": "IN_PROGRESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000050
+        }
+      ],
+      "expected": {
+        "code": 0,
+        "data": {
+          "task_id": "task_pub_0001",
+          "task_status": "processing",
+          "task_status_msg": ""
+        }
+      }
+    },
+    {
+      "name": "video render",
+      "hook": "protocols",
+      "path": [
+        "openai_video",
+        "render"
+      ],
+      "args": [
+        {
+          "operation": "retrieve",
+          "protocol": "openai_video"
+        },
+        {
+          "created_at": 1700000000,
+          "data": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "final_unit_deduction": "3.5",
+              "task_id": "7381234567890123456",
+              "task_result": {
+                "videos": [
+                  {
+                    "duration": "5.1",
+                    "id": "vid-1",
+                    "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                  }
+                ]
+              },
+              "task_status": "succeed",
+              "task_status_msg": "",
+              "updated_at": 1700000300000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "fail_reason": "",
+          "finished_at": 1700000123,
+          "platform": "kling",
+          "progress": "100%",
+          "status": "SUCCESS",
+          "task_id": "task_pub_0001",
+          "updated_at": 1700000123
+        }
+      ],
+      "expected": {
+        "completed_at": 1700000300000,
+        "created_at": 1700000000000,
+        "id": "task_pub_0001",
+        "model": "",
+        "object": "video",
+        "progress": 100,
+        "seconds": "5.1",
+        "status": "completed"
+      }
+    },
+    {
+      "name": "build content request",
+      "hook": "buildContentRequest",
+      "args": [
+        {
+          "action": "text_to_video",
+          "apiKey": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "artifactKey": "video",
+          "auth": {
+            "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211"
+          },
+          "authHeader": "AKb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7|SKf1e2d3c4b5a6978877665544332211",
+          "baseUrl": "https://api.klingai.com",
+          "clientRequest": {
+            "headers": {},
+            "method": "GET",
+            "rangeHeader": ""
+          },
+          "data": {
+            "code": 0,
+            "data": {
+              "created_at": 1700000000000,
+              "final_unit_deduction": "3.5",
+              "task_id": "7381234567890123456",
+              "task_result": {
+                "videos": [
+                  {
+                    "duration": "5.1",
+                    "id": "vid-1",
+                    "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+                  }
+                ]
+              },
+              "task_status": "succeed",
+              "task_status_msg": "",
+              "updated_at": 1700000300000
+            },
+            "message": "SUCCEED",
+            "request_id": "req-kling-1"
+          },
+          "producerVersion": "1.0.0",
+          "state": null,
+          "status": "SUCCESS",
+          "taskId": "task_pub_0001",
+          "upstream": {
+            "kind": "vendor"
+          },
+          "upstreamTaskId": "7381234567890123456"
+        }
+      ],
+      "expected": {
+        "credentialless": true,
+        "method": "GET",
+        "url": "https://cdn.klingai.com/video/vid-1.mp4?sig=abc"
+      }
+    }
+  ]
+}

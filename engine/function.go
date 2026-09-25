@@ -1,0 +1,583 @@
+package engine
+
+import (
+	"errors"
+
+	"github.com/Calcium-Ion/moejs/bytecode"
+)
+
+// NativeFunc is the Go signature of a builtin function. args may alias the
+// interpreter's register stack: natives MUST NOT retain the slice.
+type NativeFunc func(r *Realm, this Value, args []Value) (Value, error)
+
+// NativeCtor is the [[Construct]] behaviour of a builtin constructor.
+type NativeCtor func(r *Realm, args []Value, newTarget *Object) (Value, error)
+
+// NativeDataFunc is the behaviour of a data native (NewNativeDataFunction):
+// its per-function state is a value stored in the function object, read with
+// fd.Data(), instead of variables captured by a closure, so one adapter
+// serves every function of its kind and creating one costs only the function
+// object. args may alias the register stack, as for NativeFunc.
+type NativeDataFunc func(r *Realm, fd *FunctionData, this Value, args []Value) (Value, error)
+
+// FuncKind classifies function objects for Call/Construct dispatch.
+type FuncKind uint8
+
+const (
+	FuncNative FuncKind = iota
+	FuncBytecode
+	FuncBound
+	FuncNativeData // a NativeDataFunc and its payload
+	FuncProxy      // a callable proxy: dataFn is proxyCall, data the *proxyData
+)
+
+// FunctionData is the internal payload of ClassFunction objects.
+// Fields used by one kind only share the struct with the others, and state
+// only some functions of a kind have lives in data: at 96 bytes the payload
+// fills a funcObject's 240-byte size class exactly and a nativeFuncObject's
+// 224-byte one.
+type FunctionData struct {
+	native    NativeFunc
+	code      *bytecode.Function
+	env       *Env
+	thisValue Value // captured this of an arrow function; the bound this of a bound function
+	realm     *Realm
+	name      *String
+	meta      *funcMeta // interpreter: materialized constants of code (interp.go)
+	// data is the state of the kind: the payload of a data native, the
+	// NativeCtor of a native constructor, the [[HomeObject]] of a method,
+	// the *boundFunc of a bound function.
+	data   any
+	dataFn NativeDataFunc // behaviour of a data native
+	icBase uint32         // interpreter: base of this function's inline caches in realm.ic
+	kind   FuncKind       // after icBase so the two share a word
+}
+
+// boundFunc is the state of a bound function beyond its bound this.
+type boundFunc struct {
+	target *Object
+	args   []Value
+}
+
+// bound returns the state of a bound function.
+func (fd *FunctionData) bound() *boundFunc { return fd.data.(*boundFunc) }
+
+// ctor returns the [[Construct]] behaviour of a native constructor.
+func (fd *FunctionData) ctor() NativeCtor { return fd.data.(NativeCtor) }
+
+// setCtor records the [[Construct]] behaviour of a native function; nil
+// makes it a plain function.
+func (fd *FunctionData) setCtor(ctor NativeCtor) {
+	fd.data = nil
+	if ctor != nil {
+		fd.data = ctor
+	}
+}
+
+// Kind returns the dispatch kind.
+func (fd *FunctionData) Kind() FuncKind { return fd.kind }
+
+// Code returns the compiled template for bytecode functions.
+func (fd *FunctionData) Code() *bytecode.Function { return fd.code }
+
+// Env returns the closure environment for bytecode functions.
+func (fd *FunctionData) Env() *Env { return fd.env }
+
+// ThisValue returns the lexically captured this of an arrow function (the
+// bound this of a bound function).
+func (fd *FunctionData) ThisValue() Value { return fd.thisValue }
+
+// HomeObject returns the [[HomeObject]] of a method (nil otherwise).
+func (fd *FunctionData) HomeObject() *Object {
+	if fd.kind != FuncBytecode {
+		return nil
+	}
+	h, _ := fd.data.(*Object)
+	return h
+}
+
+// Realm returns the realm that created the function, or nil for shared
+// intrinsics (natives must use the realm passed to them instead).
+func (fd *FunctionData) Realm() *Realm { return fd.realm }
+
+// Name returns the function's initial name (may be nil).
+func (fd *FunctionData) Name() *String { return fd.name }
+
+// BoundTarget returns the target of a bound function (nil otherwise).
+func (fd *FunctionData) BoundTarget() *Object {
+	if fd.kind != FuncBound {
+		return nil
+	}
+	return fd.bound().target
+}
+
+// Native returns the native implementation (nil for bytecode functions and
+// data natives).
+func (fd *FunctionData) Native() NativeFunc { return fd.native }
+
+// Data returns the payload of a data native (nil otherwise).
+func (fd *FunctionData) Data() any {
+	if fd.kind != FuncNativeData {
+		return nil
+	}
+	return fd.data
+}
+
+// IsConstructor reports whether the function has [[Construct]].
+func (fd *FunctionData) IsConstructor() bool {
+	switch fd.kind {
+	case FuncNative:
+		return fd.data != nil
+	case FuncBound:
+		return fd.bound().target.internal.(*FunctionData).IsConstructor()
+	case FuncProxy:
+		return fd.data.(*proxyData).ctor
+	}
+	return fd.code != nil && (fd.code.Kind == bytecode.KindNormal || fd.code.Kind.IsClassCtor())
+}
+
+// funcObject co-allocates a function object, its payload and the slots of
+// its three intrinsic properties (length, name and, for ordinary functions,
+// prototype), so a closure or builtin function costs one allocation.
+type funcObject struct {
+	obj   Object
+	fd    FunctionData
+	slots [3]Value
+}
+
+// nativeFuncObject is the funcObject of a function without a `prototype`
+// (plain and data natives): two slots, 224 bytes instead of 240.
+type nativeFuncObject struct {
+	obj   Object
+	fd    FunctionData
+	slots [2]Value
+}
+
+// boundFuncObject co-allocates a bound function with its boundFunc.
+type boundFuncObject struct {
+	obj   Object
+	fd    FunctionData
+	bound boundFunc
+	slots [2]Value
+}
+
+// Env is a closure environment: captured bindings of one scope.
+type Env struct {
+	parent *Env
+	slots  []Value
+}
+
+// NewEnv creates an environment with n slots initialized to undefined.
+func NewEnv(parent *Env, n int) *Env {
+	e := &Env{parent: parent, slots: make([]Value, n)}
+	u := Undefined()
+	for i := range e.slots {
+		e.slots[i] = u
+	}
+	return e
+}
+
+// Parent returns the enclosing environment.
+func (e *Env) Parent() *Env { return e.parent }
+
+// Len returns the slot count.
+func (e *Env) Len() int { return len(e.slots) }
+
+// Slot reads slot i.
+func (e *Env) Slot(i int) Value { return e.slots[i] }
+
+// SetSlot writes slot i.
+func (e *Env) SetSlot(i int, v Value) { e.slots[i] = v }
+
+// Slots exposes the slot storage for the interpreter.
+func (e *Env) Slots() []Value { return e.slots }
+
+// ModuleEnv is the top-level environment of a module. Exports are live
+// bindings: GetBindingValue reads the slot each time.
+type ModuleEnv struct {
+	*Env
+	exports map[string]int
+}
+
+// NewModuleEnv creates a module environment with nslots bindings and the
+// given export-name -> slot mapping.
+func NewModuleEnv(nslots int, exports map[string]int) *ModuleEnv {
+	return &ModuleEnv{Env: NewEnv(nil, nslots), exports: exports}
+}
+
+// GetBindingValue returns the current value of an exported binding. ok is
+// false for unknown names. A Hole() value means the binding is in its TDZ.
+func (m *ModuleEnv) GetBindingValue(name string) (Value, bool) {
+	i, ok := m.exports[name]
+	if !ok {
+		return Undefined(), false
+	}
+	return m.slots[i], true
+}
+
+// ExportNames returns the export names (unordered).
+func (m *ModuleEnv) ExportNames() []string {
+	names := make([]string, 0, len(m.exports))
+	for n := range m.exports {
+		names = append(names, n)
+	}
+	return names
+}
+
+// ErrNoInterpreter is returned by Call/Construct on bytecode functions until
+// the interpreter sets runFunction/constructFunction in its init().
+var ErrNoInterpreter = errors.New("engine: bytecode interpreter is not linked")
+
+// runFunction executes a bytecode function. The interpreter (engine/interp_*.go)
+// replaces this stub in init().
+var runFunction = func(r *Realm, fn *Object, fd *FunctionData, this Value, args []Value) (Value, error) {
+	return Undefined(), ErrNoInterpreter
+}
+
+// constructFunction runs [[Construct]] of a bytecode function. Same contract
+// as runFunction.
+var constructFunction = func(r *Realm, fn *Object, fd *FunctionData, args []Value, newTarget *Object) (Value, error) {
+	return Undefined(), ErrNoInterpreter
+}
+
+// MaxCallDepth is the frame limit before "Maximum call stack size exceeded".
+const MaxCallDepth = 512
+
+// EnterCall accounts one frame; the interpreter calls it for JS-to-JS calls.
+func (r *Realm) EnterCall() error {
+	if r.callDepth >= MaxCallDepth {
+		return r.RangeError("Maximum call stack size exceeded")
+	}
+	r.callDepth++
+	return nil
+}
+
+// ExitCall releases a frame taken by EnterCall.
+func (r *Realm) ExitCall() { r.callDepth-- }
+
+// CallDepth returns the current frame count.
+func (r *Realm) CallDepth() int { return int(r.callDepth) }
+
+// CallState is a snapshot of the realm's call bookkeeping: the frame depth
+// and the interpreter's register stack and frame table positions. A host
+// takes it at its entry into the engine and restores it when a Go panic
+// (a native's non-JavaScript panic, re-panicked to the host) unwound
+// through interpreter frames without running their exits, so a host that
+// recovers keeps a usable runtime.
+type CallState struct {
+	depth, sp, nframes int
+}
+
+// CallState returns the current call bookkeeping.
+func (r *Realm) CallState() CallState {
+	return CallState{depth: int(r.callDepth), sp: r.interp.sp, nframes: r.interp.nframes}
+}
+
+// RestoreCallState resets the call bookkeeping to a snapshot taken at the
+// same host boundary.
+func (r *Realm) RestoreCallState(cs CallState) {
+	r.callDepth, r.interp.sp, r.interp.nframes = int32(cs.depth), cs.sp, cs.nframes
+}
+
+// IsCallable implements the IsCallable abstract operation.
+func IsCallable(v Value) bool {
+	return v.IsObject() && v.AsObject().IsCallable()
+}
+
+// IsConstructor implements the IsConstructor abstract operation.
+func IsConstructor(v Value) bool {
+	if !IsCallable(v) {
+		return false
+	}
+	fd, _ := v.AsObject().internal.(*FunctionData)
+	return fd != nil && fd.IsConstructor()
+}
+
+// Call implements the Call abstract operation.
+func (r *Realm) Call(fn Value, this Value, args []Value) (Value, error) {
+	if !IsCallable(fn) {
+		return Undefined(), r.TypeError("%s is not a function", r.DisplayString(fn))
+	}
+	return r.CallObject(fn.AsObject(), this, args)
+}
+
+// CallObject calls a function object known to be callable.
+func (r *Realm) CallObject(fn *Object, this Value, args []Value) (Value, error) {
+	fd := fn.internal.(*FunctionData)
+	if r.callDepth >= MaxCallDepth {
+		return Undefined(), r.RangeError("Maximum call stack size exceeded")
+	}
+	r.callDepth++
+	var (
+		res Value
+		err error
+	)
+	switch fd.kind {
+	case FuncNative:
+		res, err = fd.native(r, this, args)
+	case FuncBytecode:
+		res, err = runFunction(r, fn, fd, this, args)
+	default:
+		res, err = r.callOther(fd, this, args)
+	}
+	r.callDepth--
+	if r.callDepth == 0 && r.jobsPending {
+		err = r.endJob(err)
+	}
+	return res, err
+}
+
+// callOther calls the kinds outside the two hot dispatch arms (natives and
+// bytecode): bound functions and data natives. The caller has counted the
+// call depth.
+func (r *Realm) callOther(fd *FunctionData, this Value, args []Value) (Value, error) {
+	if fd.kind == FuncBound {
+		b := fd.bound()
+		return r.CallObject(b.target, fd.thisValue, appendArgs(b.args, args))
+	}
+	return fd.dataFn(r, fd, this, args)
+}
+
+// Construct implements the Construct abstract operation. newTarget nil means
+// the constructor itself.
+func (r *Realm) Construct(fn Value, args []Value, newTarget *Object) (Value, error) {
+	if !IsConstructor(fn) {
+		return Undefined(), r.TypeError("%s is not a constructor", r.DisplayString(fn))
+	}
+	f := fn.AsObject()
+	if newTarget == nil {
+		newTarget = f
+	}
+	fd := f.internal.(*FunctionData)
+	if r.callDepth >= MaxCallDepth {
+		return Undefined(), r.RangeError("Maximum call stack size exceeded")
+	}
+	r.callDepth++
+	var (
+		res Value
+		err error
+	)
+	switch fd.kind {
+	case FuncNative:
+		res, err = fd.ctor()(r, args, newTarget)
+	case FuncBound:
+		b := fd.bound()
+		if newTarget == f {
+			newTarget = b.target
+		}
+		res, err = r.Construct(ObjectValue(b.target), appendArgs(b.args, args), newTarget)
+	case FuncProxy:
+		res, err = r.proxyConstruct(fd.data.(*proxyData), args, newTarget)
+	default:
+		res, err = constructFunction(r, f, fd, args, newTarget)
+	}
+	r.callDepth--
+	if r.callDepth == 0 && r.jobsPending {
+		err = r.endJob(err)
+	}
+	return res, err
+}
+
+func appendArgs(bound, args []Value) []Value {
+	if len(bound) == 0 {
+		return args
+	}
+	out := make([]Value, 0, len(bound)+len(args))
+	out = append(out, bound...)
+	return append(out, args...)
+}
+
+// newFunctionObject allocates a function object with the realm's shared
+// function shape (length, name) and room for a third property.
+func (r *Realm) newFunctionObject(name *String, length int, kind FuncKind) (*Object, *FunctionData) {
+	fo := &funcObject{}
+	r.initFunction(&fo.obj, &fo.fd, fo.slots[:2:3], name, length, kind)
+	return &fo.obj, &fo.fd
+}
+
+// newNativeFunctionObject is newFunctionObject for a function that has no
+// `prototype`: a nativeFuncObject, from the bootstrap slab while the
+// intrinsics of a mutable realm are being built.
+func (r *Realm) newNativeFunctionObject(name *String, length int, kind FuncKind) (*Object, *FunctionData) {
+	var fo *nativeFuncObject
+	if b := r.boot; b != nil && len(b.funcs) < cap(b.funcs) {
+		n := len(b.funcs)
+		b.funcs = b.funcs[:n+1]
+		fo = &b.funcs[n]
+	} else {
+		fo = &nativeFuncObject{}
+	}
+	r.initFunction(&fo.obj, &fo.fd, fo.slots[:], name, length, kind)
+	return &fo.obj, &fo.fd
+}
+
+// initFunction links a function object with its payload, the realm's
+// function shape and its length and name slots.
+func (r *Realm) initFunction(o *Object, fd *FunctionData, slots []Value, name *String, length int, kind FuncKind) {
+	o.shape = r.functionShape()
+	o.proto = r.FunctionPrototype
+	o.class = ClassFunction
+	o.flags = flagExtensible
+	o.internal = fd
+	fd.kind = kind
+	fd.realm = r
+	fd.name = name
+	slots[0] = IntValue(length)
+	slots[1] = StringValue(name)
+	o.slots = slots
+}
+
+// setFunctionName implements SetFunctionName on a function the Closure op
+// just created (its `name` is still an own data property): object-literal
+// methods with computed keys are named after the evaluated key.
+func (r *Realm) setFunctionName(fn *Object, name *String) {
+	fn.internal.(*FunctionData).name = name
+	if p, attrs, ok := fn.lookupNamed(StringKey(AtomName)); ok && attrs&attrAccessor == 0 {
+		*p = StringValue(name)
+	}
+}
+
+// allocSlots hands out slot storage, from a bootstrap slab when available.
+func (r *Realm) allocSlots(n int) []Value {
+	if b := r.boot; b != nil && len(b.slots)+n <= cap(b.slots) {
+		start := len(b.slots)
+		b.slots = b.slots[:start+n]
+		return b.slots[start : start+n : start+n]
+	}
+	return make([]Value, n)
+}
+
+// NewNativeFunction creates a builtin function object. name should be an
+// atom; length is the value of the `length` property.
+func (r *Realm) NewNativeFunction(name *String, length int, fn NativeFunc) *Object {
+	o, fd := r.newNativeFunctionObject(name, length, FuncNative)
+	fd.native = fn
+	return o
+}
+
+// NewNativeDataFunction creates a function object whose [[Call]] is fn with
+// data as its payload (FunctionData.Data): a host binding creates one per Go
+// value while fn stays one package-level adapter per Go signature. Data
+// natives are not constructors.
+func (r *Realm) NewNativeDataFunction(name *String, length int, fn NativeDataFunc, data any) *Object {
+	o, fd := r.newNativeFunctionObject(name, length, FuncNativeData)
+	fd.dataFn = fn
+	fd.data = data
+	return o
+}
+
+// NewNativeConstructor creates a builtin constructor with both [[Call]] and
+// [[Construct]] behaviour. call may be nil, in which case calling without
+// `new` throws a TypeError.
+func (r *Realm) NewNativeConstructor(name *String, length int, call NativeFunc, ctor NativeCtor) *Object {
+	o, fd := r.newFunctionObject(name, length, FuncNative)
+	if call == nil {
+		call = func(r *Realm, this Value, args []Value) (Value, error) {
+			return Undefined(), r.TypeError("Constructor %s requires 'new'", name.GoString())
+		}
+	}
+	fd.native = call
+	fd.setCtor(ctor)
+	return o
+}
+
+// SetHomeObject records the [[HomeObject]] of a method.
+func (fd *FunctionData) SetHomeObject(o *Object) { fd.data = o }
+
+// NewBoundFunction implements BoundFunctionCreate plus the `length`/`name`
+// steps of Function.prototype.bind, so the bind method is a thin wrapper.
+func (r *Realm) NewBoundFunction(target *Object, boundThis Value, boundArgs []Value) (*Object, error) {
+	if !target.IsCallable() {
+		return nil, r.TypeError("Bind must be called on a function")
+	}
+	proto, err := r.getPrototypeOf(target)
+	if err != nil {
+		return nil, err
+	}
+	length := IntValue(0)
+	hasLength, err := r.hasOwnProperty(target, lengthKey)
+	if err != nil {
+		return nil, err
+	}
+	if hasLength {
+		lv, err := target.GetProp(r, lengthKey)
+		if err != nil {
+			return nil, err
+		}
+		if lv.IsNumber() {
+			switch f := lv.AsNumber(); {
+			case f == posInf:
+				length = NumberValue(posInf)
+			case f == negInf || f != f:
+				length = IntValue(0)
+			default:
+				length = NumberValue(max(0, ToIntegerOrInfinityFloat(f)-float64(len(boundArgs))))
+			}
+		}
+	}
+	nameKey := StringKey(AtomName)
+	nv, err := target.GetProp(r, nameKey)
+	if err != nil {
+		return nil, err
+	}
+	targetName := AtomEmpty
+	if nv.IsString() {
+		targetName = nv.AsString()
+	}
+	name, err := r.Concat(AtomBoundSpace, targetName)
+	if err != nil {
+		return nil, err
+	}
+	bo := &boundFuncObject{}
+	o, fd := &bo.obj, &bo.fd
+	r.initFunction(o, fd, bo.slots[:], name, 0, FuncBound)
+	o.slots[0] = length
+	bo.bound.target = target
+	fd.thisValue = boundThis
+	if len(boundArgs) != 0 {
+		bo.bound.args = append([]Value(nil), boundArgs...)
+	}
+	fd.data = &bo.bound
+	if proto != r.FunctionPrototype {
+		o.proto = proto
+		o.shape = r.functionShape().rebase(r, r.rootShapeFor(proto))
+	}
+	return o, nil
+}
+
+// OrdinaryCreateFromConstructor creates an object whose prototype is
+// newTarget.prototype when that is an object, else defaultProto.
+func (r *Realm) OrdinaryCreateFromConstructor(newTarget *Object, defaultProto *Object, class Class) (*Object, error) {
+	proto, err := r.GetPrototypeFromConstructor(newTarget, nil, defaultProto)
+	if err != nil {
+		return nil, err
+	}
+	r.markPrototype(proto)
+	return r.newObject(class, r.rootShapeFor(proto)), nil
+}
+
+// GetPrototypeFromConstructor implements GetPrototypeFromConstructor
+// (ECMA-262 §10.1.14) for the [[Construct]] of a builtin constructor ctor:
+// the prototype of the object it creates is newTarget.prototype when that
+// is an object, else intrinsicDefault (the realm's own intrinsic: moejs has
+// no cross-realm functions). This is what makes builtins subclassable: `new
+// Sub()` for `class Sub extends Array` reaches arrayConstruct with newTarget
+// Sub. newTarget nil (a [[Call]]) or ctor itself returns intrinsicDefault
+// without a property read, so constructing the builtin directly pays
+// nothing (ctor.prototype is intrinsicDefault and cannot change).
+func (r *Realm) GetPrototypeFromConstructor(newTarget, ctor, intrinsicDefault *Object) (*Object, error) {
+	if newTarget == nil || newTarget == ctor {
+		return intrinsicDefault, nil
+	}
+	pv, err := newTarget.GetProp(r, StringKey(AtomPrototype))
+	if err != nil {
+		return nil, err
+	}
+	if pv.IsObject() {
+		return pv.AsObject(), nil
+	}
+	if err := r.checkFunctionRealm(newTarget); err != nil {
+		return nil, err
+	}
+	return intrinsicDefault, nil
+}
