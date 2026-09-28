@@ -39,6 +39,15 @@ func FuzzRegexpRE2VsBacktrack(f *testing.F) {
 		{`(?:a|b)*?c`, "s", "ab\nc"},
 		{`[\s\S]+?x|$`, "g", "a\nbx"},
 		{`(?<y>\d{4})-(?<m>\d{2})`, "", "on 1999-12"},
+		// Annex B (B.1.2) without u: extended pattern characters, \c and its
+		// fallback, legacy octal and identity escapes, \k without a group
+		// name, and class ranges with class escapes.
+		{`]{2}|}+|a{|x{,2}`, "", "]]}}a{x{,2}"},
+		{`\c|\cA|[\c_][\c]`, "i", "\\c\x01\x1f\\c"},
+		{`\0\07\377\400\8[\1\8]`, "", "\x00\x07\xff 08\x018"},
+		{`\k[\k]\q\u004\x4g\-`, "i", "kKqu004x4g-"},
+		{`[\d-a]+[a-\s-b]*[\s-0-A]`, "", "1-a b-0A"},
+		{`(a)\3|\8(b)`, "g", "a\x038b"},
 	} {
 		f.Add(s[0], s[1], s[2])
 	}

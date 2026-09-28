@@ -3,7 +3,6 @@ package syntax
 import (
 	"strings"
 	"sync/atomic"
-	"unicode/utf16"
 
 	"github.com/Calcium-Ion/moejs/internal/regexpsyntax"
 )
@@ -58,10 +57,10 @@ func (p *parser) checkRegex(start int) {
 			p.re = new(regexpChecker)
 		}
 	}
-	units := p.re.units[:0]
-	for _, r := range p.val { // invalid UTF-8 reads as U+FFFD, an ordinary character
-		units = utf16.AppendRune(units, r)
-	}
+	// Source text compiled from a String keeps its lone surrogates as WTF-8
+	// (engine sourceText); other invalid UTF-8 reads as U+FFFD, an ordinary
+	// character.
+	units := appendWTF8Units(p.re.units[:0], p.val)
 	p.re.units = units
 	if err := p.re.c.Check(units, f); err != nil {
 		var flags strings.Builder

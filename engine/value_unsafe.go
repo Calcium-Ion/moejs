@@ -57,6 +57,10 @@ const (
 	// tagPrivate is internal: a *PrivateName, held by the registers and
 	// environment slots of class code and used as a property key (private.go).
 	tagPrivate
+	// tagImport is internal: a *Value pointing into the exporting module's
+	// environment, held by the environment slot of an import binding and
+	// read through by GetImport (module.go).
+	tagImport
 )
 
 // NumberValue boxes a float64, canonicalizing NaN.
@@ -122,6 +126,9 @@ func accessorValue(a *Accessor) Value { return Value{ptr: unsafe.Pointer(a), bit
 // privateValue boxes a private name (internal).
 func privateValue(p *PrivateName) Value { return Value{ptr: unsafe.Pointer(p), bits: tagPrivate} }
 
+// importRef boxes a reference to an exported binding's slot (internal).
+func importRef(slot *Value) Value { return Value{ptr: unsafe.Pointer(slot), bits: tagImport} }
+
 // IsNumber reports whether v is a JavaScript number.
 func (v Value) IsNumber() bool { return v.ptr == nil && v.bits&reservedMask != reservedPrefix }
 
@@ -166,6 +173,12 @@ func (v Value) IsPrimitive() bool { return v.ptr == nil || v.bits != tagObject }
 func (v Value) isAccessor() bool { return v.ptr != nil && v.bits == tagAccessor }
 
 func (v Value) isPrivate() bool { return v.ptr != nil && v.bits == tagPrivate }
+
+func (v Value) isImportRef() bool { return v.ptr != nil && v.bits == tagImport }
+
+// importTarget returns the slot an import reference points to. Only valid
+// when isImportRef.
+func (v Value) importTarget() *Value { return (*Value)(v.ptr) }
 
 // asPrivate returns the *PrivateName payload. Only valid when isPrivate.
 func (v Value) asPrivate() *PrivateName { return (*PrivateName)(v.ptr) }

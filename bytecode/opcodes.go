@@ -187,6 +187,30 @@ const (
 	AsyncIterClosed // A     TypeError unless the awaited return result R[A+2] is an object
 	AsyncDelegate   // ABC   one async yield* step on the record R[B..B+2] with value R[A] and mode R[A+1] (C=0 call, C=1 result)
 
+	// --- modules ---
+	GetImport  // ABC+X  R[A] = the binding env^B[C] refers to; ReferenceError if hole; X = name const
+	GetImportW // AB+X+X R[A] = the binding env^B[X1] refers to; ReferenceError if hole; X2 = name const
+	ImportCall // AB    R[A] = import(R[B]): a promise for the namespace of the module the host loads for it
+	ImportMeta // A     R[A] = import.meta of the running script or module's root
+
+	// --- sloppy mode, script globals and with (dispatched after the async ops) ---
+	SetGlobalSloppy // A+X   global[name] = R[A] in sloppy mode: creates an unresolvable name, a rejected write is ignored; X = name:16 | ic:16
+	InitGlobal      // A+X   initialize the script's global lexical binding name to R[A]; X = name:16 | const<<16
+	SetGlobalVar    // A+X   Annex B.3.2.2: global[name] = R[A] (sloppy) unless a global lexical binding name exists; X = name const
+	DelGlobal       // A+X   R[A] = delete of the global binding name (false for a global lexical); X = name const
+	SetPropSloppy   // AB+X  R[A].name = R[B], a rejected assignment ignored; X = name:16 | ic:16
+	SetElemSloppy   // ABC   R[A][R[B]] = R[C], a rejected assignment ignored
+	DelPropSloppy   // AB+X  R[A] = delete R[B].name, false when rejected; X = name const
+	DelElemSloppy   // ABC   R[A] = delete R[B][R[C]], false when rejected
+	SetSuperSloppy  // ABC   R[A][R[B]] = R[C] with receiver R[A+1], a rejected assignment ignored
+	ToObject        // AB    R[A] = ToObject(R[B]) (the with statement's object)
+	JmpWith         // AsBx+X pc += sBx if the with object R[A] has a binding name (HasProperty, not @@unscopables-blocked); X = name const
+	WithGet         // AB+X  R[A] = binding name of the with object R[B]; X = name:16 | strict<<16
+	WithSet         // AB+X  set binding name of the with object R[A] to R[B]; X = name:16 | strict<<16
+	CoerceThis      // -     this = the global object if undefined or null, else ToObject(this) (sloppy function entry)
+	MapArguments    // A     make the arguments object R[A] mapped to the parameters in the function's own Env
+	CallEval        // ABC+X R[A] = call of callee R[A] with this R[A+1] and args R[A+2..] (B = argc, C = 1: one spread array), a direct eval when the callee is %eval%; X = index into Extra.Evals
+
 	opCount
 )
 
@@ -372,6 +396,28 @@ var opTable = [...]opInfo{
 	AsyncIterClose:  {"AsyncIterClose", FmtAsBx, 0},
 	AsyncIterClosed: {"AsyncIterClosed", FmtA, 0},
 	AsyncDelegate:   {"AsyncDelegate", FmtABC, 0},
+
+	GetImport:  {"GetImport", FmtABC, 1},
+	GetImportW: {"GetImportW", FmtAB, 2},
+	ImportCall: {"ImportCall", FmtAB, 0},
+	ImportMeta: {"ImportMeta", FmtA, 0},
+
+	SetGlobalSloppy: {"SetGlobalSloppy", FmtA, 1},
+	InitGlobal:      {"InitGlobal", FmtA, 1},
+	SetGlobalVar:    {"SetGlobalVar", FmtA, 1},
+	DelGlobal:       {"DelGlobal", FmtA, 1},
+	SetPropSloppy:   {"SetPropSloppy", FmtAB, 1},
+	SetElemSloppy:   {"SetElemSloppy", FmtABC, 0},
+	DelPropSloppy:   {"DelPropSloppy", FmtAB, 1},
+	DelElemSloppy:   {"DelElemSloppy", FmtABC, 0},
+	SetSuperSloppy:  {"SetSuperSloppy", FmtABC, 0},
+	ToObject:        {"ToObject", FmtAB, 0},
+	JmpWith:         {"JmpWith", FmtAsBx, 1},
+	WithGet:         {"WithGet", FmtAB, 1},
+	WithSet:         {"WithSet", FmtAB, 1},
+	CoerceThis:      {"CoerceThis", FmtNone, 0},
+	MapArguments:    {"MapArguments", FmtA, 0},
+	CallEval:        {"CallEval", FmtABC, 1},
 }
 
 // String returns the mnemonic.

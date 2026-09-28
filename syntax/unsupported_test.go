@@ -7,38 +7,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUnsupportedFeatures asserts the exact diagnostic for every deferred
-// language feature, and that Options.AllowUnsupported lifts the rejection
-// without touching the parser.
-func TestUnsupportedFeatures(t *testing.T) {
+// TestUnsupportedModuleSyntax checks that the import forms of proposals
+// moejs does not implement fail naming them, whatever the options, and that
+// the imports they resemble parse.
+func TestUnsupportedModuleSyntax(t *testing.T) {
 	tests := []struct {
-		name      string
-		src       string
-		line, col int
-		msg       string
+		src string
+		msg string // "" parses
 	}{
-		{"import", "import x from \"y\";", 1, 1, "SyntaxError: import is not supported yet (see TODO.md)"},
-		{"import-named", "import { a } from \"y\";", 1, 1, "SyntaxError: import is not supported yet (see TODO.md)"},
-		{"import-side-effect", "import \"y\";", 1, 1, "SyntaxError: import is not supported yet (see TODO.md)"},
-		{"dynamic-import", "import(\"y\");", 1, 1, "SyntaxError: dynamic import() is not supported yet (see TODO.md)"},
-		{"import-meta", "import.meta;", 1, 1, "SyntaxError: import.meta is not supported yet (see TODO.md)"},
-		{"export-all", "export * from \"y\";", 1, 1, "SyntaxError: export ... from is not supported yet (see TODO.md)"},
-		{"export-from", "export { x } from \"y\";", 1, 1, "SyntaxError: export ... from is not supported yet (see TODO.md)"},
-		{"direct-eval", "eval(\"x\");", 1, 1, "SyntaxError: direct eval is not supported yet (see TODO.md)"},
-		{"direct-eval-in-function", "function f() { return eval(\"x\"); }", 1, 23, "SyntaxError: direct eval is not supported yet (see TODO.md)"},
+		{`import x from "m" with { type: "json" };`, `t.js:1:19: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`import "m" with {};`, `t.js:1:12: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`export { x } from "m" with { type: "json" };`, `t.js:1:23: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`export * from "m" with {};`, `t.js:1:19: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`x = import("m", { with: { type: "json" } });`, `t.js:1:17: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`x = import("m", {},);`, `t.js:1:17: SyntaxError: import attribute syntax is not supported yet (see TODO.md)`},
+		{`x = import("m",);`, ""},
+		{`x = import.meta;`, ""},
+		{`import defer * as ns from "m";`, `t.js:1:1: SyntaxError: import defer is not supported yet (see TODO.md)`},
+		{`import source s from "m";`, `t.js:1:1: SyntaxError: import source is not supported yet (see TODO.md)`},
+		{`import source from from "m";`, `t.js:1:1: SyntaxError: import source is not supported yet (see TODO.md)`},
+		{`x = import.source("m");`, `t.js:1:5: SyntaxError: import source is not supported yet (see TODO.md)`},
+		{`x = import.defer("m");`, `t.js:1:5: SyntaxError: import defer is not supported yet (see TODO.md)`},
+		{`import defer from "m";`, ""},
+		{`import defer, * as ns from "m";`, ""},
+		{`import source from "m";`, ""},
+		{`import source, { x } from "m";`, ""},
+		{`import { defer, source } from "m";`, ""},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseModule("t.js", tt.src, Options{})
-			require.Error(t, err)
-			var se *Error
-			require.ErrorAs(t, err, &se)
-			assert.Equal(t, tt.msg, se.Msg)
-			assert.Equal(t, [2]int{tt.line, tt.col}, [2]int{se.Line, se.Col}, "position")
-
-			_, err = ParseModule("t.js", tt.src, Options{AllowUnsupported: true})
-			assert.NoError(t, err, "AllowUnsupported must accept the syntax")
-		})
+		for _, opts := range []Options{{}, {AllowUnsupported: true}} {
+			_, err := ParseModule("t.js", tt.src, opts)
+			if tt.msg == "" {
+				assert.NoError(t, err, tt.src)
+				continue
+			}
+			assert.EqualError(t, err, tt.msg, tt.src)
+		}
 	}
 }
 
@@ -60,20 +64,12 @@ func TestUnsupportedAnnotations(t *testing.T) {
 	assert.False(t, h.UsesArguments)
 	assert.Nil(t, h.ExprBody.(*Ident).Binding)
 
-	// Only a call to the unresolved name `eval` is direct eval.
-	m, err = ParseModule("t.js", "function f() { eval; return x.eval(1) + eval.length; }", Options{})
+	// Only a call of the identifier eval, not optional, is direct eval,
+	// whatever the name resolves to.
+	m, err = ParseModule("t.js", "function f() { eval; return x.eval(1) + eval.length + eval?.(1) + (0, eval)(1); }", Options{})
 	require.NoError(t, err)
 	assert.False(t, m.Body[0].(*FuncDecl).Func.HasDirectEval)
-}
-
-func TestUnsupportedOrder(t *testing.T) {
-	// The first unsupported construct in source order is reported even when
-	// a later one nests inside.
-	_, err := ParseModule("t.js", "eval(import(\"y\"));", Options{})
-	require.Error(t, err)
-	assert.Equal(t, "t.js:1:1: SyntaxError: direct eval is not supported yet (see TODO.md)", err.Error())
-
-	_, err = ParseModule("t.js", "function f() { import.meta; eval(\"x\"); }", Options{})
-	require.Error(t, err)
-	assert.Equal(t, "t.js:1:16: SyntaxError: import.meta is not supported yet (see TODO.md)", err.Error())
+	s, err := ParseScript("t.js", "function g(eval) { return (eval)(1); }", Options{})
+	require.NoError(t, err)
+	assert.True(t, s.Body[0].(*FuncDecl).Func.HasDirectEval)
 }

@@ -1,6 +1,7 @@
 package syntax
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -58,5 +59,43 @@ func TestFilePositionIndex(t *testing.T) {
 	ascii.addLine(3*runeStride + 1)
 	if l, c := ascii.Position(3*runeStride + 2); l != 2 || c != 2 {
 		t.Fatalf("Position = %d:%d, want 2:2", l, c)
+	}
+}
+
+// TestOptionsStop: the parser and the resolver call Options.Stop before the
+// first and every stopEvery-th statement of each statement list, and a Stop
+// that fails ends the parse there with its error.
+func TestOptionsStop(t *testing.T) {
+	list := strings.Repeat("x = x + 1;", stopEvery+1) // two calls a pass
+	src := "function g() {" + list + "} {" + list + "} switch (0) { case 0: " + list + "} " + list
+	parses := []struct {
+		name  string
+		calls int // two for each of the four lists (the program, g's body, the block and the case) in each pass
+		parse func(opts Options) error
+	}{
+		{"script", 16, func(opts Options) error { _, err := ParseScript("s.js", src, opts); return err }},
+		{"module", 16, func(opts Options) error { _, err := ParseModule("m.js", src, opts); return err }},
+		{"eval", 16, func(opts Options) error { _, err := ParseEval("e.js", src, nil, opts); return err }},
+	}
+	errStop := errors.New("stop")
+	for _, tc := range parses {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			if err := tc.parse(Options{Stop: func() error { calls++; return nil }}); err != nil || calls != tc.calls {
+				t.Fatalf("a Stop that returns nil: err %v, %d calls, want %d", err, calls, tc.calls)
+			}
+			for at := 1; at <= tc.calls; at++ {
+				calls = 0
+				err := tc.parse(Options{Stop: func() error {
+					if calls++; calls == at {
+						return errStop
+					}
+					return nil
+				}})
+				if err != errStop || calls != at {
+					t.Errorf("a Stop that fails at call %d: err %v after %d calls", at, err, calls)
+				}
+			}
+		})
 	}
 }

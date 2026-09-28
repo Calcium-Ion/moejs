@@ -97,7 +97,7 @@ func setPrototypeError(r *Realm, o *Object, err error) error {
 	switch {
 	case err != nil:
 		return err
-	case o.class == ClassProxy:
+	case o.class == ClassProxy && nsOf(o) == nil:
 		return r.TypeError("'setPrototypeOf' on proxy: trap returned falsish")
 	case o == r.ObjectPrototype:
 		return r.TypeError("Immutable prototype object 'Object.prototype' cannot have their prototype set")
@@ -345,7 +345,7 @@ func assignProxyProperties(r *Realm, to, from *Object) error {
 		if ok, err := to.Set(r, k, v, ObjectValue(to)); err != nil {
 			return err
 		} else if !ok {
-			return r.TypeError("Cannot assign to read only property '%s' of object", k.GoString())
+			return r.readOnlyError(to, k)
 		}
 	}
 	return nil
@@ -370,7 +370,7 @@ func assignProperty(r *Realm, to, from *Object, k PropertyKey) error {
 		return err
 	}
 	if !ok {
-		return r.TypeError("Cannot assign to read only property '%s' of object", k.GoString())
+		return r.readOnlyError(to, k)
 	}
 	return nil
 }

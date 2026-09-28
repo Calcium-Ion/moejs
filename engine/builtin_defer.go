@@ -64,6 +64,7 @@ var coldGlobalKeys = [...]PropertyKey{
 	StringKey(AtomUint32Array), StringKey(AtomFloat16Array), StringKey(AtomFloat32Array),
 	StringKey(AtomFloat64Array), StringKey(AtomBigInt64Array), StringKey(AtomBigUint64Array),
 	StringKey(AtomAtomics), StringKey(AtomTextEncoder), StringKey(AtomTextDecoder),
+	StringKey(AtomEval),
 }
 
 // coldGlobalSlot maps the atom id of each coldGlobalKeys key, a static
@@ -125,6 +126,7 @@ var (
 	lateBigInt      = lateIndex(StringKey(AtomBigInt))
 	latePromise     = lateIndex(StringKey(AtomPromise))
 	lateArrayBuffer = lateIndex(StringKey(AtomArrayBuffer))
+	lateEval        = lateIndex(StringKey(AtomEval))
 )
 
 // installLateGlobals leaves the late bindings pending in a mutable realm.

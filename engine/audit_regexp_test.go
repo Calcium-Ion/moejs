@@ -368,7 +368,7 @@ var auditConformanceCases = []auditJSCase{
 	// --- fail-loudly / absent features: documented gaps ---
 	{js: "typeof \"a\".search", want: "\"function\""},
 	{js: "{ try { return \"a\".matchAll(/a/g); } catch (e) { return e.name + \": \" + e.message; } }", want: "{}"},
-	{js: "typeof RegExp.prototype.compile", want: "\"function\"", actual: "\"undefined\""},
+	{js: "typeof RegExp.prototype.compile", want: "\"function\""},
 	{js: "typeof RegExp.$1", want: "\"string\"", actual: "\"undefined\""},
 	{js: "{ try { return typeof Symbol.replace; } catch (e) { return e.name; } }", want: "\"symbol\""},
 	{js: "{ try { new RegExp(\"a\", \"v\"); } catch (e) { return e.name; } }", want: "undefined"},
@@ -397,6 +397,9 @@ var auditConformanceCases = []auditJSCase{
 	{js: "{ try { new RegExp(\"]\", \"u\"); } catch (e) { return e.name; } }", want: "\"SyntaxError\""},
 	{js: "/\\k/.test(\"k\")", want: "true"},
 	{js: "{ try { new RegExp(\"\\\\k\", \"u\"); } catch (e) { return e.name; } }", want: "\"SyntaxError\""},
+	{js: "/[\\k]/.test(\"k\")", want: "true"},
+	{js: "{ try { new RegExp(\"(?<a>b)[\\\\k]\"); } catch (e) { return e.name + \": \" + e.message; } }", want: "\"SyntaxError: Invalid regular expression: /(?<a>b)[\\\\k]/: Invalid escape\""},
+	{js: "{ try { new RegExp(\"[\\\\k](?<a>b)\"); } catch (e) { return e.name; } }", want: "\"SyntaxError\""},
 	{js: "/(a)\\2/.test(\"a\\x02\")", want: "true"},
 	{js: "/\\18/.test(\"\\x018\")", want: "true"},
 	{js: "/[\\1]/.test(\"\\x01\")", want: "true"},

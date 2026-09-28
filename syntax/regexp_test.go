@@ -23,10 +23,13 @@ func TestRegexpLiteralErrors(t *testing.T) {
 		{"x = /{/u;", 1, 5, "Invalid regular expression: /{/u: Lone quantifier brackets"},
 		{"x = /(?<a>x)(?<a>y)/;", 1, 5, "Invalid regular expression: /(?<a>x)(?<a>y)/: Duplicate capture group name"},
 		{"x = /\\k<b>(?<a>x)/;", 1, 5, "Invalid regular expression: /\\k<b>(?<a>x)/: Invalid named capture referenced"},
+		{"x = /(?<a>x)[\\k]/;", 1, 5, "Invalid regular expression: /(?<a>x)[\\k]/: Invalid escape"},
 		{"x = /[a&&&b]/v;", 1, 5, "Invalid regular expression: /[a&&&b]/v: Invalid set operation in character class"},
 		{"x = /(?ii:a)/;", 1, 5, "Invalid regular expression: /(?ii:a)/: Repeated flag in flag group"},
 		{"x = /a{2,1}/ysig;", 1, 5, "Invalid regular expression: /a{2,1}/gisy: numbers out of order in {} quantifier"},
 		{"f(`${/)/}`);", 1, 6, "Invalid regular expression: /)/: Unmatched ')'"},
+		// Lone surrogates in WTF-8, as the engine passes eval'd source.
+		{"x = /[\xed\xb0\x80-\xed\xa0\x80]/;", 1, 5, "Invalid regular expression: /[\xed\xb0\x80-\xed\xa0\x80]/: Range out of order in character class"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.src, func(t *testing.T) {
@@ -44,11 +47,12 @@ func TestRegexpLiteralErrors(t *testing.T) {
 func TestRegexpLiteralValid(t *testing.T) {
 	for _, src := range []string{
 		"x = /{/; y = /a{/; z = /]/; w = /\\8/; v = /[\\d-x]/; u = /\\cz\\c1/;",
-		"x = /(?=a)*/; y = /\\k/; z = /(a)\\2/;",
+		"x = /(?=a)*/; y = /\\k/; z = /(a)\\2/; w = /[\\k]/;",
 		"x = /[\\u{1F600}-\\u{1F602}]/v; y = /\\p{RGI_Emoji}/v; z = /[\\p{L}--[a-z]]/v;",
 		"x = /(?<a>x)|(?<a>y)/; y = /(?i-m:a)/; z = /\\u{1F600}/u;",
 		"x = a / (b) / c; y = a /= 2 / 3;",
 		"x = /é[😀]/iu; y = /\\p{Script=Greek}/u;",
+		"x = /[\xed\xa0\x80-\xed\xb0\x80]/; y = /\\\xed\xa0\x80{2}/; z = /[\xed\xa0\x80]/u;",
 	} {
 		t.Run(src, func(t *testing.T) {
 			_, err := ParseModule("t.js", src, Options{})

@@ -104,7 +104,9 @@ func reflectConstruct(r *Realm, this Value, args []Value) (Value, error) {
 }
 
 // reflectDefineProperty implements Reflect.defineProperty: the result of
-// [[DefineOwnProperty]] instead of a TypeError.
+// [[DefineOwnProperty]] instead of a TypeError. A shared intrinsic answers
+// as the frozen object it is: true for a descriptor that changes nothing,
+// false otherwise (where Object.defineProperty throws).
 func reflectDefineProperty(r *Realm, this Value, args []Value) (Value, error) {
 	t, key, err := reflectTargetKey(r, args, "defineProperty")
 	if err != nil {
@@ -113,6 +115,9 @@ func reflectDefineProperty(r *Realm, this Value, args []Value) (Value, error) {
 	desc, err := r.toPropertyDescriptor(Arg(args, 2))
 	if err != nil {
 		return Undefined(), err
+	}
+	if t.flags&flagShared != 0 {
+		return Bool(t.sharedDefineAllowed(key, desc)), nil
 	}
 	ok, err := t.DefineOwnProperty(r, key, desc)
 	return Bool(ok), err

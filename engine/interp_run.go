@@ -118,6 +118,32 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				break
 			}
 			regs[a] = v
+		case bytecode.GetImport:
+			e := env
+			for d := uint8(w >> 16); d > 0; d-- {
+				e = e.parent
+			}
+			v := *e.slots[uint8(w>>24)].importTarget()
+			x := insns[pc]
+			pc++
+			if v.IsHole() {
+				err = r.tdzError(meta, x)
+				break
+			}
+			regs[a] = v
+		case bytecode.GetImportW:
+			e := env
+			for d := uint8(w >> 16); d > 0; d-- {
+				e = e.parent
+			}
+			v := *e.slots[insns[pc]].importTarget()
+			x := insns[pc+1]
+			pc += 2
+			if v.IsHole() {
+				err = r.tdzError(meta, x)
+				break
+			}
+			regs[a] = v
 		case bytecode.SetEnvW:
 			e := env
 			for d := uint8(w >> 16); d > 0; d-- {
@@ -809,6 +835,26 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				thrown = e.Value
 			case *genFrame:
 				return e.suspend(env, envDepth), nil // a generator suspends
+			case frameOpMarker: // CoerceThis, MapArguments, CallEval (sloppy.go)
+				var coerced Value
+				if coerced, err = r.frameOp(insns[ipc], code, regs, env, this, callee); err == errFrameOp {
+					// The loop never assigns this (a loop-carried this
+					// slows every instruction) and does not reload regs
+					// and fr after a direct eval: the frame reruns from
+					// the next instruction, as a generator resumes.
+					st.frames[fi].pc = uint32(pc | envDepth<<genDepthShift)
+					return r.run(fi, fd, base, env, coerced, callee)
+				}
+				if err == nil {
+					continue
+				}
+				// A direct eval's error, handled here: a jump back to
+				// the unwinding code would change the register
+				// allocation of the whole loop.
+				var ok bool
+				if thrown, ok = r.thrownValue(err); !ok {
+					return Undefined(), err // an interrupt
+				}
 			default:
 				thrown = r.hostErrorValue(err)
 			}

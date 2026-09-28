@@ -103,6 +103,15 @@ func TestTypedArrayMethods(t *testing.T) {
 		{"set mixed content", `return new BigInt64Array(1).set(new Int8Array(1))`, "!TypeError"},
 		{"set negative offset", `return new Uint8Array(1).set([], -1)`, "!RangeError"},
 		{"copyWithin", `return [new Uint8Array([1, 2, 3, 4, 5]).copyWithin(0, 3).join(), new Uint8Array([1, 2, 3, 4, 5]).copyWithin(1, 0, 3).join(), new Int16Array([1, 2, 3, 4, 5]).copyWithin(-2, 0).join(), new Uint8Array([1, 2, 3]).copyWithin(0, 1, -5).join()].join("|")`, "4,5,3,4,5|1,1,2,3,5|1,2,3,1,2|1,2,3"},
+		{"copyWithin shrinks", `const out = [];
+			for (const [to, from, es] of [[2, 1, 1], [1, 2, 1], [2, 0, 2], [0, 2, 2]]) {
+				const b = new ArrayBuffer(4 * es, {maxByteLength: 8 * es}), a = es == 1 ? new Uint8Array(b) : new Int16Array(b);
+				a.set([0, 1, 2, 3]);
+				const evil = {valueOf() { b.resize(3 * es); return 2; }};
+				a.copyWithin(to == 2 ? evil : to, from == 2 ? evil : from);
+				out.push(a.join());
+			}
+			return out.join("|")`, "0,1,1|0,2,2|0,1,0|2,1,2"},
 		{"fill", `return [new Uint8Array(5).fill(7, 1, -1).join(), new Float32Array(3).fill(0.1)[0], new BigInt64Array(2).fill(-1n).join(), new Uint8Array(3).fill(300).join(), new Int16Array(3).fill(-2, -1).join()].join("|")`, "0,7,7,7,0|0.10000000149011612|-1,-1|44,44,44|0,0,-2"},
 		{"fill bigint with number", `return new BigInt64Array(1).fill(1)`, "!TypeError"},
 		{"reverse", `return [new Int8Array([1, 2, 3]).reverse().join(), new Float64Array([1, 2]).toReversed().join(), new Uint16Array(0).reverse().length].join("|")`, "3,2,1|2,1|0"},

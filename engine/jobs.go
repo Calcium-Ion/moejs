@@ -11,7 +11,9 @@ package engine
 //   - the drain runs every job queued so far and every job those queue, in
 //     order, checking the interrupt flag before each;
 //   - an interrupt drops the jobs still queued and becomes the call's error,
-//     so the realm is reusable after ClearInterrupt with no stale jobs;
+//     so the realm is reusable after ClearInterrupt with no stale jobs; the
+//     modules whose asynchronous evaluation the dropped jobs, or the job
+//     the interrupt stopped, would continue fail with it (module_eval.go);
 //   - a reaction job catches what its handler throws (it rejects the derived
 //     promise), so only a queueMicrotask callback, or the resolve or reject
 //     function of a capability a species constructor made, can throw out of
@@ -94,14 +96,14 @@ func (r *Realm) endJob(err error) error {
 		return err
 	}
 	if _, ok := err.(*InterruptedError); ok {
-		j.drop()
+		r.dropJobs(nil, err)
 		return err
 	}
 	j.draining = true
 	defer func() { j.draining, r.jobsPending = false, j.pending() }()
 	for j.head < len(j.queue) {
 		if ierr := r.CheckInterrupt(); ierr != nil {
-			j.drop()
+			r.dropJobs(nil, ierr)
 			return ierr
 		}
 		jb := j.queue[j.head]
@@ -120,7 +122,7 @@ func (r *Realm) endJob(err error) error {
 			continue
 		}
 		if _, ok := jerr.(*InterruptedError); ok {
-			j.drop()
+			r.dropJobs(jb.reaction, jerr)
 			return jerr
 		}
 		if err == nil {
@@ -131,6 +133,18 @@ func (r *Realm) endJob(err error) error {
 		j.queue = nil
 	}
 	return err
+}
+
+// dropJobs drops the queued jobs for the interrupt err, which stopped the
+// job of reaction when it is not nil. The modules in asynchronous
+// evaluation that the jobs would have continued fail with err
+// (stopModules): nothing is left to run them.
+func (r *Realm) dropJobs(reaction *promiseReaction, err error) {
+	j := r.lazy.jobs
+	if mm := r.lazy.modules; mm != nil && mm.asyncOrder != 0 {
+		r.stopModules(reaction, j.queue[j.head:], err)
+	}
+	j.drop()
 }
 
 // drop discards the queued jobs, releasing a large queue as the end of a

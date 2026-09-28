@@ -559,20 +559,20 @@ func (f *funcState) superAssign(e *syntax.AssignExpr, m *syntax.MemberExpr, dst 
 	}
 	if e.Op == syntax.Assign {
 		f.expr(e.Value, cur)
-		f.emitABC(bytecode.SetSuper, b, k, cur)
+		f.emitABC(f.setSuperOp(), b, k, cur)
 		return
 	}
 	f.emitAB(bytecode.ToPropertyKey, k, k)
 	f.emitABC(bytecode.GetSuper, cur, b, k)
 	if lbl := f.logicalSkip(e.Op, cur); lbl != nil {
 		f.expr(e.Value, cur)
-		f.emitABC(bytecode.SetSuper, b, k, cur)
+		f.emitABC(f.setSuperOp(), b, k, cur)
 		f.bind(lbl)
 		return
 	}
 	v := f.operand(e.Value)
 	f.emitABC(binaryOps[compoundOps[e.Op]], cur, cur, v)
-	f.emitABC(bytecode.SetSuper, b, k, cur)
+	f.emitABC(f.setSuperOp(), b, k, cur)
 }
 
 // superUpdate compiles ++/-- on a super property.
@@ -584,7 +584,7 @@ func (f *funcState) superUpdate(e *syntax.UpdateExpr, m *syntax.MemberExpr, op b
 	f.emitABC(bytecode.GetSuper, cur, b, k)
 	if e.Prefix {
 		f.emitAB(op, cur, cur)
-		f.emitABC(bytecode.SetSuper, b, k, cur)
+		f.emitABC(f.setSuperOp(), b, k, cur)
 		if want {
 			f.emitMove(dst, cur)
 		}
@@ -596,7 +596,7 @@ func (f *funcState) superUpdate(e *syntax.UpdateExpr, m *syntax.MemberExpr, op b
 	}
 	f.emitAB(bytecode.ToNumeric, old, cur)
 	f.emitAB(op, cur, old)
-	f.emitABC(bytecode.SetSuper, b, k, cur)
+	f.emitABC(f.setSuperOp(), b, k, cur)
 }
 
 // superDelete compiles `delete super.x`: the reference is evaluated, then

@@ -44,10 +44,11 @@ live runtime retains less than a third of Sobek's memory (see
 
 ## Status
 
-moejs runs ES modules. It passes 22,867 tests of the
-[test262](https://github.com/tc39/test262) conformance suite (revision
-`045bf6f`; 93.0% of the `language` and `built-ins` tests that exercise
-implemented features).
+moejs runs classic scripts, strict or sloppy, and ES modules, alone or as
+graphs of modules that import each other. Its results on the
+[test262](https://github.com/tc39/test262) conformance suite, overall and by
+directory, are in [`bench/test262/RESULTS.md`](bench/test262/RESULTS.md),
+which the test262 runner regenerates.
 
 Supported, among others:
 
@@ -57,8 +58,19 @@ Supported, among others:
   template and tagged template literals, optional chaining, `??`, getters and
   setters, `Symbol` and the iterator protocol (`for-of`, spread,
   destructuring), generators, async functions and `await`, async
-  generators and `for await`, top-level `await` in modules, labelled
-  statements, exceptions.
+  generators and `for await`, `import` and `export` between modules (live
+  bindings, cycles, namespace objects, `export * as`, string export names),
+  top-level `await` across a module graph, dynamic `import()` in modules and
+  scripts, `import.meta`, labelled statements, exceptions, direct and
+  indirect `eval`, and the `Function`, `GeneratorFunction`, `AsyncFunction`
+  and `AsyncGeneratorFunction` constructors.
+- **Sloppy mode** (scripts without `"use strict"`): `this` coercion,
+  implicit globals, silently failing assignments and deletes, `with`
+  (including `Symbol.unscopables`), the mapped `arguments` object and
+  `arguments.callee`, and the Annex B syntax and semantics of scripts:
+  block-level functions, labelled function declarations, catch parameter
+  redeclaration, `for (var x = init in o)`, calls as assignment targets,
+  legacy octal literals and escapes, and HTML-like comments.
 - **Builtins:** `Object`, `Function`, `Array` (including the ES2023 methods
   and `Array.fromAsync`), `String` (including `normalize` on Unicode 17),
   `Number`, `Boolean`,
@@ -76,9 +88,9 @@ Supported, among others:
   backreferences, named and duplicate named groups, pattern modifiers and
   all Unicode 17 `\p{…}` properties.
 
-Not supported yet: scripts, `import` between modules, sloppy mode, `eval`,
-`Intl`.
-[`TODO.md`](TODO.md) has the full list.
+Not supported yet: `Intl`, iterator helpers, `FinalizationRegistry`,
+timers, import attributes and JSON modules. [`TODO.md`](TODO.md) has the
+full list and the known wrong results.
 
 ## Install
 
@@ -209,6 +221,50 @@ runtimes per plugin. A `Runtime` belongs to one goroutine at a time; only
   and walks the members, as own properties, in the runtime at hand. A path
   that leads nowhere is `ErrHookNotFound`, one that leads to a value that is
   not a function `ErrNotCallable`; `Has` reports either as false.
+- **Module graphs.** A module that imports others is linked before runtimes
+  load it. `moejs.Link(entry, resolve)` asks the host's `Resolver` for the
+  module each specifier names, once per module and specifier (moejs never
+  reads files or the network), links the graph once and returns the
+  `Module` to load: immutable and shared like any other, with `Hook`,
+  `Export` and `Exports` addressing the entry's exports, re-exported names
+  included. The resolver's `referrer` is the importing `*Module`, as a
+  `Referrer`: the sealed interface of the code that requests a module, a
+  `*Module` or a `*Script`. Each runtime only instantiates and evaluates the graph, each
+  module of it once, and a module several graphs share is compiled once
+  when the resolver returns the same `*Module`. A failed resolution is a
+  `*ResolveError`, and an import that does not resolve to one binding a
+  `*SyntaxError`, both at the importing module's position; `Load` refuses a
+  module that imports and was not linked. A module that imports nothing
+  needs no `Link` and pays nothing for graphs.
+
+  ```go
+  entry, err := moejs.Compile("plugin.js", source)
+  mod, err := moejs.Link(entry, func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+  	return host.module(specifier) // compiled once per process
+  })
+  err = rt.Load(mod) // per runtime
+  ```
+- **Dynamic import.** `Options.Importer` is the host's side of `import()`
+  and `import.meta`: its `Resolve` is a `Resolver`, whose `referrer` is the
+  importing `*Module` or the `*Script` that `RunScript` ran, and its
+  optional `Meta` fills a module's `import.meta`, a null-prototype object
+  made on first use. `import(specifier)` asks `Resolve` at once and returns
+  a promise that settles with the module's namespace, or rejects with what
+  the resolution, the linking or the evaluation failed with; without an
+  `Importer` it rejects with a `TypeError`. The module is the identity: a
+  runtime evaluates a module once, whether it was imported statically or
+  dynamically, and the graph of a module `import()` loads is linked once
+  per `Importer`, which any number of runtimes may share, so each runtime
+  only instantiates and evaluates it. Jobs and interrupts behave as for
+  `Load` and `Call`. Code without `import()` or `import.meta` compiles and
+  runs exactly as before.
+
+  ```go
+  imp := &moejs.Importer{Resolve: func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+  	return host.module(specifier)
+  }}
+  rt := moejs.NewRuntime(moejs.Options{Importer: imp}) // one imp for every runtime
+  ```
 - **Values in.** `FromGo` converts `nil`, booleans, numbers, strings,
   `json.Number`, `Value`, `NativeFunc` and the JSON-shaped containers
   (`map[string]any`, `[]any`, `map[string]string`, `[]string`, ...) lazily,
@@ -218,7 +274,8 @@ runtimes per plugin. A `Runtime` belongs to one goroutine at a time; only
   read it. Keys of objects from Go maps enumerate in sorted order. A
   `[]byte` becomes an `ArrayBuffer` over the same bytes, which JavaScript
   writes do reach. Structs and other types are an error: marshal them and
-  use `ParseJSON`.
+  use `ParseJSON`. `Function(name, length, fn)` wraps a `NativeFunc` with
+  the `name` and `length` JavaScript sees.
 - **Values out.** `ToGo` exports integral numbers as `int64` and other
   numbers as `float64`, arrays as `[]any`, objects as `map[string]any` of
   their own enumerable properties, bigints as `*big.Int`, which `FromGo`
@@ -226,7 +283,37 @@ runtimes per plugin. A `Runtime` belongs to one goroutine at a time; only
   the bytes it holds or views, a `[]byte`. `AppendJSON` is `JSON.stringify` written to a byte slice;
   unlike `json.Marshal` of `ToGo`'s result, it omits `undefined` members,
   writes NaN and ±Infinity as `null`, keeps insertion order and calls
-  `toJSON`.
+  `toJSON`. `Get(v, key)` reads one property, running getters, and
+  `Export(name)` the current value of an export of the loaded module.
+- **Scripts.** `CompileScript(name, source)` compiles a classic script into
+  an immutable `*Script`, sloppy unless it starts with a `"use strict"`
+  directive; `Runtime.RunScript` runs it in the runtime's global environment
+  and returns its completion value. Its `var` and function declarations
+  become properties of the global object, and its `let`, `const` and
+  `class` declarations global bindings that later scripts and the loaded
+  modules see. A declaration that conflicts with an existing global binding
+  throws before anything runs. `SetGlobal` writes the global object, so
+  after a script's `let x` the global lexical binding shadows a
+  `SetGlobal("x", …)` (ECMA-262 9.1.1.4.1).
+- **Eval.** Importing `moejs` installs the compiler behind `eval`, the
+  `Function` constructors and `Realm.EvalScript(name, source)`, which a
+  native function can call on the `*Realm` it receives to run a classic
+  script from a string (test262's `$262.evalScript`). A direct `eval` sees
+  the caller's bindings, including a module's imports; the evaluated code
+  and the functions it creates report the evaluating script or module as
+  their source in stack traces, and their `import()` passes it as the
+  `Resolver`'s `referrer` (nil for the code of an indirect `eval` or a
+  constructor called from a script or module that uses neither `import()`,
+  `import.meta` nor a direct `eval`; see TODO.md). Code that uses neither
+  `eval` nor `with` compiles exactly as before and pays nothing.
+- **Limits on dynamic code.** `Options.MaxDynamicSource` caps the source
+  text that `eval`, the `Function` constructors and `Realm.EvalScript`
+  compile: 1 MiB of UTF-8 by default, no limit when negative. Longer text
+  throws a `RangeError` before it is parsed. Compiling takes time and memory
+  linear in the length of the text, so the cap bounds both, and an interrupt
+  stops a compile in progress. `Options.DisableDynamicCode` turns dynamic
+  code off for a runtime: all of them throw an `EvalError` instead of
+  compiling. Neither applies to `Compile` and `CompileScript`.
 - **Promises.** `NewPromise` gives a host function a promise to return and
   Go functions that settle it later. `PromiseResult` reads a promise's state
   and result, and `SetPromiseRejectionTracker` reports rejections no handler
@@ -236,13 +323,17 @@ runtimes per plugin. A `Runtime` belongs to one goroutine at a time; only
   itself for a primitive) and never run JavaScript. A host function that
   returns a Go error throws an `Error` with the error's text as its message,
   and the `*Exception` unwraps to the Go error. An interrupt is an
-  `*InterruptedError`, a bad module a `*SyntaxError` with its position, and a
-  Go panic inside a call (a panicking host function) an `*InternalError`;
-  the runtime stays usable.
+  `*InterruptedError`, a bad module or script a `*SyntaxError` with its
+  position, and a Go panic inside a call (a panicking host function) an
+  `*InternalError`; the runtime stays usable. `Runtime.StackTrace(exc)`
+  returns a thrown `Error`'s V8-format `stack`, also without running
+  JavaScript.
 - **Shared, frozen intrinsics by default.** Runtimes share one deeply frozen
   set of builtins, the Hardened JavaScript (SES `lockdown()`) model: writing
-  to `Array.prototype` throws a `TypeError`, and plugins cannot pollute each
-  other's prototypes. `Options{MutableIntrinsics: true}` builds a mutable copy
+  to `Array.prototype` throws a `TypeError` in strict code and, as for any
+  frozen object, fails silently in sloppy code, so plugins cannot pollute
+  each other's prototypes.
+  `Options{MutableIntrinsics: true}` builds a mutable copy
   per runtime for embeddings that patch builtins, at about 25 times
   the creation cost.
 - **Time zone per runtime.** `Options.TimeZone` sets the local zone of `Date`

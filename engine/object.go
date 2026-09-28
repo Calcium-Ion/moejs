@@ -90,11 +90,13 @@ const (
 	flagSealed
 	flagIsPrototype
 	flagDict    // named properties live in dict (shape is the dictionary sentinel)
-	flagHasLazy // internal is *lazyProps with unresolved entries, *lazyKeys, or the *Realm of a global object with pending coldGlobalKeys
+	flagHasLazy // internal is *lazyProps with unresolved entries, *lazyKeys, *pendingCompile, or the *Realm of a global object with pending coldGlobalKeys
 	// flagShared marks a frozen intrinsic shared by every realm of the
-	// process. Every mutating path checks it first: methods returning error
-	// return a TypeError, boolean methods return false, and the internal
-	// bootstrap helpers panic, because a write would be a cross-realm race.
+	// process. Every mutating path checks it first: [[Set]] and the other
+	// boolean methods return false (strict callers throw sharedWriteError,
+	// sloppy code ignores it as for any frozen object), the other methods
+	// returning error return a TypeError, and the internal bootstrap helpers
+	// panic, because a write would be a cross-realm race.
 	flagShared
 	// flagHostNode marks a host node (hostlazy.go): an object that keeps the
 	// Go value it was converted from (a map's in internal, a slice's in its
@@ -195,6 +197,18 @@ func (o *Object) IsPrototypeObject() bool { return o.flags&flagIsPrototype != 0 
 // IsShared reports whether o is a frozen intrinsic shared across realms.
 func (o *Object) IsShared() bool { return o.flags&flagShared != 0 }
 
+// sharedDefineAllowed reports whether [[DefineOwnProperty]] of desc on the
+// shared intrinsic o succeeds: ValidateAndApplyPropertyDescriptor without
+// the write. A shared intrinsic is frozen, so an allowed desc changes
+// nothing (an empty or identical descriptor, for example).
+func (o *Object) sharedDefineAllowed(key PropertyKey, desc PropertyDescriptor) bool {
+	cur, ok := o.GetOwnProperty(key)
+	if !ok {
+		return ValidateAndApplyPropertyDescriptor(nil, nil, key, o.IsExtensible(), desc, nil)
+	}
+	return ValidateAndApplyPropertyDescriptor(nil, nil, key, o.IsExtensible(), desc, &cur)
+}
+
 // mustBeMutable panics on an internal write to a shared intrinsic.
 func (o *Object) mustBeMutable() {
 	if o.flags&flagShared != 0 {
@@ -206,6 +220,15 @@ func (o *Object) mustBeMutable() {
 // shared intrinsic.
 func (r *Realm) sharedWriteError(o *Object, key PropertyKey) error {
 	return r.TypeError("Cannot modify property '%s' of shared intrinsic %s", key.GoString(), o.debugString())
+}
+
+// readOnlyError is the TypeError of a strict [[Set]] of key that returned
+// false with o as the receiver: sharedWriteError for a shared intrinsic.
+func (r *Realm) readOnlyError(o *Object, key PropertyKey) error {
+	if o.flags&flagShared != 0 {
+		return r.sharedWriteError(o, key)
+	}
+	return r.TypeError("Cannot assign to read only property '%s' of object", key.GoString())
 }
 
 // IsDictionaryMode reports whether named properties live in the dictionary
@@ -465,6 +488,11 @@ func (o *Object) lookupIndex(i uint32) (propCell, bool) {
 	}
 	if o.dict != nil && o.dict.sparse != nil {
 		c, ok := o.dict.sparse[i]
+		if ok && o.class == ClassArguments {
+			if v, mapped := o.mappedValue(i); mapped {
+				c.value = v
+			}
+		}
 		return c, ok
 	}
 	if o.flags&flagHasLazy != 0 && o.materializeHost() {
@@ -556,6 +584,9 @@ func (o *Object) removeIndex(r *Realm, i uint32) {
 		return
 	}
 	delete(o.dict.sparse, i)
+	if o.class == ClassArguments {
+		o.unmapArgument(i)
+	}
 	r.bumpEpoch(o)
 }
 
@@ -737,11 +768,13 @@ func (o *Object) GetIndex(r *Realm, i uint32) (Value, error) {
 
 // Set implements OrdinarySet. It returns false when the assignment is
 // rejected; strict-mode callers turn that into a TypeError (Realm.SetProp).
+// A shared intrinsic as the receiver rejects every assignment before any
+// setter runs.
 func (o *Object) Set(r *Realm, key PropertyKey, v Value, receiver Value) (bool, error) {
 	// Fast path: receiver is o and the property is an own writable data slot.
 	if receiver.IsObject() && receiver.AsObject() == o {
 		if o.flags&flagShared != 0 {
-			return false, r.sharedWriteError(o, key)
+			return false, nil
 		}
 		if key.IsIndex() {
 			if i := key.Index(); int(i) < len(o.elements) && o.class != ClassString {
@@ -822,6 +855,9 @@ func (o *Object) SetProp(r *Realm, key PropertyKey, v Value) error {
 		return err
 	}
 	if !ok {
+		if o.flags&flagShared != 0 {
+			return r.sharedWriteError(o, key)
+		}
 		return r.falsishError(o, AtomSet, key, "Cannot assign to read only property '%s' of object", key.GoString())
 	}
 	return nil
@@ -849,6 +885,9 @@ func (o *Object) CreateDataPropertyOrThrow(r *Realm, key PropertyKey, v Value) e
 // invalid array length or when coercing the length value throws.
 func (o *Object) DefineOwnProperty(r *Realm, key PropertyKey, desc PropertyDescriptor) (bool, error) {
 	if o.flags&flagShared != 0 {
+		if o.sharedDefineAllowed(key, desc) {
+			return true, nil
+		}
 		return false, r.sharedWriteError(o, key)
 	}
 	if o.flags&flagHasLazy != 0 && !o.materializeHost() && !key.IsIndex() {
@@ -876,6 +915,10 @@ func (o *Object) DefineOwnProperty(r *Realm, key PropertyKey, desc PropertyDescr
 		case ClassTypedArray:
 			if typedArrayKey(key) {
 				return r.typedArrayDefine(o, key, desc)
+			}
+		case ClassArguments:
+			if key.IsIndex() && o.internal != nil {
+				return r.argumentsDefine(o, key, desc), nil
 			}
 		}
 	}
@@ -1152,6 +1195,9 @@ func (o *Object) Freeze(r *Realm) {
 	if o.flags&flagShared != 0 {
 		return
 	}
+	if o.class == ClassArguments {
+		o.freezeArguments()
+	}
 	o.PreventExtensions(r)
 	o.flags |= flagSealed | flagFrozen
 	o.rewriteAttrs(r, func(a uint8) uint8 {
@@ -1231,7 +1277,7 @@ func (o *Object) IsSealed() bool {
 func (o *Object) DefineLazyProperty(r *Realm, key PropertyKey, init func(*Realm) Value) {
 	o.mustBeMutable()
 	switch o.internal.(type) {
-	case *Realm, *lazyKeys:
+	case *Realm, *lazyKeys, *pendingCompile:
 		o.resolveAllLazy()
 	default:
 		o.materializeHost()
@@ -1256,6 +1302,8 @@ func (o *Object) lazyPending(key PropertyKey) bool {
 		return lp.isPending(key)
 	case *Realm:
 		return lp.coldGlobalIndex(key) >= 0
+	case *pendingCompile:
+		return key == compileKey
 	}
 	return true // a host placeholder, which is never shape-mode, materializes on any lookup
 }
@@ -1283,8 +1331,8 @@ func (o *Object) runInstall(lp *lazyProps) {
 
 // resolveLazy prepares o, which has flagHasLazy, for a lookup of the named
 // key: it runs a deferred installer or a pending lazy definition of key,
-// defines key on a lazyKeys object or a global object with pending cold
-// globals, or materializes a host placeholder (resolveHost). It reports false
+// defines key on a lazyKeys object, a global object with pending cold
+// globals or %RegExp.prototype% (pendingCompile), or materializes a host placeholder (resolveHost). It reports false
 // when the lookup must not reach o's storage because key is certainly absent
 // (an unmaterialized placeholder has none).
 func (o *Object) resolveLazy(key PropertyKey) bool {
@@ -1296,6 +1344,11 @@ func (o *Object) resolveLazy(key PropertyKey) bool {
 			return true
 		case *Realm:
 			in.resolveColdGlobal(key)
+			return true
+		case *pendingCompile:
+			if key == compileKey {
+				in.define(o)
+			}
 			return true
 		}
 		return o.resolveHost(key)
@@ -1317,10 +1370,11 @@ func (o *Object) resolveLazy(key PropertyKey) bool {
 }
 
 // resolveLazyWrite prepares o for a write, redefinition or deletion of
-// key: a lazyKeys object defines all its properties first. It reports false
-// like resolveLazy.
+// key: a lazyKeys object or %RegExp.prototype% with compile pending
+// defines all its properties first. It reports false like resolveLazy.
 func (o *Object) resolveLazyWrite(key PropertyKey) bool {
-	if _, ok := o.internal.(*lazyKeys); ok {
+	switch o.internal.(type) {
+	case *lazyKeys, *pendingCompile:
 		o.resolveAllLazy()
 		return true
 	}
@@ -1335,6 +1389,8 @@ func (o *Object) resolveAllLazy() {
 			in.resolveAll(o)
 		case *Realm:
 			in.resolveColdGlobals()
+		case *pendingCompile:
+			in.define(o)
 		default:
 			o.materializeHost()
 		}

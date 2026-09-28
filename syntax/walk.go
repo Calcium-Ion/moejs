@@ -217,6 +217,9 @@ func Walk(v Visitor, n Node) {
 	case *LabeledStmt:
 		Walk(v, n.Label)
 		Walk(v, n.Body)
+	case *WithStmt:
+		Walk(v, n.Object)
+		Walk(v, n.Body)
 	case *SwitchStmt:
 		Walk(v, n.Disc)
 		for _, c := range n.Cases {

@@ -11,7 +11,8 @@ package engine
 // shared realm Object.prototype is frozen and has no symbol-keyed
 // properties, so the walk stops there. Nor has a host placeholder
 // (hostlazy.go), which materializes to string keys only. A proxy answers
-// through its get trap, so it is always "unknown".
+// through its get trap, so it is always "unknown". A pending compile
+// method of %RegExp.prototype% is not such a key (onlyCompilePending).
 func (r *Realm) lacksWellKnown(o *Object, key PropertyKey) bool {
 	for p := o; p != nil; p = p.proto {
 		if p == r.ObjectPrototype && r.sharedIntrinsics {
@@ -20,7 +21,7 @@ func (r *Realm) lacksWellKnown(o *Object, key PropertyKey) bool {
 		if p.class == ClassProxy {
 			return false
 		}
-		if p.flags&(flagDict|flagHasLazy) != 0 && (p.shape.key != hostSentinelKey || !key.IsSymbol()) {
+		if p.flags&(flagDict|flagHasLazy) != 0 && (p.shape.key != hostSentinelKey || !key.IsSymbol()) && !p.onlyCompilePending() {
 			return false
 		}
 		if _, _, ok := p.shape.Lookup(key); ok {

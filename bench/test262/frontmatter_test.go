@@ -2,6 +2,7 @@ package test262
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,15 @@ throw 1;
 		t.Errorf("HasFlag: module %v, raw %v", m.HasFlag("module"), m.HasFlag("raw"))
 	}
 
+	for _, eol := range []string{"\r\n", "\r"} {
+		src := strings.Join([]string{"/*---", "info: |", "  x", "includes: [a.js,", "  b.js]", "flags: [raw]", "---*/"}, eol)
+		m, err := ParseMeta(src)
+		want := &Meta{Includes: []string{"a.js", "b.js"}, Flags: []string{"raw"}}
+		if err != nil || !reflect.DeepEqual(m, want) {
+			t.Errorf("ParseMeta with %q line ends = %+v, %v, want %+v", eol, m, err, want)
+		}
+	}
+
 	for _, bad := range []string{
 		"no frontmatter",
 		"/*---\nflags: [a\n",
@@ -69,8 +79,8 @@ func TestSkip(t *testing.T) {
 	}{
 		{Meta{}, "", nil, "", nil},
 		{Meta{Flags: []string{"onlyStrict"}}, "", []string{"let"}, "", nil},
-		{Meta{Flags: []string{"noStrict"}}, "", nil, SkipSloppy, nil},
-		{Meta{Flags: []string{"raw"}}, "", nil, SkipSloppy, nil},
+		{Meta{Flags: []string{"noStrict"}}, "", nil, "", nil},
+		{Meta{Flags: []string{"raw"}}, "", nil, "", nil},
 		{Meta{Flags: []string{"async"}}, "", nil, "", nil},
 		{Meta{Flags: []string{"async"}}, "", []string{"Temporal", "ShadowRealm", "let"}, "feature: Temporal", []string{"Temporal", "ShadowRealm"}},
 		{Meta{}, "", []string{"Temporal", "intl-normative-optional"}, "non-goal: intl-normative-optional", nil},

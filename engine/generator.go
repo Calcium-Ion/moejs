@@ -224,6 +224,9 @@ func (r *Realm) resumeFrame(g *genFrame, v, mode Value) (Value, error) {
 	if r.interruptFlag.Load() != 0 {
 		return Undefined(), r.interruptError()
 	}
+	if g.fd.icBase == icUnbound {
+		return r.resumeDynamic(g, v, mode)
+	}
 	st := &r.interp
 	base := st.sp
 	top := base + len(g.regs)
@@ -376,7 +379,7 @@ func newAsyncIntrinsics(r *Realm) *asyncIntrinsics {
 	gfp := r.newIntrinsic(ClassObject, r.FunctionPrototype, 3)
 	// %GeneratorPrototype%: constructor, next, return, throw, @@toStringTag.
 	gp := r.newIntrinsic(ClassObject, r.IteratorPrototype, 5)
-	gf := r.newConstructor(AtomGeneratorFunction, 1, functionCall, functionConstruct, gfp)
+	gf := r.newConstructor(AtomGeneratorFunction, 1, generatorFunctionCall, generatorFunctionConstruct, gfp)
 	gf.SetPrototypeOf(r, r.FunctionCtor)
 	// newConstructor made gfp.constructor writable; both links are
 	// read-only here.

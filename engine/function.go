@@ -196,30 +196,31 @@ func (e *Env) Slots() []Value { return e.slots }
 // bindings: GetBindingValue reads the slot each time.
 type ModuleEnv struct {
 	*Env
-	exports map[string]int
+	module *bytecode.Module
 }
 
 // NewModuleEnv creates a module environment with nslots bindings and the
-// given export-name -> slot mapping.
-func NewModuleEnv(nslots int, exports map[string]int) *ModuleEnv {
-	return &ModuleEnv{Env: NewEnv(nil, nslots), exports: exports}
+// local exports of module.
+func NewModuleEnv(nslots int, module *bytecode.Module) *ModuleEnv {
+	return &ModuleEnv{Env: NewEnv(nil, nslots), module: module}
 }
 
-// GetBindingValue returns the current value of an exported binding. ok is
-// false for unknown names. A Hole() value means the binding is in its TDZ.
+// GetBindingValue returns the current value of a local export (the module's
+// own binding, not one re-exported from another module). ok is false for
+// unknown names. A Hole() value means the binding is in its TDZ.
 func (m *ModuleEnv) GetBindingValue(name string) (Value, bool) {
-	i, ok := m.exports[name]
+	i, ok := m.module.Export(name)
 	if !ok {
 		return Undefined(), false
 	}
 	return m.slots[i], true
 }
 
-// ExportNames returns the export names (unordered).
+// ExportNames returns the names of the local exports, sorted.
 func (m *ModuleEnv) ExportNames() []string {
-	names := make([]string, 0, len(m.exports))
-	for n := range m.exports {
-		names = append(names, n)
+	names := make([]string, len(m.module.Exports))
+	for i, e := range m.module.Exports {
+		names[i] = e.Name
 	}
 	return names
 }

@@ -15,6 +15,10 @@ const (
 	hiddenBrand     = "%brand"
 	hiddenKey       = "%key"
 	hiddenArgs      = "%args"
+	// hiddenEvalVars holds the object that receives the var and function
+	// declarations of the direct evals of a sloppy function (see
+	// resolver.directEval).
+	hiddenEvalVars = "%evalvars"
 )
 
 // class resolves a class declaration or expression.

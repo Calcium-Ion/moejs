@@ -146,3 +146,43 @@ func TestTopLevelAwaitInterrupt(t *testing.T) {
 	r.ClearInterrupt()
 	assert.Equal(t, int64(1), f.call("one"))
 }
+
+// TestModuleGraphInterruptedAsync checks that a graph whose asynchronous
+// evaluation an interrupt stopped stays failed in the realm: its promise
+// stays pending, and a later EvaluateGraph of it, or of a graph that
+// imports it, returns the interrupt.
+func TestModuleGraphInterruptedAsync(t *testing.T) {
+	h := newModuleHost(t, map[string]string{
+		"spin":  `await 0; stop(); for (;;) {}`,
+		"main":  `import "spin"; globalThis.ran = 1;`,
+		"other": `import "main";`,
+	})
+	r := NewRealm()
+	stop := r.NewNativeFunction(FromGoString("stop"), 0, func(r *Realm, _ Value, _ []Value) (Value, error) {
+		r.Interrupt("stop")
+		return Undefined(), nil
+	})
+	require.NoError(t, r.Global.SetProp(r, r.KeyFromGoString("stop"), ObjectValue(stop)))
+	g, err := h.link("main")
+	require.NoError(t, err)
+	_, p, err := r.EvaluateGraph(g)
+	var ie *InterruptedError
+	require.ErrorAs(t, err, &ie)
+	require.NotNil(t, p)
+	state, _, _ := p.PromiseResult()
+	assert.Equal(t, PromisePending, state)
+	r.ClearInterrupt()
+
+	_, p, err = r.EvaluateGraph(g)
+	require.ErrorAs(t, err, &ie)
+	assert.Equal(t, "stop", ie.Value)
+	assert.Nil(t, p)
+	other, err := h.link("other")
+	require.NoError(t, err)
+	_, p, err = r.EvaluateGraph(other)
+	require.ErrorAs(t, err, &ie)
+	assert.Nil(t, p)
+	ran, err := r.Global.Get(r, r.KeyFromGoString("ran"), ObjectValue(r.Global))
+	require.NoError(t, err)
+	assert.True(t, ran.IsUndefined())
+}

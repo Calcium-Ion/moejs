@@ -60,7 +60,7 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 			writeReg(sb, DecodeA(w))
 		case FmtAB:
 			writeReg(sb, DecodeA(w))
-			if op == GetEnvW || op == SetEnvW || op == GetEnvChkW {
+			if op == GetEnvW || op == SetEnvW || op == GetEnvChkW || op == GetImportW {
 				sb.WriteString(" env")
 				sb.WriteString(strconv.Itoa(int(DecodeB(w))))
 				break
@@ -73,7 +73,7 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 			writeReg(sb, DecodeB(w))
 		case FmtABC:
 			writeReg(sb, DecodeA(w))
-			if op == GetEnv || op == SetEnv || op == GetEnvChk {
+			if op == GetEnv || op == SetEnv || op == GetEnvChk || op == GetImport {
 				sb.WriteString(" env")
 				sb.WriteString(strconv.Itoa(int(DecodeB(w))))
 				sb.WriteString("[")
@@ -161,7 +161,7 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 // writeExtra renders ExtraArg word i of op.
 func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 	switch op {
-	case GetGlobal, GetGlobalOrUndef, SetGlobal, GetProp, SetProp, DefineField, GetTemplate:
+	case GetGlobal, GetGlobalOrUndef, SetGlobal, GetProp, SetProp, DefineField, GetTemplate, SetGlobalSloppy, SetPropSloppy:
 		sb.WriteString("K")
 		sb.WriteString(strconv.Itoa(int(ExtraLo(x))))
 		sb.WriteString(" ic")
@@ -169,9 +169,19 @@ func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 	case GetLen:
 		sb.WriteString("ic")
 		sb.WriteString(strconv.Itoa(int(ExtraHi(x))))
+	case InitGlobal, WithGet, WithSet:
+		sb.WriteString("K")
+		sb.WriteString(strconv.Itoa(int(ExtraLo(x))))
+		if ExtraHi(x) != 0 {
+			sb.WriteString(" +")
+			sb.WriteString(strconv.Itoa(int(ExtraHi(x))))
+		}
 	case GetEnvW, SetEnvW, DefineAccessor, SetPrivateMethod:
 		sb.WriteString(strconv.Itoa(int(x)))
-	case GetEnvChkW:
+	case CallEval:
+		sb.WriteString("E")
+		sb.WriteString(strconv.Itoa(int(x)))
+	case GetEnvChkW, GetImportW:
 		if i == 0 {
 			sb.WriteString(strconv.Itoa(int(x)))
 		} else {

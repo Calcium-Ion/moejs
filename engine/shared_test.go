@@ -339,8 +339,12 @@ func TestSharedIntrinsicWriteGuards(t *testing.T) {
 	r := newShared()
 	op := r.ObjectPrototype
 	k := key(r, "extra")
-	// [[Set]] with the shared object as receiver.
-	_, err := op.Set(r, k, IntValue(1), ObjectValue(op))
+	// [[Set]] with the shared object as receiver returns false (a frozen
+	// object); the strict SetProp throws the shared-intrinsic TypeError.
+	ok, err := op.Set(r, k, IntValue(1), ObjectValue(op))
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	err = op.SetProp(r, k, IntValue(1))
 	assert.EqualError(t, err, "TypeError: Cannot modify property 'extra' of shared intrinsic [object Object]")
 	err = op.SetProp(r, StringKey(AtomToString), IntValue(1))
 	assert.ErrorContains(t, err, "shared intrinsic")
@@ -348,6 +352,11 @@ func TestSharedIntrinsicWriteGuards(t *testing.T) {
 	_, err = op.DefineOwnProperty(r, k, DataDescriptor(IntValue(1), attrDefault))
 	assert.ErrorContains(t, err, "shared intrinsic")
 	assert.ErrorContains(t, op.DefinePropertyOrThrow(r, k, DataDescriptor(IntValue(1), attrDefault)), "shared intrinsic")
+	cur, found := op.GetOwnProperty(StringKey(AtomToString))
+	require.True(t, found)
+	ok, err = op.DefineOwnProperty(r, StringKey(AtomToString), cur)
+	assert.NoError(t, err)
+	assert.True(t, ok, "a descriptor that changes nothing succeeds on a frozen object")
 	// [[Delete]] and prototype/integrity changes.
 	assert.False(t, op.Delete(r, StringKey(AtomToString)))
 	assert.ErrorContains(t, op.DeletePropertyOrThrow(r, StringKey(AtomToString)), "Cannot delete")

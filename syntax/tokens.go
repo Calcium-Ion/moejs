@@ -1,11 +1,11 @@
 // Package syntax implements the moejs front end: a hand-written lexer, a
-// recursive-descent parser producing a compact AST, strict-mode early
-// errors, and a scope-resolution pass whose annotations the compiler
-// consumes directly.
+// recursive-descent parser producing a compact AST, early errors, and a
+// scope-resolution pass whose annotations the compiler consumes directly.
 //
-// Source is always strict-mode ECMAScript. ParseModule parses an ES module;
-// ParseScript parses a strict-mode script for the runtime's RunString
-// helper.
+// ParseModule parses an ES module, which is always strict mode code.
+// ParseScript parses a script, which is sloppy mode code unless its
+// directive prologue says "use strict"; a function with its own "use
+// strict" directive and every class body are strict.
 package syntax
 
 import "strconv"

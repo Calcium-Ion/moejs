@@ -969,9 +969,9 @@ func TestInterpScript(t *testing.T) {
 	v, err = run(`this === globalThis;`)
 	require.NoError(t, err)
 	assert.Equal(t, true, v)
-	v, err = run(`1; if (false) 2;`)
+	v, err = run(`1; if (false) 2;`) // UpdateEmpty(C, undefined)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), v)
+	assert.Nil(t, v)
 	_, err = run(`throw new TypeError("script");`)
 	assert.Equal(t, "TypeError: script", errMessage(t, err))
 	// A lexical declaration may not shadow a non-configurable global

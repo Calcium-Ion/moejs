@@ -182,8 +182,8 @@ func TestDateMinimal(t *testing.T) {
 	assert.Equal(t, float64(frozen.UnixMilli()), n)
 	// The realm clock and zone are not shared with other realms, and the
 	// defaults allocate nothing.
-	assert.Nil(t, NewRealm().date)
-	assert.Nil(t, NewRealmWith(RealmOptions{SharedIntrinsics: true}).date)
+	assert.Nil(t, NewRealm().host)
+	assert.Nil(t, NewRealmWith(RealmOptions{SharedIntrinsics: true}).host)
 	assert.Same(t, time.Local, NewRealm().TimeZone())
 	r.SetTimeZone(nil)
 	assert.Same(t, time.Local, r.TimeZone())

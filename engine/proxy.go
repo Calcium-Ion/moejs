@@ -4,6 +4,9 @@ import "slices"
 
 // Proxy exotic objects (ECMA-262 §10.5).
 //
+// Module namespace objects (module_ns.go) are of class ClassProxy too, and
+// each proxy internal method below starts with their branch.
+//
 // A proxy is an object of class ClassProxy with the shared empty proxyShape
 // (noFill: no inline cache is ever filled through it), a nil [[Prototype]]
 // and no flags, so the ordinary infallible methods (HasOwnProperty,
@@ -88,7 +91,7 @@ func (o *Object) isCallableProxy() bool {
 
 // IsRevokedProxy reports whether o is a proxy that has been revoked.
 func (o *Object) IsRevokedProxy() bool {
-	return o.class == ClassProxy && proxyOf(o).handler == nil
+	return o.class == ClassProxy && nsOf(o) == nil && proxyOf(o).handler == nil
 }
 
 // proxyEnter counts an internal method of a proxy in the call depth; the
@@ -125,7 +128,7 @@ func (r *Realm) proxyError(trap *String, format string, args ...any) error {
 // for a proxy (whose invariant violations throw, so a rejection is always
 // the trap's answer) the V8 "trap returned falsish" message, else format.
 func (r *Realm) falsishError(o *Object, trap *String, key PropertyKey, format string, args ...any) error {
-	if o.class == ClassProxy {
+	if o.class == ClassProxy && nsOf(o) == nil {
 		return r.proxyError(trap, "trap returned falsish for property '%s'", key.GoString())
 	}
 	return r.TypeError(format, args...)
@@ -138,6 +141,9 @@ func (r *Realm) callTrap(trap Value, handler *Object, args ...Value) (Value, err
 
 // proxyGetPrototypeOf implements [[GetPrototypeOf]] (§10.5.1).
 func (r *Realm) proxyGetPrototypeOf(o *Object) (*Object, error) {
+	if nsOf(o) != nil {
+		return nil, nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return nil, err
 	}
@@ -176,6 +182,9 @@ func (r *Realm) proxyGetPrototypeOf(o *Object) (*Object, error) {
 
 // proxySetPrototypeOf implements [[SetPrototypeOf]] (§10.5.2).
 func (r *Realm) proxySetPrototypeOf(o, proto *Object) (bool, error) {
+	if nsOf(o) != nil {
+		return proto == nil, nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -211,6 +220,9 @@ func (r *Realm) proxySetPrototypeOf(o, proto *Object) (bool, error) {
 
 // proxyIsExtensible implements [[IsExtensible]] (§10.5.3).
 func (r *Realm) proxyIsExtensible(o *Object) (bool, error) {
+	if nsOf(o) != nil {
+		return false, nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -238,6 +250,9 @@ func (r *Realm) proxyIsExtensible(o *Object) (bool, error) {
 
 // proxyPreventExtensions implements [[PreventExtensions]] (§10.5.4).
 func (r *Realm) proxyPreventExtensions(o *Object) (bool, error) {
+	if nsOf(o) != nil {
+		return true, nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -265,6 +280,9 @@ func (r *Realm) proxyPreventExtensions(o *Object) (bool, error) {
 
 // proxyGetOwnProperty implements [[GetOwnProperty]] (§10.5.5).
 func (r *Realm) proxyGetOwnProperty(o *Object, key PropertyKey) (PropertyDescriptor, bool, error) {
+	if ns := nsOf(o); ns != nil {
+		return r.nsGetOwnProperty(ns, key)
+	}
 	var none PropertyDescriptor
 	if err := r.proxyEnter(); err != nil {
 		return none, false, err
@@ -334,6 +352,9 @@ func (r *Realm) proxyGetOwnProperty(o *Object, key PropertyKey) (PropertyDescrip
 
 // proxyDefineOwnProperty implements [[DefineOwnProperty]] (§10.5.6).
 func (r *Realm) proxyDefineOwnProperty(o *Object, key PropertyKey, desc PropertyDescriptor) (bool, error) {
+	if ns := nsOf(o); ns != nil {
+		return r.nsDefineOwnProperty(ns, key, desc)
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -344,6 +365,13 @@ func (r *Realm) proxyDefineOwnProperty(o *Object, key PropertyKey, desc Property
 		return false, err
 	}
 	if trap.IsUndefined() {
+		// A shared intrinsic target answers as the frozen object it is,
+		// without the TypeError, so a sloppy write through the proxy is
+		// ignored like one to the target itself; Object.defineProperty
+		// still throws for a descriptor that would change it.
+		if target.flags&flagShared != 0 {
+			return target.sharedDefineAllowed(key, desc), nil
+		}
 		return target.DefineOwnProperty(r, key, desc)
 	}
 	v, err := r.callTrap(trap, handler, ObjectValue(target), keyValue(r, key), r.fromPartialDescriptor(desc))
@@ -382,6 +410,9 @@ func (r *Realm) proxyDefineOwnProperty(o *Object, key PropertyKey, desc Property
 
 // proxyHas implements [[HasProperty]] (§10.5.7).
 func (r *Realm) proxyHas(o *Object, key PropertyKey) (bool, error) {
+	if ns := nsOf(o); ns != nil {
+		return nsHas(ns, key), nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -419,6 +450,10 @@ func (r *Realm) proxyHas(o *Object, key PropertyKey) (bool, error) {
 
 // proxyGet implements [[Get]] (§10.5.8).
 func (r *Realm) proxyGet(o *Object, key PropertyKey, receiver Value) (Value, error) {
+	if ns := nsOf(o); ns != nil {
+		v, _, err := r.nsGet(ns, key)
+		return v, err
+	}
 	if err := r.proxyEnter(); err != nil {
 		return Undefined(), err
 	}
@@ -436,6 +471,9 @@ func (r *Realm) proxyGet(o *Object, key PropertyKey, receiver Value) (Value, err
 // proxyLookup is proxyGet for Object.Lookup: without a get trap the lookup
 // continues on the target, which may not have the property.
 func (r *Realm) proxyLookup(o *Object, key PropertyKey, receiver Value) (Value, bool, error) {
+	if ns := nsOf(o); ns != nil {
+		return r.nsGet(ns, key)
+	}
 	if err := r.proxyEnter(); err != nil {
 		return Undefined(), false, err
 	}
@@ -474,6 +512,9 @@ func (r *Realm) proxyGetTrap(target, handler *Object, trap Value, key PropertyKe
 
 // proxySet implements [[Set]] (§10.5.9).
 func (r *Realm) proxySet(o *Object, key PropertyKey, v, receiver Value) (bool, error) {
+	if nsOf(o) != nil {
+		return false, nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -506,6 +547,9 @@ func (r *Realm) proxySet(o *Object, key PropertyKey, v, receiver Value) (bool, e
 
 // proxyDelete implements [[Delete]] (§10.5.10).
 func (r *Realm) proxyDelete(o *Object, key PropertyKey) (bool, error) {
+	if ns := nsOf(o); ns != nil {
+		return nsDelete(ns, key), nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return false, err
 	}
@@ -542,6 +586,9 @@ func (r *Realm) proxyDelete(o *Object, key PropertyKey) (bool, error) {
 // proxyOwnKeys implements [[OwnPropertyKeys]] (§10.5.11). The result keeps
 // the trap's order.
 func (r *Realm) proxyOwnKeys(o *Object) ([]PropertyKey, error) {
+	if ns := nsOf(o); ns != nil {
+		return nsOwnKeys(ns), nil
+	}
 	if err := r.proxyEnter(); err != nil {
 		return nil, err
 	}
@@ -995,7 +1042,7 @@ func (r *Realm) countWork(work *int, n int) error {
 // checkFunctionRealm is GetFunctionRealm(o) (ECMA-262 §7.3.24) with one
 // realm: it can only fail, on a revoked proxy on o's chain of targets.
 func (r *Realm) checkFunctionRealm(o *Object) error {
-	for i := int64(0); o.class == ClassProxy; i++ {
+	for i := int64(0); o.class == ClassProxy && nsOf(o) == nil; i++ {
 		pd := proxyOf(o)
 		if pd.handler == nil {
 			return r.TypeError("Cannot perform 'GetFunctionRealm' on a proxy that has been revoked")
@@ -1014,7 +1061,7 @@ func (r *Realm) isArray(v Value) (bool, error) {
 		return false, nil
 	}
 	o := v.AsObject()
-	for i := int64(0); o.class == ClassProxy; i++ {
+	for i := int64(0); o.class == ClassProxy && nsOf(o) == nil; i++ {
 		pd := proxyOf(o)
 		if pd.handler == nil {
 			return false, r.TypeError("Cannot perform 'IsArray' on a proxy that has been revoked")
@@ -1031,6 +1078,9 @@ func (r *Realm) isArray(v Value) (bool, error) {
 // data property: it updates key's value on recv, or creates key when recv
 // lacks it, through recv's [[GetOwnProperty]] and [[DefineOwnProperty]].
 func (r *Realm) receiverSet(recv *Object, key PropertyKey, v Value) (bool, error) {
+	if recv.flags&flagShared != 0 { // frozen: nothing to update or create
+		return false, nil
+	}
 	existing, ok, err := r.getOwnProperty(recv, key)
 	if err != nil {
 		return false, err

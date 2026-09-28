@@ -69,6 +69,7 @@ var checkSeeds = []string{
 	`(?<a>x)|(?<a>y)`, `(?<a>x)(?<a>y)`, `(?<𝒜>x)`, `(?<A>x)`, `(?<1>x)`, `\0`, `[\0-\x1f]{2}`, `(a)|\1b`,
 	`[\s--1]`, `[\d-x]+`, `[\p{L}--[a-z]]`, `[\q{abc|ab}x]`, `[^\q{ab}]`, `[\p{RGI_Emoji}]`, `[^\p{RGI_Emoji}]`,
 	`[a&&b]`, `[[a]&&[b]]`, `[a--]`, `^$|\r`, `}`, `]`, `\-`, `\ka`, `[\B]`, `[\k]`,
+	`(?<a>)[\k]`, `[\k](?<a>)`,
 }
 
 // A Checker (reused, as the syntax package reuses it) reports exactly the

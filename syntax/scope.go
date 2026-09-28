@@ -10,16 +10,17 @@ type ScopeKind uint8
 
 const (
 	ScopeModule   ScopeKind = iota // module top level
-	ScopeScript                    // strict-mode script top level
+	ScopeScript                    // script top level: its declarations are global (see CompileScript)
 	ScopeFunction                  // parameters, var declarations and body-level lexical declarations
 	ScopeBlock                     // block or switch case block with lexical declarations
 	ScopeCatch                     // catch parameter
 	ScopeFor                       // for/for-in/for-of head with let/const
 	ScopeClass                     // class body: inner name, private names and hidden class bindings
+	ScopeWith                      // with statement body: its one hidden binding holds the object
 )
 
 func (k ScopeKind) String() string {
-	return [...]string{"module", "script", "function", "block", "catch", "for", "class"}[k]
+	return [...]string{"module", "script", "function", "block", "catch", "for", "class", "with"}[k]
 }
 
 // BindKind classifies bindings.
@@ -34,14 +35,15 @@ const (
 	BindCatch                    // catch parameter
 	BindClass                    // class declaration (the outer, mutable binding)
 	BindFuncName                 // name of a named function expression, immutable, visible inside it
-	BindImport                   // import binding (unsupported)
+	BindImport                   // named or default import binding: immutable, reads the exporter's binding
+	BindImportNS                 // import * as binding: immutable, holds the module namespace object
 	BindPrivate                  // private name "#x" of a class (ScopeClass)
 	BindHidden                   // resolver-created binding of the class/super machinery, named "%..."
 	BindArgs                     // the function's arguments object (Function.ArgumentsBinding)
 )
 
 func (k BindKind) String() string {
-	return [...]string{"var", "let", "const", "param", "function", "catch", "class", "funcname", "import", "private", "hidden", "arguments"}[k]
+	return [...]string{"var", "let", "const", "param", "function", "catch", "class", "funcname", "import", "namespace", "private", "hidden", "arguments"}[k]
 }
 
 // IsLexical reports whether the binding is a let/const/class binding, which
@@ -59,6 +61,12 @@ type Binding struct {
 	Captured bool   // referenced from a function nested inside the declaring function
 	NeedsTDZ bool   // let/const/class that may be read before initialisation
 	Exported bool   // module binding named by an export entry
+	// AnnexB marks, on the binding of a block-level function declaration of
+	// sloppy code, that evaluating the declaration also assigns the var
+	// binding of the same name in the enclosing function or script scope
+	// (Annex B.3.2); on a script-scope var binding, that only such
+	// declarations create it.
+	AnnexB bool
 
 	initEnd int // end offset of the initialising declarator (lexical bindings)
 }
@@ -67,9 +75,10 @@ type Binding struct {
 type Scope struct {
 	Kind     ScopeKind
 	heritage bool // a class scope whose heritage is being resolved: its private names are not visible
+	evalDone bool // markEvalSites has marked the scope, and so its ancestors
 	Parent   *Scope
 	Func     *Function // enclosing function; nil at module/script level
-	Node     Node      // owning node: *Module, *Script, *Function, *BlockStmt, *SwitchStmt, *TryStmt, *ForStmt, *ForInOfStmt, *Class
+	Node     Node      // owning node: *Module, *Script, *Function, *BlockStmt, *SwitchStmt, *TryStmt, *ForStmt, *ForInOfStmt, *Class, *WithStmt
 	Bindings []*Binding
 	Funcs    []*FuncDecl // hoisted function declarations to instantiate on entry, in source order
 	Children []*Scope
@@ -136,6 +145,7 @@ type fnFrame struct {
 type paramList struct {
 	frame int
 	refs  map[string]bool
+	eval  bool // a direct eval call appears in the parameter list
 }
 
 type hoistInfo struct {
@@ -146,7 +156,7 @@ type hoistInfo struct {
 
 type resolver struct {
 	file     *File
-	opts     Options
+	stop     func() error // Options.Stop
 	module   *Module
 	scope    *Scope
 	frames   []*fnFrame
@@ -158,10 +168,21 @@ type resolver struct {
 	// level, when Module.Async.
 	firstAwait int
 	err        *Error
+
+	scriptStrict bool               // the script has a "use strict" directive
+	earlyExports bool               // Options.EarlyExports
+	withs        int                // with statements enclosing the code being resolved
+	annexB       map[*FuncDecl]bool // block function declarations Annex B.3.2 applies to
+
+	evalSites []*Scope  // scopes containing a direct eval call (see markEvalSites)
+	evalFrame *fnFrame  // the frame of the last one
+	evalFn    *Function // the eval code being resolved (resolveEval)
+	evalThis  *Function // the function supplying the eval code's this (resolveEval)
+	evalVars  *Scope    // the scope of sloppy eval code, whose var declarations it leaves out
 }
 
 func resolveModule(m *Module, opts Options) error {
-	r := &resolver{file: m.File, opts: opts, module: m, exports: make(map[string]bool)}
+	r := &resolver{file: m.File, stop: opts.Stop, earlyExports: opts.EarlyExports, module: m, exports: make(map[string]bool)}
 	return r.run(func() {
 		root := r.newScope(ScopeModule, m)
 		m.Scope = root
@@ -170,29 +191,40 @@ func resolveModule(m *Module, opts Options) error {
 		r.declareLexical(root, m.Body)
 		r.stmts(m.Body)
 		r.finishFrame(r.frames[0])
+		r.markEvalSites()
+		m.HasDirectEval = len(r.evalSites) > 0
 	})
 }
 
 func resolveScript(s *Script, opts Options) error {
-	r := &resolver{file: s.File, opts: opts}
+	r := &resolver{file: s.File, stop: opts.Stop, scriptStrict: s.Strict}
 	return r.run(func() {
 		root := r.newScope(ScopeScript, s)
 		s.Scope = root
 		r.scope = root
 		r.hoist(root, s.Body, nil, true)
 		r.declareLexical(root, s.Body)
+		if !s.Strict {
+			r.annexBFuncs(root, nil, s.Body)
+		}
 		r.stmts(s.Body)
 		r.finishFrame(r.frames[0])
+		r.markEvalSites()
+		s.HasDirectEval = len(r.evalSites) > 0
 	})
 }
 
 func (r *resolver) run(f func()) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			if _, ok := rec.(bailout); !ok {
+			switch rec := rec.(type) {
+			case bailout:
+				err = r.err
+			case stopped:
+				err = rec.err
+			default:
 				panic(rec)
 			}
-			err = r.err
 		}
 	}()
 	r.frames = []*fnFrame{{}}
@@ -205,14 +237,15 @@ func (r *resolver) fail(pos int, msg string) {
 	panic(bailout{})
 }
 
-func (r *resolver) unsupported(pos int, feature string) {
-	if r.opts.AllowUnsupported {
-		return
-	}
-	r.fail(pos, feature+" is not supported yet (see TODO.md)")
-}
-
 func (r *resolver) currentFn() *Function { return r.frames[len(r.frames)-1].fn }
+
+// strict reports whether the code being resolved is strict mode code.
+func (r *resolver) strict() bool {
+	if fn := r.currentFn(); fn != nil {
+		return fn.IsStrict
+	}
+	return r.module != nil || r.scriptStrict
+}
 
 func (r *resolver) newScope(kind ScopeKind, node Node) *Scope {
 	s := &Scope{Kind: kind, Parent: r.scope, Func: r.currentFn(), Node: node}
@@ -269,8 +302,37 @@ func (r *resolver) declareFunc(s *Scope, fd *FuncDecl, name *Ident) {
 		// A function declaration in a block is lexical.
 		r.fail(name.Pos, "Identifier '"+name.Name+"' has already been declared")
 	}
+	if s.Kind == ScopeBlock && plainFunc(fd) && !r.strict() {
+		// Sloppy code may declare a plain function twice in one block
+		// (B.3.2.4): both are instantiated, the last one wins.
+		if b := s.Lookup(name.Name); b != nil && b.Kind == BindFunction && !slices.ContainsFunc(s.Funcs, func(g *FuncDecl) bool {
+			return g.Func.Name.Name == name.Name && !plainFunc(g)
+		}) {
+			s.Funcs = append(s.Funcs, fd)
+			return
+		}
+	}
 	r.declare(s, name, BindFunction, 0)
 	s.Funcs = append(s.Funcs, fd)
+}
+
+// plainFunc reports whether fd declares an ordinary function (not a
+// generator or async function), the only kind Annex B extends.
+func plainFunc(fd *FuncDecl) bool { return !fd.Func.IsGenerator && !fd.Func.IsAsync }
+
+// labelledFunc returns the function declaration a labelled statement wraps
+// (through any further labels), or nil.
+func labelledFunc(st *LabeledStmt) *FuncDecl {
+	for {
+		switch b := st.Body.(type) {
+		case *FuncDecl:
+			return b
+		case *LabeledStmt:
+			st = b
+		default:
+			return nil
+		}
+	}
 }
 
 func defaultIdent(pos int) *Ident { return &Ident{Span: Span{pos, pos}, Name: "*default*"} }
@@ -328,6 +390,10 @@ func (r *resolver) hoistStmt(s *Scope, st Stmt, path []Node, top bool) {
 	case *DoWhileStmt:
 		r.hoistStmt(s, st.Body, path, false)
 	case *LabeledStmt:
+		// A labelled function declaration (sloppy code) is placed like an
+		// unlabelled one.
+		r.hoistStmt(s, st.Body, path, top)
+	case *WithStmt:
 		r.hoistStmt(s, st.Body, path, false)
 	case *SwitchStmt:
 		inner := append(path, st)
@@ -384,8 +450,20 @@ func (r *resolver) declareLexical(s *Scope, stmts []Stmt) {
 			if s.Kind == ScopeBlock {
 				r.declareFunc(s, st, st.Func.Name)
 			}
+		case *LabeledStmt:
+			if fd := labelledFunc(st); fd != nil && s.Kind == ScopeBlock {
+				r.declareFunc(s, fd, fd.Func.Name)
+			}
 		case *ExportDecl:
 			r.declareLexical(s, []Stmt{st.Decl})
+		case *ImportDecl:
+			r.importDecl(s, st)
+		case *ExportNamed:
+			if st.Source != nil {
+				r.request(st.Source)
+			}
+		case *ExportAll:
+			r.request(st.Source)
 		case *ExportDefault:
 			switch d := st.Decl.(type) {
 			case *FuncDecl:
@@ -413,15 +491,166 @@ func hasLexical(stmts []Stmt) bool {
 			}
 		case *ClassDecl, *FuncDecl:
 			return true
+		case *LabeledStmt:
+			if labelledFunc(st) != nil {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// lexicalNames appends the names stmts declare lexically (in a block,
+// function declarations included) to out.
+func lexicalNames(stmts []Stmt, out []string) []string {
+	for _, st := range stmts {
+		switch st := st.(type) {
+		case *VarDecl:
+			if st.Kind != DeclVar {
+				for _, d := range st.Decls {
+					for _, id := range boundNames(d.Target, nil) {
+						out = append(out, id.Name)
+					}
+				}
+			}
+		case *ClassDecl:
+			out = append(out, st.Class.Name.Name)
+		case *FuncDecl:
+			out = append(out, st.Func.Name.Name)
+		case *LabeledStmt:
+			if fd := labelledFunc(st); fd != nil {
+				out = append(out, fd.Func.Name.Name)
+			}
+		}
+	}
+	return out
+}
+
+// annexBFuncs applies Annex B.3.2 to the function or script body stmts of
+// sloppy code: a plain function declaration directly in a block, case
+// clause or if clause whose name a var declaration there could take without
+// an early error (no let, const, class, block function or destructured
+// catch parameter of that name in between, no parameter and no body-level
+// lexical declaration) also gets a var binding in vs, the var scope, which
+// the declaration assigns when evaluated. params is the parameter scope of
+// a function (vs itself unless the body is kept apart), nil for a script.
+// A function named arguments keeps to its block.
+func (r *resolver) annexBFuncs(vs, params *Scope, stmts []Stmt) {
+	var blocked []string
+	candidate := func(fd *FuncDecl) {
+		name := fd.Func.Name.Name
+		if !plainFunc(fd) || slices.Contains(blocked, name) {
+			return
+		}
+		if params != nil {
+			if name == "arguments" {
+				return
+			}
+			if b := params.Lookup(name); b != nil && b.Kind == BindParam {
+				return
+			}
+		}
+		b := vs.Lookup(name)
+		if b != nil && b.Kind.IsLexical() {
+			return
+		}
+		if b == nil {
+			vs.add(&Binding{Name: name, Kind: BindVar, Pos: fd.Func.Name.Pos, AnnexB: params == nil})
+		}
+		if r.annexB == nil {
+			r.annexB = make(map[*FuncDecl]bool)
+		}
+		r.annexB[fd] = true
+	}
+	var walk func(st Stmt)
+	block := func(body []Stmt, extra []string) {
+		mark := len(blocked)
+		for _, st := range body {
+			if fd, ok := st.(*FuncDecl); ok {
+				candidate(fd)
+			}
+		}
+		blocked = lexicalNames(body, append(blocked, extra...))
+		for _, st := range body {
+			walk(st)
+		}
+		blocked = blocked[:mark]
+	}
+	walk = func(st Stmt) {
+		switch st := st.(type) {
+		case *BlockStmt:
+			block(st.Body, nil)
+		case *IfStmt:
+			walk(st.Then)
+			if st.Else != nil {
+				walk(st.Else)
+			}
+		case *ForStmt:
+			mark := len(blocked)
+			if vd, ok := st.Init.(*VarDecl); ok {
+				blocked = lexicalNames([]Stmt{vd}, blocked)
+			}
+			walk(st.Body)
+			blocked = blocked[:mark]
+		case *ForInOfStmt:
+			mark := len(blocked)
+			if vd, ok := st.Left.(*VarDecl); ok {
+				blocked = lexicalNames([]Stmt{vd}, blocked)
+			}
+			walk(st.Body)
+			blocked = blocked[:mark]
+		case *WhileStmt:
+			walk(st.Body)
+		case *DoWhileStmt:
+			walk(st.Body)
+		case *LabeledStmt:
+			walk(st.Body)
+		case *WithStmt:
+			walk(st.Body)
+		case *SwitchStmt:
+			mark := len(blocked)
+			for _, c := range st.Cases {
+				for _, s := range c.Body {
+					if fd, ok := s.(*FuncDecl); ok {
+						candidate(fd)
+					}
+				}
+			}
+			for _, c := range st.Cases {
+				blocked = lexicalNames(c.Body, blocked)
+			}
+			for _, c := range st.Cases {
+				for _, s := range c.Body {
+					walk(s)
+				}
+			}
+			blocked = blocked[:mark]
+		case *TryStmt:
+			block(st.Block.Body, nil)
+			if st.Handler != nil {
+				var names []string
+				if st.Param != nil && !isSimpleParam(st.Param) {
+					for _, id := range boundNames(st.Param, nil) {
+						names = append(names, id.Name)
+					}
+				}
+				block(st.Handler.Body, names)
+			}
+			if st.Finalizer != nil {
+				block(st.Finalizer.Body, nil)
+			}
+		}
+	}
+	for _, st := range stmts {
+		walk(st)
+	}
+}
+
 // ---- Statements -------------------------------------------------------------
 
 func (r *resolver) stmts(list []Stmt) {
-	for _, s := range list {
+	for i, s := range list {
+		poll(r.stop, i)
 		r.stmt(s)
 	}
 }
@@ -470,6 +699,16 @@ func (r *resolver) stmt(s Stmt) {
 		r.expr(s.X)
 	case *LabeledStmt:
 		r.stmt(s.Body)
+	case *WithStmt:
+		r.expr(s.Object)
+		ws := r.newScope(ScopeWith, s)
+		ws.add(&Binding{Name: "%with", Kind: BindHidden, Pos: s.Pos})
+		s.Scope = ws
+		r.push(ws)
+		r.withs++
+		r.stmt(s.Body)
+		r.withs--
+		r.pop()
 	case *SwitchStmt:
 		r.switchStmt(s)
 	case *TryStmt:
@@ -479,7 +718,10 @@ func (r *resolver) stmt(s Stmt) {
 		r.exportDecl(s)
 	case *ExportNamed:
 		if s.Source != nil {
-			r.unsupported(s.Pos, "export ... from")
+			req := r.request(s.Source)
+			for _, spec := range s.Specs {
+				r.addReexport(&ReexportEntry{Name: spec.Exported.Name, Request: req, Import: spec.Local.Name, Pos: spec.Pos})
+			}
 			return
 		}
 		for _, spec := range s.Specs {
@@ -488,14 +730,34 @@ func (r *resolver) stmt(s Stmt) {
 				r.fail(spec.Local.Pos, "Export '"+spec.Local.Name+"' is not defined")
 			}
 			spec.Local.Binding = b
+			switch b.Kind {
+			case BindImport:
+				// Re-export of an imported binding: it names the
+				// exporter's binding, not a local one.
+				ie := r.importOf(b)
+				r.addReexport(&ReexportEntry{Name: spec.Exported.Name, Request: ie.Request, Import: ie.Name, Pos: spec.Pos})
+				continue
+			case BindImportNS:
+				// Re-export of an imported namespace, as export * as:
+				// modules that re-export the same namespace export one
+				// binding.
+				ie := r.importOf(b)
+				r.addReexport(&ReexportEntry{Name: spec.Exported.Name, Request: ie.Request, All: true, Pos: spec.Pos})
+				continue
+			}
 			r.addExport(spec.Exported.Name, spec.Local.Name, b, spec.Pos)
 		}
 	case *ExportDefault:
 		r.exportDefault(s)
 	case *ExportAll:
-		r.unsupported(s.Pos, "export ... from")
+		req := r.request(s.Source)
+		if s.As != nil {
+			r.addReexport(&ReexportEntry{Name: s.As.Name, Request: req, All: true, Pos: s.As.Pos})
+			return
+		}
+		r.module.Stars = append(r.module.Stars, &StarExport{Request: req, Pos: s.Pos})
 	case *ImportDecl:
-		r.unsupported(s.Pos, "import")
+		// declared by declareLexical
 	}
 }
 
@@ -525,11 +787,19 @@ func (r *resolver) funcDecl(fd *FuncDecl) {
 	var b *Binding
 	if fn.Name != nil {
 		b = r.scope.Resolve(fn.Name.Name)
+		if r.evalVars != nil && r.scope == r.evalVars {
+			// A top-level function of sloppy eval code binds in the
+			// caller's variable environment (EvalDeclarationInstantiation).
+			b = nil
+		}
 		fn.Name.Binding = b
 	} else {
 		b = r.scope.Lookup("*default*")
 	}
 	r.function(fn, b, false)
+	if b != nil && r.annexB[fd] {
+		b.AnnexB = true
+	}
 }
 
 // function resolves a function body in a new function scope. hoistedAs is
@@ -559,6 +829,9 @@ func (r *resolver) function(fn *Function, hoistedAs *Binding, isExpr bool) {
 		if fn.Body != nil {
 			r.hoist(s, fn.Body.Body, nil, true)
 			r.declareLexical(s, fn.Body.Body)
+			if !fn.IsStrict {
+				r.annexBFuncs(s, s, fn.Body.Body)
+			}
 		}
 		r.selfBinding(fn, s, isExpr)
 		for _, param := range fn.Params {
@@ -572,6 +845,16 @@ func (r *resolver) function(fn *Function, hoistedAs *Binding, isExpr bool) {
 		r.stmts(fn.Body.Body)
 	} else {
 		r.expr(fn.ExprBody)
+	}
+
+	// A sloppy function with simple parameters maps its arguments object
+	// onto the parameters, which therefore live in its environment.
+	if !fn.IsStrict && fn.HasSimpleParams && fn.ArgumentsBinding() != nil {
+		for _, param := range fn.Params {
+			if id := param.(*Ident); id.Binding != nil {
+				id.Binding.Captured = true
+			}
+		}
 	}
 
 	r.finishFrame(frame)
@@ -617,13 +900,21 @@ func (r *resolver) paramScope(fn *Function, s *Scope, frame *fnFrame, isExpr boo
 	if fn.Rest != nil {
 		r.declPattern(fn.Rest)
 	}
-	refs := r.inParams[len(r.inParams)-1].refs
+	pl := r.inParams[len(r.inParams)-1]
+	refs := pl.refs
 	r.inParams = r.inParams[:len(r.inParams)-1]
 
 	body := &Scope{Kind: ScopeFunction, Parent: s, Func: fn, Node: fn}
 	r.hoist(body, fn.Body.Body, nil, true)
 	r.declareLexical(body, fn.Body.Body)
-	split := false
+	if !fn.IsStrict {
+		r.annexBFuncs(body, s, fn.Body.Body)
+	}
+	// A direct eval in the parameter list declares its vars outside the
+	// parameters, and one in the body of sloppy code in the body's own
+	// variable environment (FunctionDeclarationInstantiation step 20 and
+	// 28): either keeps the body apart.
+	split := pl.eval || !fn.IsStrict && hasDirectEval(fn.Body.Body)
 	for _, b := range body.Bindings {
 		if outer := s.Lookup(b.Name); outer != nil {
 			if b.Kind.IsLexical() && outer.Kind == BindParam {
@@ -696,11 +987,18 @@ func (r *resolver) finishFrame(frame *fnFrame) {
 	for b, info := range infos {
 		early[b] = info.earlyRef
 	}
-	// The host calls a module's exports while its top level awaits.
-	if frame.fn == nil && r.module != nil && r.module.Async {
+	// The host calls a module's exports while its top level awaits, and a
+	// module that requests others, or one compiled with EarlyExports, can
+	// have its exports called by a module of an import cycle before its own
+	// body runs.
+	if frame.fn == nil && r.module != nil && (r.module.Async || len(r.module.Requests) > 0 || r.earlyExports) {
+		at := r.firstAwait
+		if len(r.module.Requests) > 0 || r.earlyExports {
+			at = 0
+		}
 		for b := range infos {
 			if b.Exported {
-				early[b] = min(early[b], r.firstAwait)
+				early[b] = min(early[b], at)
 			}
 		}
 	}
@@ -776,6 +1074,8 @@ func (r *resolver) assignTarget(pat Pattern) {
 		r.ident(pat)
 	case *MemberExpr:
 		r.expr(pat)
+	case *CallExpr:
+		r.expr(pat)
 	case *AssignPattern:
 		r.assignTarget(pat.Target)
 		r.expr(pat.Default)
@@ -836,6 +1136,9 @@ func (r *resolver) forInOf(s *ForInOfStmt) {
 	case *VarDecl:
 		if left.Kind == DeclVar {
 			r.declPattern(left.Decls[0].Target)
+			if init := left.Decls[0].Init; init != nil {
+				r.expr(init)
+			}
 			r.expr(s.Right)
 			break
 		}
@@ -924,6 +1227,60 @@ func (r *resolver) addExport(name, local string, b *Binding, pos int) {
 	r.module.Exports = append(r.module.Exports, &ExportEntry{Name: name, Local: local, Binding: b, Pos: pos})
 }
 
+func (r *resolver) addReexport(e *ReexportEntry) {
+	if r.exports[e.Name] {
+		r.fail(e.Pos, "Duplicate export of '"+e.Name+"'")
+	}
+	r.exports[e.Name] = true
+	r.module.Reexports = append(r.module.Reexports, e)
+}
+
+// request returns the index of the module request for specifier src,
+// adding it on first use.
+func (r *resolver) request(src *StringLit) int {
+	for i, req := range r.module.Requests {
+		if req.Specifier == src.Value {
+			return i
+		}
+	}
+	r.module.Requests = append(r.module.Requests, &ModuleRequest{Specifier: src.Value, Pos: src.Pos})
+	return len(r.module.Requests) - 1
+}
+
+// importDecl declares the bindings of an import declaration in the module
+// scope s.
+func (r *resolver) importDecl(s *Scope, d *ImportDecl) {
+	req := r.request(d.Source)
+	add := func(id *Ident, name string, ns bool, pos int) {
+		kind := BindImport
+		if ns {
+			kind = BindImportNS
+		}
+		b := r.declare(s, id, kind, 0)
+		id.Binding = b
+		r.module.Imports = append(r.module.Imports, &ImportEntry{Request: req, Name: name, Namespace: ns, Binding: b, Pos: pos})
+	}
+	if d.Default != nil {
+		add(d.Default, "default", false, d.Default.Pos)
+	}
+	if d.Namespace != nil {
+		add(d.Namespace, "", true, d.Namespace.Pos)
+	}
+	for _, spec := range d.Specs {
+		add(spec.Local, spec.Imported.Name, false, spec.Pos)
+	}
+}
+
+// importOf returns the import entry that declares binding b.
+func (r *resolver) importOf(b *Binding) *ImportEntry {
+	for _, ie := range r.module.Imports {
+		if ie.Binding == b {
+			return ie
+		}
+	}
+	panic("syntax: import binding without an import entry")
+}
+
 func (r *resolver) exportDecl(s *ExportDecl) {
 	switch d := s.Decl.(type) {
 	case *VarDecl:
@@ -983,12 +1340,9 @@ func (r *resolver) expr(e Expr) {
 		r.fail(e.Pos, "'super' keyword unexpected here")
 	case *NewTarget:
 		e.Binding = r.newTarget()
-	case *ImportMeta:
-		r.unsupported(e.Pos, "import.meta")
 	case *ImportCall:
-		r.unsupported(e.Pos, "dynamic import()")
 		r.expr(e.Source)
-	case *NumberLit, *BigIntLit, *StringLit, *BoolLit, *NullLit, *RegexLit:
+	case *ImportMeta, *NumberLit, *BigIntLit, *StringLit, *BoolLit, *NullLit, *RegexLit:
 	case *TemplateLit:
 		r.exprs(e.Exprs)
 	case *TaggedTemplate:
@@ -1030,9 +1384,8 @@ func (r *resolver) expr(e Expr) {
 			r.exprs(e.Args)
 			break
 		}
-		if id, ok := e.Callee.(*Ident); ok && id.Name == "eval" && r.scope.Resolve("eval") == nil {
-			r.markEval()
-			r.unsupported(e.Pos, "direct eval")
+		if isDirectEval(e) {
+			r.directEval()
 		}
 		r.expr(e.Callee)
 		r.exprs(e.Args)
@@ -1096,9 +1449,11 @@ func (r *resolver) ident(id *Ident) {
 	if id.Name == "arguments" {
 		r.checkClassArguments(id)
 		b = r.argumentsBinding()
-	}
-	if b == nil {
+	} else {
 		b = r.scope.Resolve(id.Name)
+	}
+	if r.withs > 0 {
+		r.throughWith(b)
 	}
 	for i := range r.inParams {
 		if pl := &r.inParams[i]; b == nil || r.ownerFrame(b) <= pl.frame {
@@ -1176,34 +1531,81 @@ func (r *resolver) markThis() {
 	}
 }
 
-// argumentsBinding returns the arguments binding of the innermost non-arrow
-// function, declaring it on first use and flagging that function and every
-// arrow between it and the reference. At the top level `arguments` is an
-// ordinary global reference (nil). Strict code cannot declare a binding
-// named arguments, so the name never resolves to anything else.
+// throughWith marks the object binding of every with statement between the
+// reference being resolved and b's scope (all of them for a global) as
+// captured when the reference is in a function nested inside it.
+func (r *resolver) throughWith(b *Binding) {
+	last := len(r.frames) - 1
+	for s := r.scope; s != nil && (b == nil || s != b.Scope); s = s.Parent {
+		if s.Kind == ScopeWith && r.ownerFrame(s.Bindings[0]) != last {
+			s.Bindings[0].Captured = true
+		}
+	}
+}
+
+// argumentsBinding resolves `arguments`. In a function (arrows looking
+// through to the innermost non-arrow one) it is the function's arguments
+// object, declared on first use, flagging the function and every arrow
+// between it and the reference, unless a parameter, a function or a lexical
+// declaration of the function (sloppy code only) takes the name; a var
+// declaration named arguments denotes the object itself. At the top level
+// `arguments` is an ordinary reference.
 func (r *resolver) argumentsBinding() *Binding {
-	for i := len(r.frames) - 1; i > 0; i-- {
-		fn := r.frames[i].fn
-		if fn.IsArrow {
-			continue
-		}
-		for j := i; j < len(r.frames); j++ {
-			r.frames[j].fn.UsesArguments = true
-		}
-		b := fn.ArgumentsBinding()
-		if b == nil {
-			b = &Binding{Name: "arguments", Kind: BindArgs, Pos: fn.Pos}
-			fn.Scope.add(b)
-		}
+	b := r.scope.Resolve("arguments")
+	i := len(r.frames) - 1
+	for i > 0 && r.frames[i].fn.IsArrow {
+		i--
+	}
+	if i == 0 {
 		return b
 	}
-	return nil
+	fn := r.frames[i].fn
+	if b != nil && r.ownerFrame(b) >= i {
+		switch {
+		case b.Kind == BindArgs:
+		case b.Kind == BindVar && b.Scope == fn.Scope:
+			b.Kind = BindArgs
+		case b.Kind == BindVar && fn.Body != nil && b.Scope == fn.Body.Scope:
+			// A body kept apart from parameter expressions starts its var
+			// with the object (see enterBodyScope in the compiler).
+			if fn.Scope.Lookup("arguments") == nil {
+				r.declareArguments(fn, i)
+			}
+			return b
+		default:
+			return b
+		}
+	} else {
+		b = r.declareArguments(fn, i)
+	}
+	for j := i; j < len(r.frames); j++ {
+		r.frames[j].fn.UsesArguments = true
+	}
+	return b
+}
+
+// declareArguments declares the arguments object of fn, the function of
+// frame i.
+func (r *resolver) declareArguments(fn *Function, i int) *Binding {
+	if fn == r.evalThis {
+		// The caller's arguments binding is one of the eval scope's levels,
+		// found by Resolve before this is reached.
+		r.fail(fn.Pos, "internal: arguments of the eval code's function is not in its scope")
+	}
+	b := fn.Scope.Lookup("arguments")
+	if b == nil {
+		b = &Binding{Name: "arguments", Kind: BindArgs, Pos: fn.Pos}
+		fn.Scope.add(b)
+	}
+	for j := i; j < len(r.frames); j++ {
+		r.frames[j].fn.UsesArguments = true
+	}
+	return b
 }
 
 // ArgumentsBinding returns the binding of the function's own arguments
 // object (BindArgs, declared in Scope), nil when nothing references it.
-// Arrows have none: their `arguments` is the enclosing function's. Strict
-// code declares nothing else named arguments.
+// Arrows have none: their `arguments` is the enclosing function's.
 func (fn *Function) ArgumentsBinding() *Binding {
 	if !fn.UsesArguments || fn.IsArrow {
 		return nil
@@ -1216,6 +1618,10 @@ func (fn *Function) ArgumentsBinding() *Binding {
 
 func (r *resolver) markEval() {
 	for i := len(r.frames) - 1; i > 0; i-- {
-		r.frames[i].fn.HasDirectEval = true
+		fn := r.frames[i].fn
+		if fn.HasDirectEval {
+			return // and so are the frames outside it
+		}
+		fn.HasDirectEval = true
 	}
 }

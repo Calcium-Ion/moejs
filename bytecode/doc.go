@@ -24,7 +24,8 @@
 //
 // Every instruction is one 32-bit word: op:8 | A:8 | B:8 | C:8, or
 // op:8 | A:8 | Bx:16 (unsigned) / sBx:16 (signed). Ops marked +X below are
-// followed by one ExtraArg word (a raw uint32); GetEnvChkW has two. Jump
+// followed by one ExtraArg word (a raw uint32); GetEnvChkW and GetImportW
+// have two. Jump
 // offsets are relative to the pc of the following word. Constants K[i] are
 // Function.Consts; F[i] are Function.Children.
 //
@@ -64,11 +65,33 @@
 //	CopyEnv                env = copy of env with the same parent (per-iteration let bindings)
 //	CheckTDZ   A +X        ReferenceError "Cannot access 'K[X]' before initialization" if R[A] is hole
 //
+// Module imports (env^B[C] holds a reference to the exporting module's
+// binding, filled in when the module graph is instantiated)
+//
+//	GetImport  A B C +X    R[A] = the binding env^B[C] refers to; ReferenceError if hole; X = name constant
+//	GetImportW A B +X +X   same with slot X1 (slot >= 256); X2 = name constant
+//
+// Dynamic import and import.meta (off the interpreter's jump table, after
+// the async ops; the compiler sets Function.ScriptOrModule on the root of
+// code that uses them, and of a script or module holding a direct eval)
+//
+//	ImportCall A B         R[A] = a new promise for import(R[B]): ToString(R[B]), then the host's module for
+//	                       it in the running root's script or module, linked and evaluated in the realm's module
+//	                       map, fulfils it with the module's namespace; any failure rejects it
+//	ImportMeta A           R[A] = import.meta of the running root module: a null-prototype object created, and
+//	                       filled by the host, on the first read in the realm
+//
 // Globals (X = name constant:16 | inline cache:16)
 //
 //	GetGlobal        A +X  R[A] = globalThis[name]; ReferenceError if absent
 //	GetGlobalOrUndef A +X  R[A] = globalThis[name] or undefined (typeof operand)
 //	SetGlobal        A +X  globalThis[name] = R[A]; ReferenceError if absent (strict)
+//
+// A global name resolves first in the realm's global declarative
+// environment (the let, const and class declarations of scripts), then on
+// the global object. Scripts reach their own top-level declarations by name
+// too: GlobalDeclarationInstantiation (Realm.RunScript) creates them from
+// Function.Extra.Globals before the body runs.
 //
 // Properties
 //
@@ -210,4 +233,39 @@
 //	AddBrand      A B      add class brand R[B] to object R[A]; TypeError if already present
 //	InPrivate     A B C    R[A] = #R[B] in R[C]; TypeError if R[C] is not an object
 //	ThrowError    A Bx     throw a new TypeError (A=ThrowTypeError) or ReferenceError (A=ThrowReferenceError) with message K[Bx]
+//
+// Sloppy mode, script globals and with (off the interpreter's jump table,
+// after the async ops: only sloppy code, script top levels and with
+// statements use them)
+//
+//	SetGlobalSloppy A +X   PutValue of an identifier resolved against the global environment in sloppy code:
+//	                       an unresolvable name becomes a global object property; a rejected write is
+//	                       ignored (X = name:16 | ic:16, the SetGlobal cache)
+//	InitGlobal    A +X     initialize the script's global lexical binding K[X.lo] to R[A] (X.hi = 1: const)
+//	SetGlobalVar  A +X     evaluation of a sloppy block function declaration at script level (Annex B.3.2.2):
+//	                       globalThis[K[X]] = R[A] as SetGlobalSloppy, skipped when a global lexical binding K[X] exists
+//	DelGlobal     A +X     R[A] = delete K[X] for a name resolved against the global environment:
+//	                       false for a global lexical binding, else globalThis.[[Delete]](K[X])
+//	SetPropSloppy A B +X   R[A].name = R[B], ignoring a rejected assignment (X = name:16 | ic:16)
+//	SetElemSloppy A B C    R[A][R[B]] = R[C], ignoring a rejected assignment
+//	DelPropSloppy A B +X   R[A] = delete R[B].name; false instead of a TypeError when not configurable
+//	DelElemSloppy A B C    R[A] = delete R[B][R[C]]; false instead of a TypeError when not configurable
+//	SetSuperSloppy A B C   set super property R[B] of base R[A] to R[C] with receiver R[A+1], ignoring a
+//	                       rejected assignment
+//	ToObject      A B      R[A] = ToObject(R[B]); TypeError on null or undefined
+//	JmpWith       A sBx +X pc += sBx if the object environment of with object R[A] has binding K[X]:
+//	                       HasProperty, then a truthy @@unscopables entry blocks it; falls through when R[A]
+//	                       is not an object (a function's %evalvars before a direct eval declares a var)
+//	WithGet       A B +X   R[A] = GetBindingValue(K[X.lo]) of the object environment of R[B]: undefined,
+//	                       or with X.hi = 1 (strict) a ReferenceError, when the property is gone
+//	WithSet       A B +X   SetMutableBinding(K[X.lo], R[B]) of the object environment of R[A]
+//	                       (X.hi = 1: strict, a ReferenceError when the property is gone and a TypeError when rejected)
+//	CoerceThis             this = the global object when undefined or null, else ToObject(this)
+//	                       (the entry of a sloppy function that uses this)
+//	MapArguments  A        make the fresh arguments object R[A] a mapped one: its indices below both the argument
+//	                       count and NumParams alias the parameters' slots of the function's own Env (CaptureLayout
+//	                       entries below NumParams) and callee is the running function
+//	CallEval      A B C +X R[A] = Call as with Call (C = 1: CallSpread) of callee R[A], this R[A+1]; when the
+//	                       callee is the realm's %eval% it is a direct eval (PerformEval) of the first argument
+//	                       in the running Env, compiled against the call site's scope Extra.Evals[X]
 package bytecode

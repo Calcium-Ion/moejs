@@ -22,7 +22,12 @@ func IsASCII(s string) bool {
 // DecodeWTF8 converts a WTF-8 string (as produced for StringLit.Value and
 // template cooked text) to UTF-16 code units. Lone surrogates round-trip.
 func DecodeWTF8(s string) []uint16 {
-	out := make([]uint16, 0, len(s))
+	return appendWTF8Units(make([]uint16, 0, len(s)), s)
+}
+
+// appendWTF8Units appends the UTF-16 code units of the WTF-8 string s to
+// out. Other invalid UTF-8 reads as U+FFFD, as Go's range does.
+func appendWTF8Units(out []uint16, s string) []uint16 {
 	for i := 0; i < len(s); {
 		c := s[i]
 		if c < utf8.RuneSelf {
@@ -30,7 +35,7 @@ func DecodeWTF8(s string) []uint16 {
 			i++
 			continue
 		}
-		if c == 0xED && i+2 < len(s) && s[i+1] >= 0xA0 && s[i+1] <= 0xBF {
+		if c == 0xED && i+2 < len(s) && s[i+1] >= 0xA0 && s[i+1] <= 0xBF && s[i+2] >= 0x80 && s[i+2] <= 0xBF {
 			// Generalized encoding of a surrogate code point.
 			r := rune(c&0x0F)<<12 | rune(s[i+1]&0x3F)<<6 | rune(s[i+2]&0x3F)
 			out = append(out, uint16(r))

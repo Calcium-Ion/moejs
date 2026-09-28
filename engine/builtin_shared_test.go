@@ -80,7 +80,11 @@ func TestBuiltinsSharedFrozenAndIdentical(t *testing.T) {
 		name string
 	}{{r1.ArrayPrototype, "push"}, {r1.ObjectCtor, "keys"}, {r1.Math, "PI"}, {r1.NumberCtor, "MAX_VALUE"}, {r1.ArrayIteratorPrototype, "next"}} {
 		assert.ErrorContains(t, c.o.SetProp(r1, key(r1, c.name), IntValue(1)), "shared intrinsic", c.name)
-		assert.ErrorContains(t, jsCallErr(t, r1, ObjectValue(r1.ObjectCtor), "defineProperty", ObjectValue(c.o), str(c.name), ObjectValue(r1.NewObject())), "shared intrinsic")
+		desc := r1.NewObject()
+		require.NoError(t, desc.SetProp(r1, key(r1, "value"), IntValue(1)))
+		assert.ErrorContains(t, jsCallErr(t, r1, ObjectValue(r1.ObjectCtor), "defineProperty", ObjectValue(c.o), str(c.name), ObjectValue(desc)), "shared intrinsic")
+		// An empty descriptor changes nothing, so it succeeds.
+		assert.Same(t, c.o, jsCall(t, r1, ObjectValue(r1.ObjectCtor), "defineProperty", ObjectValue(c.o), str(c.name), ObjectValue(r1.NewObject())).AsObject())
 		assert.False(t, c.o.Delete(r1, key(r1, c.name)))
 	}
 	assert.EqualError(t, jsCallErr(t, r1, ObjectValue(r1.ObjectCtor), "setPrototypeOf", ObjectValue(r1.ArrayPrototype), Null()), "TypeError: [object Array] is not extensible")

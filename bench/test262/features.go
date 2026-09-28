@@ -13,6 +13,7 @@ import (
 // adds its tag here and regenerates baseline.txt and RESULTS.md.
 var implemented = setOf(
 	// Syntax.
+	"arbitrary-module-namespace-names",
 	"arrow-function",
 	"async-functions",
 	"async-iteration",
@@ -31,12 +32,15 @@ var implemented = setOf(
 	"default-parameters",
 	"destructuring-assignment",
 	"destructuring-binding",
+	"dynamic-import",
 	"exponentiation",
+	"export-star-as-namespace-from-module",
 	"for-in-order",
 	"for-of",
 	"generators",
 	"globalThis",
 	"hashbang",
+	"import.meta",
 	"json-superset",
 	"let",
 	"logical-assignment-operators",

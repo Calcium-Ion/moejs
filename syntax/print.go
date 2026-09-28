@@ -172,6 +172,12 @@ func (d *dumper) stmt(s Stmt, level int) {
 		d.w("(label " + s.Label.Name + " ")
 		d.stmt(s.Body, level+1)
 		d.w(")")
+	case *WithStmt:
+		d.w("(with ")
+		d.expr(s.Object)
+		d.w(" ")
+		d.stmt(s.Body, level+1)
+		d.w(")")
 	case *SwitchStmt:
 		d.w("(switch ")
 		d.expr(s.Disc)
@@ -609,6 +615,8 @@ func (d *dumper) pattern(p Pattern) {
 	case *Ident:
 		d.w(p.Name)
 	case *MemberExpr:
+		d.expr(p)
+	case *CallExpr:
 		d.expr(p)
 	case *AssignPattern:
 		d.w("(= ")

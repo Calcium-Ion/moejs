@@ -171,7 +171,7 @@ func setIndex(r *Realm, o *Object, i int64, v Value) error {
 		return err
 	}
 	if !ok {
-		return r.TypeError("Cannot assign to read only property '%s' of object", k.GoString())
+		return r.readOnlyError(o, k)
 	}
 	return nil
 }

@@ -247,20 +247,11 @@ func typedArrayCopyWithin(r *Realm, this Value, args []Value) (Value, error) {
 	if cur < 0 {
 		return Undefined(), outOfBoundsTypedArray(r, method)
 	}
-	s := elemShift[ta.kind]
-	limit, toB, fromB, nb := cur<<s, to<<s, from<<s, count<<s
-	if fromB < toB && toB < fromB+nb {
-		// The spec copies last to first and stops at once when the
-		// last byte of either range is past the limit.
-		if toB+nb > limit {
-			return this, nil
-		}
-	} else {
-		nb = min(nb, limit-fromB, limit-toB)
-	}
-	if nb > 0 {
-		off := ta.view.offset
-		if err := r.moveBytes(ta.view.data.data, off+toB, off+fromB, nb); err != nil {
+	// Coercing the arguments may have shrunk the array: the longest prefix
+	// both ranges still hold is copied.
+	if count = min(count, cur-from, cur-to); count > 0 {
+		s, off := elemShift[ta.kind], ta.view.offset
+		if err := r.moveBytes(ta.view.data.data, off+to<<s, off+from<<s, count<<s); err != nil {
 			return Undefined(), err
 		}
 	}

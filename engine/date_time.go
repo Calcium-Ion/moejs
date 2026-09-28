@@ -194,51 +194,57 @@ func dayOf(t int64) int64 { return floorDiv(t, msPerDay) }
 // timeWithinDay returns TimeWithinDay(t) for a finite integral time value.
 func timeWithinDay(t int64) int64 { return floorMod(t, msPerDay) }
 
-// dateHost is the realm's Date configuration: the clock and the local time
-// zone. It is nil until the host overrides either, so realms that keep the
-// defaults (time.Now, time.Local) pay nothing for it.
-type dateHost struct {
-	now func() time.Time
-	loc *time.Location
+// realmHost is the realm's host configuration: the clock and the local time
+// zone of Date, the hooks of import() and import.meta (import.go) and the
+// limit of the code it compiles from strings (eval.go). It is nil until the
+// host sets one of them, so realms that keep the defaults (time.Now,
+// time.Local, no import hooks, DefaultMaxDynamicSource, dynamic code
+// allowed) pay nothing for it.
+type realmHost struct {
+	now       func() time.Time
+	loc       *time.Location
+	imports   *ImportHooks
+	maxSource int  // MaxDynamicSource; zero: DefaultMaxDynamicSource (eval.go)
+	noDynamic bool // DisableDynamicCode (eval.go)
 }
 
 // SetNow sets the clock used by Date.now() and new Date(); nil restores
 // time.Now. Hosts freeze or offset time with it.
 func (r *Realm) SetNow(now func() time.Time) {
-	if r.date == nil {
+	if r.host == nil {
 		if now == nil {
 			return
 		}
-		r.date = &dateHost{}
+		r.host = &realmHost{}
 	}
-	r.date.now = now
+	r.host.now = now
 }
 
 // SetTimeZone sets the realm's local time zone for Date (the local getters
 // and setters, toString, parsing of strings without an offset and the
 // time.Time exported for a Date); nil restores time.Local.
 func (r *Realm) SetTimeZone(loc *time.Location) {
-	if r.date == nil {
+	if r.host == nil {
 		if loc == nil {
 			return
 		}
-		r.date = &dateHost{}
+		r.host = &realmHost{}
 	}
-	r.date.loc = loc
+	r.host.loc = loc
 }
 
 // TimeZone returns the realm's local time zone.
 func (r *Realm) TimeZone() *time.Location {
-	if r.date != nil && r.date.loc != nil {
-		return r.date.loc
+	if r.host != nil && r.host.loc != nil {
+		return r.host.loc
 	}
 	return time.Local
 }
 
 // now returns the realm's current time.
 func (r *Realm) now() time.Time {
-	if r.date != nil && r.date.now != nil {
-		return r.date.now()
+	if r.host != nil && r.host.now != nil {
+		return r.host.now()
 	}
 	return time.Now()
 }

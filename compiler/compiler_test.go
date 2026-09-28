@@ -80,8 +80,10 @@ export function guard(f) { try { return f(); } catch (e) { n++; return e.message
 	assert.Contains(t, got, `K0 = "message" (key)`)
 	assert.Contains(t, got, "GetProp r")
 	assert.Contains(t, got, " catch r")
-	assert.Len(t, fn.Exports, 2)
-	assert.NotEqual(t, fn.Exports["n"], fn.Exports["guard"], "each export has its own module Env slot")
+	require.Len(t, fn.Module.Exports, 2)
+	assert.Equal(t, "guard", fn.Module.Exports[0].Name, "sorted by name")
+	assert.NotEqual(t, fn.Module.Exports[0].Slot, fn.Module.Exports[1].Slot, "each export has its own module Env slot")
+	assert.Nil(t, fn.Module.Links, "no module requests")
 	guard := child(t, fn, "guard")
 	require.Len(t, guard.Handlers, 1)
 	assert.Equal(t, bytecode.HandlerCatch, guard.Handlers[0].Kind)
@@ -294,8 +296,10 @@ export function f() {}
 `)
 	assert.Equal(t, bytecode.KindModule, fn.Kind)
 	assert.Equal(t, 3, len(fn.CaptureLayout), "a, *default*, f")
-	assert.Equal(t, fn.Exports["b"], fn.Exports["c"])
-	_, hasDefault := fn.Exports["default"]
+	b, _ := fn.Module.Export("b")
+	c, _ := fn.Module.Export("c")
+	assert.Equal(t, b, c)
+	_, hasDefault := fn.Module.Export("default")
 	assert.True(t, hasDefault)
 	assert.NotNil(t, fn.Source)
 	assert.Equal(t, "t.js", fn.Source.Name)
@@ -316,6 +320,67 @@ func TestModuleTopLevelAwait(t *testing.T) {
 	assert.Equal(t, bytecode.RetUndef, o[len(o)-1])
 }
 
+// TestScriptOrModuleFlag checks that the root of code that uses import()
+// or import.meta, or holds a direct eval, is flagged, from any depth, that
+// a module flagged for the first two has Links without requests, and that
+// other code compiles as before.
+func TestScriptOrModuleFlag(t *testing.T) {
+	tests := []struct {
+		name, src string
+		flagged   bool
+		eval      bool // flagged for a direct eval alone: no Links
+		requests  int
+		op        bytecode.Op // 0: none checked
+	}{
+		{"none", `export const x = 1;`, false, false, 0, 0},
+		{"import-call", `export const p = import("./a.js");`, true, false, 0, bytecode.ImportCall},
+		{"import-meta", `export const m = import.meta;`, true, false, 0, bytecode.ImportMeta},
+		{"nested", `export function f() { return () => import("./a.js"); }`, true, false, 0, 0},
+		{"with-requests", `import "./b.js"; export const m = import.meta;`, true, false, 1, bytecode.ImportMeta},
+		{"requests-only", `import "./b.js";`, false, false, 1, 0},
+		{"direct-eval", `export const e = eval("1");`, true, true, 0, bytecode.CallEval},
+		{"nested-direct-eval", `export function f() { return () => eval("1"); }`, true, true, 0, 0},
+		{"direct-eval-with-requests", `import "./b.js"; eval("1");`, true, true, 1, bytecode.CallEval},
+		{"indirect-eval", `export const e = (0, eval)("1");`, false, false, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fn := compileModule(t, tt.src)
+			assert.Equal(t, tt.flagged, fn.ScriptOrModule)
+			switch {
+			case tt.flagged && !tt.eval || tt.requests > 0:
+				require.NotNil(t, fn.Module.Links)
+				assert.Len(t, fn.Module.Links.Requests, tt.requests)
+			default:
+				assert.Nil(t, fn.Module.Links)
+			}
+			for _, c := range fn.Children {
+				assert.False(t, c.ScriptOrModule, "only the root is flagged")
+			}
+			if tt.op != 0 {
+				assert.Contains(t, ops(fn), tt.op)
+			}
+		})
+	}
+	s, err := syntax.ParseScript("s.js", `function f() { return import(x); }`, syntax.Options{})
+	require.NoError(t, err)
+	fn, err := CompileScript(s)
+	require.NoError(t, err)
+	assert.True(t, fn.ScriptOrModule)
+	assert.Contains(t, ops(child(t, fn, "f")), bytecode.ImportCall)
+	for src, flagged := range map[string]bool{
+		`var x = 1;`:                         false,
+		`function f() { return eval("1"); }`: true,
+		`(0, eval)("1");`:                    false,
+	} {
+		s, err = syntax.ParseScript("s.js", src, syntax.Options{})
+		require.NoError(t, err)
+		fn, err = CompileScript(s)
+		require.NoError(t, err)
+		assert.Equal(t, flagged, fn.ScriptOrModule, src)
+	}
+}
+
 func TestCompileScript(t *testing.T) {
 	s, err := syntax.ParseScript("s.js", `var x = 1; x + 1;`, syntax.Options{})
 	require.NoError(t, err)
@@ -324,27 +389,6 @@ func TestCompileScript(t *testing.T) {
 	assert.Equal(t, bytecode.KindScript, fn.Kind)
 	o := ops(fn)
 	assert.Equal(t, bytecode.Ret, o[len(o)-1], "scripts return their completion value")
-}
-
-func TestCompileUnsupported(t *testing.T) {
-	tests := []struct{ src, feature string }{
-		{`import x from "y";`, "import"},
-		{`export * from "y";`, "export ... from"},
-		{`const p = import("x");`, "dynamic import()"},
-		{`function f() { eval("1"); }`, "direct eval"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.src, func(t *testing.T) {
-			m, err := syntax.ParseModule("t.js", tt.src, syntax.Options{AllowUnsupported: true})
-			require.NoError(t, err)
-			_, err = CompileModule(m)
-			require.Error(t, err)
-			var ce *Error
-			require.ErrorAs(t, err, &ce)
-			assert.Equal(t, "SyntaxError: "+tt.feature+" is not supported yet (see TODO.md)", ce.Msg)
-			assert.Contains(t, err.Error(), "t.js:1:")
-		})
-	}
 }
 
 // TestExportNotModuleBinding covers an export entry whose binding the module
@@ -406,6 +450,22 @@ func TestLineTable(t *testing.T) {
 	}
 	assert.Equal(t, uint32(0), f.LineTable[0].PC)
 	assert.Equal(t, int32(1), f.LineTable[0].Line)
+}
+
+// TestLineTablePositions: the words emitted at one position share an entry,
+// and a position revisited after another one gets a new entry.
+func TestLineTablePositions(t *testing.T) {
+	s, err := syntax.ParseScript("t.js", "a;\nbc;", syntax.Options{})
+	require.NoError(t, err)
+	f := (&compiler{file: s.File}).newFuncState(nil, nil, bytecode.KindScript, nil)
+	for _, pos := range []int{0, 0, 3, 3, 4, 0, -1, 0, 4} {
+		f.setPos(pos)
+		f.emitWord(0)
+	}
+	assert.Equal(t, []bytecode.LineEntry{
+		{PC: 0, Line: 1, Col: 1}, {PC: 2, Line: 2, Col: 1}, {PC: 4, Line: 2, Col: 2},
+		{PC: 5, Line: 1, Col: 1}, {PC: 8, Line: 2, Col: 2},
+	}, f.lines)
 }
 
 func TestTypeofIsFusion(t *testing.T) {
@@ -598,4 +658,22 @@ func TestFoldChainLinear(t *testing.T) {
 			assert.Less(t, one, 6*many+2*time.Millisecond, "compile time grows quadratically with the chain length")
 		})
 	}
+}
+
+// TestAssignmentIntoRegister: an assignment builds its value in the
+// variable's register, except inside a try statement, where a handler must
+// not see a partial value (the root package's
+// TestAssignmentThrowKeepsVariable), unless the value cannot throw once it
+// is written.
+func TestAssignmentIntoRegister(t *testing.T) {
+	fn := compileModule(t, `
+export function out(g) { var a = 1; a = g(); return a; }
+export function inTry(g) { var a = 1; try { a = g(); } catch (e) {} return a; }
+export function simple(g) { var a = 1; try { a = 2; a = g; a = function () {}; } catch (e) {} return a; }`)
+	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.LoadUndef, bytecode.Call, bytecode.Ret, bytecode.RetUndef},
+		ops(child(t, fn, "out")), "the callee and the result share the variable's register")
+	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.LoadUndef, bytecode.Call, bytecode.Move, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
+		ops(child(t, fn, "inTry")), "the result is moved to the variable once the call returns")
+	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.LoadInt, bytecode.Move, bytecode.Closure, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
+		ops(child(t, fn, "simple")))
 }

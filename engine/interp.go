@@ -4,6 +4,7 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"unicode/utf8"
 	"weak"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
@@ -45,6 +46,7 @@ const (
 // bytecode.Function and shared by every realm (strings are immutable and
 // pre-hashed; keys are process-wide atoms). It holds no strong reference to
 // the template so that the cache below cannot keep dead templates alive.
+// Code compiled from a string has a realm-private tree instead (dynMeta).
 type funcMeta struct {
 	consts   []Value       // ConstNumber/ConstString/ConstBigInt materialized, ConstRegExp: the pattern; zero for other kinds
 	keys     []PropertyKey // ConstString with Key set: interned property key
@@ -55,6 +57,7 @@ type funcMeta struct {
 	index    uint32    // pre-order index in the tree: this function's IC base in Realm.icTrees
 	nfuncs   uint32    // root only: functions in the tree
 	totalICs uint32    // root only: inline-cache slots of the whole tree
+	dyn      uint32    // dynamic code: dynFlag and the base+1 of the function's inline caches (dynamic.go); zero otherwise
 }
 
 // funcMetas caches materialized function trees by root template. Keys are
@@ -86,12 +89,23 @@ func (r *Realm) materialize(code *bytecode.Function, root *funcMeta, next *uint3
 	if root == nil {
 		root = m
 	}
+	r.fillMeta(m, code, root, next)
+	return m
+}
+
+// fillMeta is materialize into m, a dynamic tree's when root is.
+func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, next *uint32) {
 	m.root, m.index = root, *next
+	m.dyn = root.dyn & dynFlag
 	*next++
 	root.totalICs += code.ICCount
 	m.name = AtomEmpty
 	if code.Name != "" {
-		m.name = r.InternGoString(code.Name)
+		if utf8.ValidString(code.Name) {
+			m.name = r.InternGoString(code.Name)
+		} else {
+			m.name = r.internUTF16(fromWTF8Text(code.Name)) // a name with a lone surrogate (String.wtf8)
+		}
 		prepareSharedString(m.name)
 	}
 	if n := len(code.Consts); n > 0 {
@@ -126,7 +140,7 @@ func (r *Realm) materialize(code *bytecode.Function, root *funcMeta, next *uint3
 		case bytecode.ConstRegExp:
 			// Pattern and flags are materialized once per template so a
 			// regular expression literal costs only its RegExp object.
-			pattern, flags := FromGoString(k.Str), FromGoString(k.Flags)
+			pattern, flags := fromWTF8Text(k.Str), FromGoString(k.Flags)
 			prepareSharedString(pattern)
 			prepareSharedString(flags)
 			m.consts[i] = StringValue(pattern)
@@ -142,7 +156,6 @@ func (r *Realm) materialize(code *bytecode.Function, root *funcMeta, next *uint3
 			m.children[i] = r.materialize(c, root, next)
 		}
 	}
-	return m
 }
 
 func init() {
@@ -210,6 +223,9 @@ func (r *Realm) EvaluateModuleAsync(code *bytecode.Function) (*ModuleEnv, *Objec
 	if code.Kind != bytecode.KindModule {
 		return nil, nil, errors.New("engine: EvaluateModule requires a module template")
 	}
+	if code.Module.Links != nil {
+		return nil, nil, errors.New("engine: a module that requests other modules or uses import() or import.meta must be linked (LinkModules) and evaluated as a graph (EvaluateGraph)")
+	}
 	fn, env := r.instantiateTopLevel(code)
 	res, err := r.CallObject(fn, Undefined(), nil)
 	if err != nil && fn.internal.(*FunctionData).icBase == icUnbound {
@@ -217,60 +233,28 @@ func (r *Realm) EvaluateModuleAsync(code *bytecode.Function) (*ModuleEnv, *Objec
 		// body.
 		return nil, nil, err
 	}
-	menv := &ModuleEnv{Env: env, exports: code.Exports}
+	menv := &ModuleEnv{Env: env, module: code.Module}
 	if code.Async && res.IsObject() {
 		return menv, res.AsObject(), err
 	}
 	return menv, nil, err
 }
 
-// RunScript runs a compiled strict-mode script and returns its completion
-// value. Top-level bindings live in the script's own environment (mirroring
-// them onto the global object is TODO).
+// RunScript runs a compiled script and returns its completion value.
+// GlobalDeclarationInstantiation runs first (sloppy.go): its var and
+// function declarations become properties of the global object and its let,
+// const and class declarations bindings of the realm's global declarative
+// environment, which later scripts and modules resolve names against too.
+// A failing check creates nothing and returns its SyntaxError or TypeError.
 func (r *Realm) RunScript(code *bytecode.Function) (Value, error) {
 	if code.Kind != bytecode.KindScript {
 		return Undefined(), errors.New("engine: RunScript requires a script template")
 	}
-	if err := r.CheckGlobalDeclarations(code); err != nil {
+	if err := r.globalDeclarationInstantiation(code); err != nil {
 		return Undefined(), err
 	}
 	fn, _ := r.instantiateTopLevel(code)
 	return r.CallObject(fn, ObjectValue(r.Global), nil)
-}
-
-// CheckGlobalDeclarations makes the checks of GlobalDeclarationInstantiation
-// that can fail before a script runs: a lexical declaration may not shadow a
-// non-configurable property of the global object, such as undefined; a
-// function declaration may replace a global property only when it is
-// configurable or a writable, enumerable data property
-// (CanDeclareGlobalFunction); and a function or var name the global object
-// does not have needs it extensible (CanDeclareGlobalVar).
-func (r *Realm) CheckGlobalDeclarations(code *bytecode.Function) error {
-	g := code.Globals
-	if g == nil {
-		return nil
-	}
-	o := r.Global
-	for _, name := range g.Lexical {
-		if d, ok := o.GetOwnProperty(r.KeyFromGoString(name)); ok && !d.Configurable() {
-			return r.SyntaxError("Identifier '%s' has already been declared", name)
-		}
-	}
-	for _, name := range g.Function {
-		d, ok := o.GetOwnProperty(r.KeyFromGoString(name))
-		switch {
-		case !ok && o.IsExtensible(), ok && d.Configurable():
-		case ok && !d.IsAccessorDescriptor() && d.Writable() && d.Enumerable():
-		default:
-			return r.TypeError("Cannot redefine global function '%s'", name)
-		}
-	}
-	for _, name := range g.Var {
-		if !o.IsExtensible() && !o.HasOwnProperty(r.KeyFromGoString(name)) {
-			return r.TypeError("Cannot define global variable '%s', global object is not extensible", name)
-		}
-	}
-	return nil
 }
 
 // instantiateTopLevel creates the function object and environment of a
@@ -337,7 +321,9 @@ func (o *Object) materializePrototype(slot *Value) {
 // icUnbound is the icBase of a closure whose inline caches are not bound
 // yet. enterFrame binds them on the first call, reserving them on the
 // template's first call in the realm, so the functions of a program that
-// never run cost no IC storage; closures of one template share them.
+// never run cost no IC storage; closures of one template share them. The
+// closures of dynamic code bind theirs through enterDynamic, and a reclaim
+// round unbinds those no frame runs (dynamic.go).
 const icUnbound = ^uint32(0)
 
 // interpRun implements [[Call]] for bytecode functions (runFunction).
@@ -374,6 +360,9 @@ func (r *Realm) enterFrame(fn *Object, fd *FunctionData, this Value, args []Valu
 	}
 	code := fd.code
 	if fd.icBase == icUnbound {
+		if fd.meta.dyn != 0 {
+			return r.enterDynamic(fn, fd, this, args)
+		}
 		fd.icBase = r.icBaseFor(fd.meta, code.ICCount)
 	}
 	st := &r.interp

@@ -97,6 +97,15 @@ func TestEarlyErrors(t *testing.T) {
 		{"const f = () => new.target;", 1, 17, "new.target expression is not allowed here"},
 		{"super;", 1, 1, "'super' keyword unexpected here"},
 		{"new import(\"x\");", 1, 5, "Cannot use new with import"},
+		{"import();", 1, 8, "Unexpected token ')'"},
+		{"import(...a);", 1, 8, "Unexpected token '...'"},
+		{"import(a, b, c);", 1, 14, "import() takes at most two arguments"},
+		{"import(a, b, c,);", 1, 14, "import() takes at most two arguments"},
+		{"typeof import;", 1, 14, "Unexpected token ';'"},
+		{"import(\"x\") = 1;", 1, 1, "Invalid left-hand side in assignment"},
+		{"import.meta = 1;", 1, 1, "Invalid left-hand side in assignment"},
+		{"import.meta++;", 1, 1, "Invalid left-hand side expression in postfix operation"},
+		{"import.metb;", 1, 8, "Unexpected identifier 'metb'"},
 		// Expressions.
 		{"a ?? b || c;", 1, 1, "Unexpected token '||'"},
 		{"a || b ?? c;", 1, 1, "Unexpected token '??'"},
@@ -164,6 +173,23 @@ func TestEarlyErrors(t *testing.T) {
 		{"({ a: (b = 1) } = c);", 1, 8, "Invalid destructuring assignment target"},
 		{"([a.b]) => 1;", 1, 3, "Invalid destructuring assignment target"},
 		{"(a, ...b,) => 1;", 1, 9, "Rest parameter must be last formal parameter"},
+		// A parenthesized arrow function is an AssignmentExpression, never
+		// an operand.
+		{"x in () => {};", 1, 9, "Unexpected token '=>'"},
+		{"!() => 1;", 1, 5, "Unexpected token '=>'"},
+		{"typeof (a) => a;", 1, 12, "Unexpected token '=>'"},
+		{"x + (a) => a;", 1, 9, "Unexpected token '=>'"},
+		{"class C { #f; m() { #f in () => {}; } }", 1, 30, "Unexpected token '=>'"},
+		{"new () => {};", 1, 8, "Unexpected token '=>'"},
+		{"x = () => {} + 1;", 1, 14, "Unexpected token '+'"},
+		{"() => {}(1);", 1, 9, "Unexpected token '('"},
+		{"() => {}.x;", 1, 9, "Unexpected token '.'"},
+		{"(a) => {}++;", 1, 10, "Unexpected token '++'"},
+		// Its concise body in a for head excludes `in` as the head does.
+		{"for (() => a in b;;);", 1, 6, "Invalid left-hand side in for-in loop"},
+		{"for (async () => a in b;;);", 1, 6, "Invalid left-hand side in for-in loop"},
+		{"for (x => a in b;;);", 1, 6, "Invalid left-hand side in for-in loop"},
+		{"for (var f = () => a in b;;);", 1, 6, "for-in loop variable declaration may not have an initializer."},
 		{"(a,);", 1, 4, "Unexpected token ')'"},
 		{"();", 1, 2, "Unexpected token ')'"},
 		{"(...a);", 1, 6, "Unexpected token ')'"},
@@ -246,9 +272,11 @@ func TestScriptErrors(t *testing.T) {
 		msg       string
 	}{
 		{"import x from \"y\";", 1, 1, "Cannot use import statement outside a module"},
+		{"x = import.meta;", 1, 5, "Cannot use 'import.meta' outside a module"},
+		{"function f() { return () => import.meta; }", 1, 29, "Cannot use 'import.meta' outside a module"},
 		{"export const x = 1;", 1, 1, "Unexpected token 'export'"},
 		{"return;", 1, 1, "Illegal return statement"},
-		{"var yield;", 1, 5, "Unexpected strict mode reserved word"},
+		{"'use strict'; var yield;", 1, 19, "Unexpected strict mode reserved word"},
 		{"async function f() { var await; }", 1, 26, "Unexpected reserved word"},
 		{`async function f() { var \u0061wait; }`, 1, 26, "Keyword must not contain escaped characters"},
 		{"x = async (a) => { let await; };", 1, 24, "Unexpected reserved word"},
@@ -284,6 +312,7 @@ func TestScriptErrors(t *testing.T) {
 		"class C { static { (() => { class await {} }); (function await(await) {}); } x = await; } await;",
 		"async function f() { (function await() {}); }",
 		"var await; x = await ** 2; y = 2 ** await ** 2;",
+		"import('x'); x = () => import(y,); function f() { return import(await); }",
 	} {
 		t.Run(src, func(t *testing.T) {
 			_, err := ParseScript("t.js", src, Options{AllowUnsupported: true})
@@ -297,6 +326,9 @@ func TestScriptErrors(t *testing.T) {
 func TestNoErrors(t *testing.T) {
 	srcs := []string{
 		"x = { a: 1, a: 2 };",
+		"for (var f = (() => a in b);;); for (var f = () => (a in b);;); for (var f = () => { a in b };;);",
+		"for (var f = x => x ? a in b : 1;;); for (var f = (a = b in c) => a;;); for (var f = function () { return a in b };;);",
+		"for (() => {}; ;); for (let f = () => a;;);",
 		"x = { __proto__: 1, ['__proto__']: 2, __proto__() {} };",
 		"try {} catch (e) { var e; }",
 		"function f() { var a; var a; function g() {} function g() {} }",
@@ -318,6 +350,8 @@ func TestNoErrors(t *testing.T) {
 		"x = { ...a, }; y = [...a,]; ({ ...a } = c);",
 		"[(a), (b.c), (d) = 1] = e; ({ a: (b), c: (d) = 1 } = e); for ([(a)] of e) ; x = ((a)) + (b = 1);",
 		"x = (a) ? (b) : (c) => d;",
+		"x = a ? () => 1 : (b) => 2; y = (() => 1); z = [...() => 1]; f(() => 1, (a) => 2); w = (() => {})(); v = `${() => 1}`; u = () => (a) => a;",
+		"x = (a)++ + (b) * (c) ? (d) : (e) in f; y = (a, b) ? c : d; z = ((a)) = 1;",
 		"x = a ? b : c => d;",
 		"x = a || b || (c ?? undefined) ? 1 : 2;",
 		"x = (a ?? b) || c; y = a ?? (b || c); z = a && b || c;",

@@ -8,10 +8,47 @@ import (
 // Options controls parsing.
 type Options struct {
 	// AllowUnsupported keeps the parser from rejecting syntax the engine
-	// does not implement yet (generators, async, ...). The AST is still
-	// produced, so supporting a feature lifts its restriction rather than
-	// touching the parser.
+	// does not implement yet, so supporting a feature lifts its restriction
+	// rather than touching the parser. No feature is deferred this way at
+	// present (the proposals TestUnsupportedModuleSyntax lists fail
+	// whatever the options); the option stays for the next one.
 	AllowUnsupported bool
+	// EarlyExports counts every exported function of a module as called
+	// before the module's body runs, so the lexical bindings they read are
+	// checked. A module that imports others always is; the linker asks for
+	// this variant of an import-free module only when an import cycle can
+	// call into it before its body ran (engine.LinkOptions.EarlyExports).
+	EarlyExports bool
+	// Stop, when set, is called before every stopEvery-th statement of each
+	// statement list the parser and the resolver go through, the first
+	// included: an error it returns ends the parse, which returns that error
+	// rather than a *Error. The engine passes one that reports an interrupt,
+	// so that one can stop a long compile of code from a string
+	// (engine.Compiler); a host compile has none and pays nothing for it.
+	Stop func() error
+}
+
+// stopEvery is the number of statements of a list between two calls of
+// Options.Stop: a power of two, as the index of the statement is tested.
+const stopEvery = 1024
+
+// stopped is the panic that ends a parse or a resolution Options.Stop
+// stopped, carrying its error.
+type stopped struct{ err error }
+
+// poll calls stop before the statement at index i of a list, every
+// stopEvery statements, unwinding with its error.
+func poll(stop func() error, i int) {
+	if stop != nil && i&(stopEvery-1) == 0 {
+		stopNow(stop)
+	}
+}
+
+//go:noinline
+func stopNow(stop func() error) {
+	if err := stop(); err != nil {
+		panic(stopped{err})
+	}
 }
 
 // Error is a syntax error with a position. Msg always starts with

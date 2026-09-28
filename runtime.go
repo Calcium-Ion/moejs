@@ -3,6 +3,8 @@ package moejs
 import (
 	"errors"
 	"runtime/debug"
+	"slices"
+	"strconv"
 	"time"
 
 	"github.com/Calcium-Ion/moejs/engine"
@@ -17,6 +19,20 @@ type Options struct {
 	MutableIntrinsics bool
 	// TimeZone is the local time zone of Date; nil means time.Local.
 	TimeZone *time.Location
+	// Importer resolves the modules of import() and fills import.meta; nil
+	// means import() rejects with a TypeError.
+	Importer *Importer
+	// MaxDynamicSource is the length in UTF-8 bytes of the longest source
+	// text eval, the Function constructors and Realm.EvalScript compile:
+	// longer text throws a RangeError. Zero
+	// means engine.DefaultMaxDynamicSource (1 MiB), a negative value no
+	// limit (engine.RealmOptions). Compile and CompileScript have no limit.
+	MaxDynamicSource int
+	// DisableDynamicCode makes eval of a string, the Function constructors
+	// and Realm.EvalScript throw an EvalError instead of compiling anything,
+	// for hosts whose code needs none (engine.RealmOptions). Compile and
+	// CompileScript are not affected.
+	DisableDynamicCode bool
 }
 
 // Runtime is one JavaScript global environment with at most one loaded
@@ -38,7 +54,11 @@ type Runtime struct {
 
 // NewRuntime creates a runtime.
 func NewRuntime(opts Options) *Runtime {
-	return &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone})}
+	rt := &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone, MaxDynamicSource: opts.MaxDynamicSource, DisableDynamicCode: opts.DisableDynamicCode})}
+	if opts.Importer != nil {
+		rt.realm.SetImportHooks(opts.Importer.engineHooks())
+	}
+	return rt
 }
 
 // Realm returns the runtime's engine state, for host functions and tests
@@ -47,7 +67,9 @@ func (rt *Runtime) Realm() *Realm { return rt.realm }
 
 // SetGlobal assigns the global variable name. v is converted by FromGo, so a
 // host installs a namespace of functions as a map[string]any with
-// NativeFunc values.
+// NativeFunc values. It writes the global object, whose property a script's
+// global let, const or class declaration of the same name shadows
+// (ECMA-262 9.1.1.4.1).
 func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
@@ -66,12 +88,19 @@ func (rt *Runtime) Function(name string, length int, fn NativeFunc) Value {
 }
 
 // Load evaluates m's top level in this runtime. A runtime loads one module
-// once, and a Load made while the top level runs is refused too. When the
-// top level throws or is interrupted before it ends or first awaits, the
-// error is returned and the module stays loaded: Export reads the bindings
-// initialized before the failure (none when an interrupt stopped the top
-// level before it started), and Call and Has return the error for the
-// module's hooks, whose functions could find the others uninitialized. The
+// once, and a Load made while the top level runs is refused too. A module
+// that imports others loads once Link linked it: Load then evaluates the
+// modules of its graph first, each once, in the order of their imports; a
+// failure of one of them is a failure of m's top level, which then does not
+// run. In a runtime with an Importer, import() of m, or of a module of its
+// graph, finds the instance Load evaluated. When the top level throws, is
+// interrupted or panics (an *InternalError) before it ends or first
+// awaits, the error is returned
+// and the module stays loaded: Export reads
+// the bindings initialized before the failure other than functions and
+// module namespaces (none when an interrupt stopped the top level before it
+// started), and Call and Has return the error for the module's hooks: a
+// function could find the other bindings uninitialized. The
 // jobs the top level queued run after it, when Export and the module's
 // hooks find its bindings; while the top level itself runs they find none.
 // A module with top-level await evaluates asynchronously: its top level
@@ -84,8 +113,30 @@ func (rt *Runtime) Load(m *Module) (err error) {
 	if rt.mod != nil {
 		return errors.New("moejs: runtime already loaded module " + rt.mod.name)
 	}
+	if m.graph != nil {
+		return rt.loadGraph(m, m.graph.g)
+	}
+	if l := m.code.Module.Links; l != nil {
+		if len(l.Requests) == 0 {
+			// It uses import() or import.meta: its record is the realm's.
+			g, err := m.selfGraph()
+			if err != nil {
+				return err
+			}
+			return rt.loadGraph(m, g)
+		}
+		return errors.New("moejs: module " + strconv.Quote(m.name) + " imports " + strconv.Quote(l.Requests[0].Specifier) + ": link it with moejs.Link and a resolver")
+	}
 	r := rt.realm
-	defer rt.guard(&err, r.CallState(), len(rt.argStack))
+	if r.ImportHooks() != nil {
+		// import() of m in r finds the instance Load evaluates.
+		g, err := m.selfGraph()
+		if err != nil {
+			return err
+		}
+		return rt.loadGraph(m, g)
+	}
+	defer rt.guardLoad(&err, r.CallState(), len(rt.argStack))
 	rt.mod = m
 	r.HoldJobs()
 	var p *engine.Object
@@ -102,20 +153,76 @@ func (rt *Runtime) Load(m *Module) (err error) {
 	return err
 }
 
+// loadGraph is Load of a module through its graph g: Link's, or the graph
+// of the module alone for one that uses import() or import.meta or loads
+// in a runtime with an Importer. The
+// runtime evaluates the modules of g it has not evaluated, each at most
+// once. The entry's hooks return what the evaluation failed with when it
+// failed before the entry's top level ended or first awaited, which covers
+// the failures of the modules it imports: its top level did not run then.
+func (rt *Runtime) loadGraph(m *Module, g *engine.ModuleGraph) (err error) {
+	r := rt.realm
+	defer rt.guardGraph(&err, g, r.CallState(), len(rt.argStack))
+	rt.mod = m
+	r.HoldJobs()
+	var p *engine.Object
+	rt.env, p, err = r.EvaluateGraph(g)
+	if le, ok := err.(*engine.LinkError); ok {
+		// A module of g the runtime instantiated resolves a request to
+		// another module in g.
+		err = linkError(le)
+	}
+	if p != nil && err == nil {
+		if state, _, _ := p.PromiseResult(); state == engine.PromiseRejected {
+			err, p = r.ModuleEvaluationError(p, nil), nil
+		}
+	}
+	rt.failed = err
+	if err = r.ReleaseJobs(err); p != nil {
+		err = r.ModuleEvaluationError(p, err)
+		_, interrupted := err.(*InterruptedError)
+		if state, _, _ := p.PromiseResult(); (state == engine.PromiseRejected || interrupted) && !r.GraphRan(g) {
+			rt.failed = err
+		}
+	}
+	return err
+}
+
 // Module returns the loaded module, or nil.
 func (rt *Runtime) Module() *Module { return rt.mod }
 
-// Export returns the current value of the loaded module's export name. ok is
-// false when there is no such export or the binding is not initialized yet.
+// Export returns the current value of the loaded module's export name, a
+// name it re-exports included. ok is false when there is no such export or
+// the binding is not initialized yet, and, once the module's top level
+// failed (Load), for a function or a module namespace object, whose code
+// could find the module's other bindings uninitialized without the
+// ReferenceError.
 func (rt *Runtime) Export(name string) (v Value, ok bool) {
 	if rt.env == nil {
 		return engine.Undefined(), false
 	}
 	v, ok = rt.env.GetBindingValue(name)
+	if !ok && rt.mod.graph != nil {
+		v, ok = rt.reexport(name)
+	}
 	if !ok || v.IsHole() {
 		return engine.Undefined(), false
 	}
+	if rt.failed != nil && v.IsObject() && (engine.IsCallable(v) || v.AsObject().IsModuleNamespace()) {
+		return engine.Undefined(), false
+	}
 	return v, true
+}
+
+// reexport reads the export name of the loaded graph's entry that is not
+// one of its own bindings.
+func (rt *Runtime) reexport(name string) (Value, bool) {
+	l := rt.mod.graph
+	i, found := slices.BinarySearch(l.exports, name)
+	if !found {
+		return engine.Undefined(), false
+	}
+	return rt.realm.GraphBinding(l.g, l.bindings[i])
 }
 
 // Has reports whether h names a function in this runtime now. A getter on
@@ -172,7 +279,7 @@ func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 // when the path leads nowhere.
 func (rt *Runtime) lookup(h Hook) (*Object, error) {
 	if h.mod != rt.mod {
-		return nil, ErrHookNotFound
+		return rt.lookupOwn(h)
 	}
 	if rt.failed != nil {
 		return nil, rt.failed
@@ -180,7 +287,13 @@ func (rt *Runtime) lookup(h Hook) (*Object, error) {
 	if rt.env == nil {
 		return nil, ErrHookNotFound
 	}
-	v := rt.env.Slot(h.slot)
+	var v Value
+	if h.slot >= 0 {
+		v = rt.env.Slot(h.slot)
+	} else {
+		l := rt.mod.graph
+		v, _ = rt.realm.GraphBinding(l.g, l.bindings[-1-h.slot])
+	}
 	for i, k := range h.keys {
 		if !v.IsObject() {
 			return nil, ErrHookNotFound
@@ -202,6 +315,17 @@ func (rt *Runtime) lookup(h Hook) (*Object, error) {
 		return nil, ErrNotCallable
 	}
 	return v.AsObject(), nil
+}
+
+// lookupOwn is lookup for a hook of another module than the loaded one,
+// which names nothing unless it is of an export the loaded module declares
+// in a Module of the same code: the one Link linked, or another Link of it.
+func (rt *Runtime) lookupOwn(h Hook) (*Object, error) {
+	if h.slot < 0 || h.mod == nil || rt.mod == nil || h.mod.code != rt.mod.code {
+		return nil, ErrHookNotFound
+	}
+	h.mod = rt.mod
+	return rt.lookup(h)
 }
 
 // members walks keys from o for lookup, which reads own data properties
@@ -340,4 +464,36 @@ func (rt *Runtime) guard(err *error, saved engine.CallState, argBase int) {
 	clear(rt.argStack[argBase:])
 	rt.argStack = rt.argStack[:argBase]
 	*err = &InternalError{Value: x, Stack: debug.Stack()}
+}
+
+// guardLoad is guard for Load: a panic that stopped the evaluation before
+// the entry's top level ran to its end or first await fails the entry's
+// hooks, as a throw does.
+func (rt *Runtime) guardLoad(err *error, saved engine.CallState, argBase int) {
+	if x := recover(); x != nil {
+		rt.loadPanicked(err, x, nil, saved, argBase)
+	}
+}
+
+// guardGraph is guardLoad for loadGraph of g.
+func (rt *Runtime) guardGraph(err *error, g *engine.ModuleGraph, saved engine.CallState, argBase int) {
+	if x := recover(); x != nil {
+		rt.loadPanicked(err, x, g, saved, argBase)
+	}
+}
+
+// loadPanicked handles the panic x of a Load, through the graph g if not
+// nil.
+func (rt *Runtime) loadPanicked(err *error, x any, g *engine.ModuleGraph, saved engine.CallState, argBase int) {
+	rt.realm.RestoreCallState(saved)
+	clear(rt.argStack[argBase:])
+	rt.argStack = rt.argStack[:argBase]
+	*err = &InternalError{Value: x, Stack: debug.Stack()}
+	ran := rt.env != nil && rt.failed == nil
+	if g != nil {
+		ran = rt.realm.GraphRan(g)
+	}
+	if !ran {
+		rt.failed = *err
+	}
 }

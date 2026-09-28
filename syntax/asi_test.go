@@ -33,6 +33,8 @@ func TestASI(t *testing.T) {
 		{"object-literal-then-index", "x = {}\n[1]", "(module\n  (= x ([] (object) [1])))"},
 		{"binary-continues", "x = y\n+z", "(module\n  (= x (+ y z)))"},
 		{"arrow-body-then-statement", "a = () => 1\nb = 2", "(module\n  (= a (=> () 1))\n  (= b 2))"},
+		{"arrow-then-paren", "() => {}\n(a)", "(module\n  (=> ())\n  a)"},
+		{"arrow-field-then-computed-field", "class C { a = () => {}\n['b'] = 1 }", "(module\n  (class C\n    (field a (=> ()))\n    (field [\"b\"] 1)))"},
 		{"break-newline-label", "l: while (1) { break\nl }", "(module\n  (label l (while 1 (block\n        (break)\n        l))))"},
 		{"continue-newline", "while (1) { continue\nx }", "(module\n  (while 1 (block\n      (continue)\n      x)))"},
 		{"template-continues", "f(a)\n`t`", "(module\n  (tagged (call f a) (template \"t\")))"},

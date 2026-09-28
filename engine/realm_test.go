@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/Calcium-Ion/moejs/bytecode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -178,7 +179,7 @@ func TestConstructorsBasics(t *testing.T) {
 	assert.Equal(t, True(), pv)
 	// Function constructor is deferred.
 	_, err = r.Construct(ObjectValue(r.FunctionCtor), nil, nil)
-	assert.EqualError(t, err, "TypeError: new Function is not supported yet (see TODO.md)")
+	assert.EqualError(t, err, "EvalError: code generation from strings is not available: no compiler is installed (engine.SetCompiler)")
 	rx, err := r.Construct(ObjectValue(r.RegExpCtor), nil, nil)
 	require.NoError(t, err, "RegExp is completed in place by the builtin installers")
 	assert.Equal(t, "RegExp", rx.AsObject().ClassName())
@@ -631,14 +632,14 @@ func TestEnvAndModuleEnv(t *testing.T) {
 	assert.True(t, env.Slot(0).IsUndefined())
 	env.SetSlot(1, IntValue(5))
 	assert.Equal(t, IntValue(5), env.Slots()[1])
-	m := NewModuleEnv(2, map[string]int{"decodeRequest": 0, "hooks": 1})
+	m := NewModuleEnv(2, &bytecode.Module{Exports: []bytecode.Export{{Name: "decodeRequest", Slot: 0}, {Name: "hooks", Slot: 1}}})
 	m.SetSlot(0, IntValue(1))
 	v, ok := m.GetBindingValue("decodeRequest")
 	assert.True(t, ok)
 	assert.Equal(t, IntValue(1), v)
 	_, ok = m.GetBindingValue("missing")
 	assert.False(t, ok)
-	assert.ElementsMatch(t, []string{"decodeRequest", "hooks"}, m.ExportNames())
+	assert.Equal(t, []string{"decodeRequest", "hooks"}, m.ExportNames())
 }
 
 func TestInstallersAndICAlloc(t *testing.T) {

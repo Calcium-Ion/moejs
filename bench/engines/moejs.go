@@ -285,6 +285,22 @@ func (rt *MoejsRuntime) Export(raw RawResult) any {
 
 func (rt *MoejsRuntime) Close() {}
 
+// RunScript runs source as a script, sloppy unless it starts with a "use
+// strict" directive, and exports its completion value (the corpus programs
+// that test sloppy mode are scripts).
+func (rt *MoejsRuntime) RunScript(name, source string) (any, error) {
+	s, err := moejs.CompileScript(name, source)
+	if err != nil {
+		return nil, err
+	}
+	v, err := rt.rt.RunScript(s)
+	if err != nil {
+		return nil, wrapMoejsError(err)
+	}
+	out, err := rt.rt.ToGo(v)
+	return out, wrapMoejsError(err)
+}
+
 // wrapMoejsError maps the native API's errors onto the adapter contract:
 // a missing or non-callable hook is ErrNotFound, a throw a HookError from
 // the exception's data properties (no user code runs, so a thrown object

@@ -90,14 +90,22 @@ type lexer struct {
 	pos  int // scan offset just past the current token
 
 	tok      Token
-	nlBefore bool   // a line terminator separates this token from the previous one
-	escaped  bool   // identifier spelled with \u escapes
-	tail     bool   // template chunk ended with ` rather than ${
-	start    int    // byte offset of the current token
-	end      int    // byte offset just past the current token
-	val      string // Identifier name, String/Template cooked value (WTF-8), Regex pattern, BigInt decimal digits
-	raw      string // Template raw text; Regex flags
-	num      float64
+	nlBefore bool // a line terminator separates this token from the previous one
+	escaped  bool // identifier spelled with \u escapes
+	tail     bool // template chunk ended with ` rather than ${
+	// legacy is the kind of the first legacy octal literal, octal escape or
+	// \8/\9 escape of the current token (legacyNone: none). Strict code
+	// rejects them as they are scanned (noteLegacy); the parser checks the
+	// tokens scanned before a "use strict" directive switched the mode.
+	legacy uint8
+	html   bool // HTML-like comments are recognised: script code
+	strict bool // strict mode code: modules, classes and code under a "use strict" directive
+
+	start int    // byte offset of the current token
+	end   int    // byte offset just past the current token
+	val   string // Identifier name, String/Template cooked value (WTF-8), Regex pattern, BigInt decimal digits
+	raw   string // Template raw text; Regex flags
+	num   float64
 
 	// badEscape is 1 + the offset of the first invalid escape in the current
 	// template chunk (0: none). Only tagged templates accept one; their
@@ -131,6 +139,9 @@ func (l *lexer) text() string { return l.src[l.start:l.end] }
 func (l *lexer) next() {
 	l.nlBefore = false
 	l.escaped = false
+	if l.legacy != legacyNone {
+		l.legacy = legacyNone
+	}
 	src := l.src
 	pos := l.pos
 skip:
@@ -196,6 +207,16 @@ skip:
 		return
 	}
 	l.scanPunctuator(pos)
+}
+
+// skipHTMLComment skips the rest of the line of an HTML-like comment
+// (Annex B.1.1) whose opener ends before pos and scans the token after it,
+// which keeps a line break seen before the comment.
+func (l *lexer) skipHTMLComment(pos int) {
+	l.pos = l.skipLineComment(pos)
+	nl := l.nlBefore
+	l.next()
+	l.nlBefore = l.nlBefore || nl
 }
 
 // skipLineComment returns the offset of the line terminator ending the
@@ -398,14 +419,8 @@ func (l *lexer) scanNumber(start int) {
 			return
 		}
 		if isDigit(src[pos+1]) {
-			q := pos + 1
-			for q < len(src) && isDigit(src[q]) {
-				if src[q] >= '8' {
-					l.fail(start, "Decimals with leading zeros are not allowed in strict mode.")
-				}
-				q++
-			}
-			l.fail(start, "Octal literals are not allowed in strict mode.")
+			l.scanLegacyNumber(start)
+			return
 		}
 		if src[pos+1] == '_' {
 			l.fail(pos+1, "Numeric separator can not be used after leading 0.")
@@ -465,6 +480,116 @@ func (l *lexer) scanNumber(start int) {
 		}
 		l.num = f
 	}
+	l.checkAfterNumber(pos)
+	l.end, l.pos = pos, pos
+}
+
+// Legacy literal kinds (lexer.legacy), each an early error in strict code.
+const (
+	legacyNone    = iota
+	legacyOctal   // 017
+	legacyDecimal // 08, 019.5
+	legacyEscape  // "\01"
+	legacyEscape89
+)
+
+var legacyMessages = [...]string{
+	legacyOctal:    "Octal literals are not allowed in strict mode.",
+	legacyDecimal:  "Decimals with leading zeros are not allowed in strict mode.",
+	legacyEscape:   "Octal escape sequences are not allowed in strict mode.",
+	legacyEscape89: "\\8 and \\9 are not allowed in strict mode.",
+}
+
+// noteLegacy records the first legacy construct of the current token,
+// which strict code rejects.
+func (l *lexer) noteLegacy(kind uint8, pos int) {
+	if l.legacy != legacyNone {
+		return
+	}
+	l.legacy = kind
+	if l.strict {
+		l.fail(pos, legacyMessages[kind])
+	}
+}
+
+// legacyError returns the position and message of the current token's
+// legacy construct: the literal itself, or the first legacy escape of a
+// string literal, found again rather than kept for this rare error.
+func (l *lexer) legacyError() (int, string) {
+	pos := l.start
+	if l.tok == String {
+		src := l.src[:l.end]
+		for pos++; pos+1 < len(src); pos++ {
+			if src[pos] != '\\' {
+				continue
+			}
+			// The escaped character cannot start another escape.
+			if c := src[pos+1]; c >= '1' && c <= '9' || c == '0' && pos+2 < len(src) && isDigit(src[pos+2]) {
+				break
+			}
+			pos++
+		}
+	}
+	return pos, legacyMessages[l.legacy]
+}
+
+// scanLegacyNumber scans a literal whose leading 0 is followed by a digit:
+// a LegacyOctalIntegerLiteral (017), or a NonOctalDecimalIntegerLiteral
+// (08, 019), which may go on as a decimal literal with a fraction or an
+// exponent. Neither takes a separator in its integer part or a BigInt
+// suffix.
+func (l *lexer) scanLegacyNumber(start int) {
+	src := l.src
+	pos := start + 1
+	octal := true
+	for pos < len(src) && isDigit(src[pos]) {
+		if src[pos] >= '8' {
+			octal = false
+		}
+		pos++
+	}
+	if pos < len(src) && src[pos] == '_' {
+		l.fail(pos, "Numeric separator can not be used after leading 0.")
+	}
+	if octal {
+		l.noteLegacy(legacyOctal, start)
+		digits := src[start+1 : pos]
+		if n, err := strconv.ParseUint(digits, 8, 64); err == nil && n < 1<<53 {
+			l.num = float64(n)
+		} else {
+			v, _ := new(big.Int).SetString(digits, 8)
+			l.num, _ = new(big.Float).SetInt(v).Float64()
+		}
+	} else {
+		l.noteLegacy(legacyDecimal, start)
+		hasSep := false
+		if pos < len(src) && src[pos] == '.' {
+			pos++
+			if pos < len(src) && src[pos] == '_' {
+				l.fail(pos, "Numeric separators are not allowed here.")
+			}
+			pos = l.scanDigits(pos, &hasSep)
+		}
+		if pos < len(src) && src[pos]|0x20 == 'e' {
+			q := pos + 1
+			if q < len(src) && (src[q] == '+' || src[q] == '-') {
+				q++
+			}
+			if q >= len(src) || !isDigit(src[q]) {
+				l.fail(start, "Invalid or unexpected token")
+			}
+			pos = l.scanDigits(q, &hasSep)
+		}
+		text := src[start:pos]
+		if hasSep {
+			text = strings.ReplaceAll(text, "_", "")
+		}
+		l.num, _ = strconv.ParseFloat(text, 64) // only ErrRange, with the right ±Inf
+	}
+	if pos < len(src) && src[pos] == 'n' {
+		l.fail(start, "Invalid BigInt literal")
+	}
+	l.tok = Number
 	l.checkAfterNumber(pos)
 	l.end, l.pos = pos, pos
 }
@@ -669,6 +794,10 @@ func (l *lexer) scanPunctuator(pos int) {
 			}
 		}
 	case '<':
+		if l.html && at(1) == '!' && at(2) == '-' && at(3) == '-' {
+			l.skipHTMLComment(pos + 4)
+			return
+		}
 		tok = Lt
 		switch at(1) {
 		case '=':
@@ -727,6 +856,12 @@ func (l *lexer) scanPunctuator(pos int) {
 		tok = Minus
 		switch at(1) {
 		case '-':
+			// `-->` first on a line (after white space and comments) or
+			// first in the source is an HTML close comment.
+			if l.html && at(2) == '>' && (l.nlBefore || l.end == 0) {
+				l.skipHTMLComment(pos + 3)
+				return
+			}
 			tok, n = Dec, 2
 		case '=':
 			tok, n = SubAssign, 2
@@ -847,7 +982,7 @@ func (l *lexer) scanString(start int, quote byte) {
 
 // scanEscape decodes the escape whose backslash precedes pos and appends the
 // cooked bytes to buf. Templates check templateEscapeError first, so the
-// legacy-escape errors here are the string-literal ones.
+// legacy escapes recorded here are the string-literal ones.
 func (l *lexer) scanEscape(pos int, buf []byte) (int, []byte) {
 	src := l.src
 	if pos >= len(src) {
@@ -871,9 +1006,23 @@ func (l *lexer) scanEscape(pos int, buf []byte) (int, []byte) {
 		if c == '0' && (pos+1 >= len(src) || !isDigit(src[pos+1])) {
 			return pos + 1, append(buf, 0)
 		}
-		l.fail(pos-1, "Octal escape sequences are not allowed in strict mode.")
+		// A LegacyOctalEscapeSequence: up to three digits from \0-\3,
+		// two from \4-\7 (\08 is \0 followed by 8).
+		l.noteLegacy(legacyEscape, pos-1)
+		v := rune(c - '0')
+		pos++
+		if pos < len(src) && src[pos] >= '0' && src[pos] <= '7' {
+			v = v*8 + rune(src[pos]-'0')
+			pos++
+			if c <= '3' && pos < len(src) && src[pos] >= '0' && src[pos] <= '7' {
+				v = v*8 + rune(src[pos]-'0')
+				pos++
+			}
+		}
+		return pos, appendWTF8(buf, v)
 	case '8', '9':
-		l.fail(pos-1, "\\8 and \\9 are not allowed in strict mode.")
+		l.noteLegacy(legacyEscape89, pos-1)
+		return pos + 1, append(buf, c)
 	case 'x':
 		if pos+2 >= len(src) || !isHexDigit(src[pos+1]) || !isHexDigit(src[pos+2]) {
 			l.fail(pos-1, "Invalid hexadecimal escape sequence")

@@ -37,7 +37,7 @@ func lexOne(t *testing.T, src string) *lexer {
 
 // lexError tokenises src and returns the first lexer error message, or "".
 func lexError(src string) (msg string) {
-	l := &lexer{}
+	l := &lexer{strict: true} // rejecting the legacy literals
 	l.init(newFile("t.js", src))
 	defer func() {
 		if r := recover(); r != nil {
@@ -307,6 +307,82 @@ func TestLexLoneSurrogates(t *testing.T) {
 	assert.Equal(t, []uint16{'h', 'i'}, DecodeWTF8("hi"))
 	assert.True(t, IsASCII("hi"))
 	assert.Equal(t, []uint16{0xE9, 0x4E2D}, DecodeWTF8("é中"))
+	// Other invalid UTF-8 reads as U+FFFD, a byte at a time.
+	assert.Equal(t, []uint16{0xFFFD, 0xFFFD, 'a', 0xFFFD, 0xFFFD}, DecodeWTF8("\xed\xa0a\xed\xa0"))
+	assert.Equal(t, []uint16{0xFFFD, 'x'}, DecodeWTF8("\xffx"))
+}
+
+// TestLexLegacyLiterals covers the legacy octal and leading-zero numbers
+// and the octal and \8/\9 escapes of sloppy code: their values, and the
+// kind and position strict code reports.
+func TestLexLegacyLiterals(t *testing.T) {
+	numbers := []struct {
+		src  string
+		want float64
+		kind uint8
+	}{
+		{"010", 8, legacyOctal},
+		{"0777", 511, legacyOctal},
+		{"00", 0, legacyOctal},
+		{"08", 8, legacyDecimal},
+		{"09.5", 9.5, legacyDecimal},
+		{"019e1", 190, legacyDecimal},
+		{"07777777777777777777777", 0o7777777777777777777777, legacyOctal},
+		{"0", 0, legacyNone},
+		{"0.5", 0.5, legacyNone},
+	}
+	for _, tt := range numbers {
+		l := lexOne(t, tt.src)
+		require.Equal(t, Number, l.tok, tt.src)
+		assert.Equal(t, tt.want, l.num, tt.src)
+		assert.Equal(t, tt.kind, l.legacy, tt.src)
+	}
+	strs := []struct {
+		src  string
+		want string
+		kind uint8
+		pos  int
+	}{
+		{`"\101"`, "A", legacyEscape, 1},
+		{`"\0"`, "\x00", legacyNone, 0},
+		{`"\08"`, "\x008", legacyEscape, 1},
+		{`"\00"`, "\x00", legacyEscape, 1},
+		{`"\377"`, "\u00ff", legacyEscape, 1},
+		{`"\400"`, " 0", legacyEscape, 1},
+		{`"ab\7"`, "ab\a", legacyEscape, 3},
+		{`"\8"`, "8", legacyEscape89, 1},
+		{`"x\9\1"`, "x9\x01", legacyEscape89, 2},
+	}
+	for _, tt := range strs {
+		l := lexOne(t, tt.src)
+		require.Equal(t, String, l.tok, tt.src)
+		assert.Equal(t, tt.want, l.val, tt.src)
+		assert.Equal(t, tt.kind, l.legacy, tt.src)
+		if tt.kind != legacyNone {
+			pos, _ := l.legacyError()
+			assert.Equal(t, tt.pos, pos, tt.src)
+		}
+	}
+	for src, want := range map[string]string{
+		"08n":  "Invalid BigInt literal",
+		"010n": "Invalid BigInt literal",
+		"08_1": "Numeric separator can not be used after leading 0.",
+		"01_1": "Numeric separator can not be used after leading 0.",
+		"08in": "Identifier directly after number",
+	} {
+		l := &lexer{}
+		l.init(newFile("t.js", src))
+		msg := func() (msg string) {
+			defer func() {
+				if recover() != nil {
+					msg = l.err.Message()
+				}
+			}()
+			l.next()
+			return ""
+		}()
+		assert.Equal(t, want, msg, src)
+	}
 }
 
 func TestLexStringErrors(t *testing.T) {

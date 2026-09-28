@@ -29,14 +29,20 @@ moejs 是用 Go 编写的 ECMAScript 引擎，不依赖 cgo，也不含汇编。
 
 ## 状态
 
-moejs 支持 ES 模块。它通过了 [test262](https://github.com/tc39/test262) 一致性测试集中的 22,867 个测试
-（修订版 `045bf6f`；在 `language` 与 `built-ins` 中涉及已实现特性的测试里通过率为 93.0%）。
+moejs 支持经典脚本（严格或非严格模式）与 ES 模块，模块既可单独运行，也可组成相互导入的模块图。它在 [test262](https://github.com/tc39/test262) 一致性测试集上的结果（总体与按目录）见
+[`bench/test262/RESULTS.md`](bench/test262/RESULTS.md)，该文件由 test262 运行器重新生成。
 
 已支持的部分特性：
 
 - **语言**：`let`/`const`、箭头函数、类（字段、私有名称与私有方法、`#x in o`、静态块、`super`、`new.target`、
   内建对象子类化）、解构、展开与剩余参数、默认参数、模板字符串与带标签模板、可选链、`??`、getter 与 setter、
-  `Symbol` 与迭代器协议（`for-of`、展开、解构）、生成器、async 函数与 `await`、async 生成器与 `for await`、模块顶层 `await`、带标签语句、异常。
+  `Symbol` 与迭代器协议（`for-of`、展开、解构）、生成器、async 函数与 `await`、async 生成器与 `for await`、模块间的 `import` 与 `export`（活绑定、循环依赖、模块命名空间对象、`export * as`、字符串导出名）、
+  跨模块图的顶层 `await`、模块与脚本中的动态 `import()`、`import.meta`、带标签语句、异常、直接与间接 `eval`，以及
+  `Function`、`GeneratorFunction`、`AsyncFunction` 与 `AsyncGeneratorFunction` 构造函数。
+- **非严格模式**（不以 `"use strict"` 开头的脚本）：`this` 转换、隐式全局变量、静默失败的赋值与删除、`with`（含
+  `Symbol.unscopables`）、映射的 `arguments` 对象与 `arguments.callee`，以及脚本的 Annex B 语法与语义：块级函数、
+  带标签的函数声明、catch 参数重复声明、`for (var x = init in o)`、以函数调用为赋值目标、旧式八进制字面量与转义、
+  HTML 风格注释。
 - **内建对象**：`Object`、`Function`、`Array`（含 ES2023 方法与 `Array.fromAsync`）、`String`（含基于 Unicode 17 的 `normalize`）、
   `Number`、`Boolean`、`Symbol`、`BigInt`、`Math`（含 `sumPrecise`）、`JSON`、`Proxy`、`Reflect`、`Map` 与 `Set`（含 ES2025 集合方法）、
   `WeakMap`、`WeakSet`、`WeakRef`、`ArrayBuffer`（可调整大小，含 `transfer`）、`SharedArrayBuffer`、`DataView`（含 `getFloat16`/`setFloat16`）、类型化数组（含 `Float16Array`）、`Atomics`、`Error` 系列（含 `AggregateError`、`Error.isError` 与 V8 格式的 `stack`）、
@@ -46,8 +52,8 @@ moejs 支持 ES 模块。它通过了 [test262](https://github.com/tc39/test262)
 - **RegExp**：全部标志（`dgimsuvy`）、先行与后行断言、反向引用、命名组与重复命名组、模式修饰符，以及 Unicode 17 的全部
   `\p{…}` 属性。
 
-尚未支持：脚本、模块间 `import`、非严格模式、`eval`、`Intl`。
-完整列表见 [`TODO.md`](TODO.md)。
+尚未支持：`Intl`、迭代器辅助方法、`FinalizationRegistry`、定时器、导入属性与 JSON 模块。
+完整列表与已知的错误结果见 [`TODO.md`](TODO.md)。
 
 ## 安装
 
@@ -172,23 +178,70 @@ func main() {
 - **钩子。** `Module.Hook(export, members...)` 一次性解析一个导出函数，或导出对象下的函数
   （`mod.Hook("protocols", "openai", "decodeRequest")`）。绑定保持活性：每次 `Call` 都在当前运行时中读取导出，
   并按自有属性逐级查找成员。路径不通为 `ErrHookNotFound`，指向的值不是函数为 `ErrNotCallable`；`Has` 对两者都返回 false。
+- **模块图。** 导入其他模块的模块须先链接，再交给运行时加载。`moejs.Link(entry, resolve)` 向宿主的 `Resolver`
+  查询每个说明符所指的模块，每个模块的每个说明符只查询一次（moejs 从不读取文件或网络），一次性链接整个模块图，
+  返回供加载的 `Module`：它与其他模块一样不可变、可共享，其 `Hook`、`Export` 与 `Exports` 针对入口模块的导出，
+  包括再导出的名称。解析器收到的 `referrer` 是发起导入的 `*Module`，类型为 `Referrer`：即请求模块的代码的密封接口，
+  取值为 `*Module` 或 `*Script`。每个运行时只需实例化并求值该模块图，其中每个模块只求值一次；多个模块图共享的模块，
+  只要解析器返回同一个 `*Module`，就只编译一次。解析失败为 `*ResolveError`，未能解析为唯一绑定的导入为
+  `*SyntaxError`，两者都带有导入方模块中的位置；`Load` 拒绝未经链接且含导入的模块。不导入任何模块的模块无需
+  `Link`，也不为模块图付出任何开销。
+
+  ```go
+  entry, err := moejs.Compile("plugin.js", source)
+  mod, err := moejs.Link(entry, func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+  	return host.module(specifier) // 每个进程只编译一次
+  })
+  err = rt.Load(mod) // 每个运行时
+  ```
+- **动态导入。** `Options.Importer` 是宿主一侧的 `import()` 与 `import.meta`：其 `Resolve` 是一个 `Resolver`，
+  `referrer` 为发起导入的 `*Module`，或 `RunScript` 运行的 `*Script`；可选的 `Meta` 填充模块的 `import.meta`，
+  它是首次使用时创建的原型为 null 的对象。`import(specifier)` 立即调用 `Resolve`，返回一个 promise：它以模块的命名空间
+  兑现，或以解析、链接或求值失败的原因拒绝；未设置 `Importer` 时以 `TypeError` 拒绝。模块即身份：无论静态导入还是
+  动态导入，一个运行时对同一模块只求值一次；`import()` 加载的模块图每个 `Importer` 只链接一次，一个 `Importer`
+  可由任意多个运行时共享，每个运行时只需实例化并求值。任务队列与中断的行为与 `Load`、`Call` 相同。不使用
+  `import()` 或 `import.meta` 的代码，编译结果与运行方式都与之前完全相同。
+
+  ```go
+  imp := &moejs.Importer{Resolve: func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+  	return host.module(specifier)
+  }}
+  rt := moejs.NewRuntime(moejs.Options{Importer: imp}) // 所有运行时共用一个 imp
+  ```
 - **传入值。** `FromGo` 转换 `nil`、布尔、数字、字符串、`json.Number`、`Value`、`NativeFunc` 以及 JSON 形态的容器
   （`map[string]any`、`[]any`、`map[string]string`、`[]string` 等）。容器惰性转换，JavaScript 首次读取时逐层展开，
   钩子只为实际读取的参数部分付费。JavaScript 的写入不会回写到 Go 值；在 JavaScript 仍可能读取期间，宿主不得修改该值。
   来自 Go map 的对象键按字典序枚举。`[]byte` 转为共享同一段字节的 `ArrayBuffer`，JavaScript 的写入会回写到它。
-  结构体等其他类型会报错：先序列化，再用 `ParseJSON`。
+  结构体等其他类型会报错：先序列化，再用 `ParseJSON`。`Function(name, length, fn)` 把 `NativeFunc`
+  包装为带有 JavaScript 可见的 `name` 与 `length` 的函数。
 - **读出值。** `ToGo` 把整数导出为 `int64`、其他数字为 `float64`，数组为 `[]any`，对象为由其自有可枚举属性组成的
   `map[string]any`，BigInt 为 `*big.Int`（`FromGo` 也接受它），`ArrayBuffer`、类型化数组与 `DataView`
   为其持有或所视字节的副本 `[]byte`。`AppendJSON` 即写入字节切片的 `JSON.stringify`；与对 `ToGo` 结果做 `json.Marshal` 不同，
   它省略值为 `undefined` 的成员，把 NaN 与 ±Infinity 写成 `null`，保留插入顺序，并调用 `toJSON`。
+  `Get(v, key)` 读取单个属性（会执行 getter），`Export(name)` 读取已加载模块某个导出的当前值。
+- **脚本。** `CompileScript(name, source)` 把经典脚本编译为不可变的 `*Script`，除非以 `"use strict"` 指令开头，
+  否则为非严格模式；`Runtime.RunScript` 在运行时的全局环境中运行它并返回其完成值。脚本的 `var` 与函数声明成为全局对象的属性，
+  `let`、`const` 与 `class` 声明成为全局绑定，之后的脚本和已加载的模块都能看到。与已有全局绑定冲突的声明会在任何代码运行前抛出。
+  `SetGlobal` 写入的是全局对象，因此脚本声明 `let x` 之后，`SetGlobal("x", …)` 会被该全局词法绑定遮蔽（ECMA-262 9.1.1.4.1）。
+- **Eval。** 导入 `moejs` 即安装 `eval`、`Function` 系列构造函数与 `Realm.EvalScript(name, source)` 背后的编译器；
+  原生函数可对其收到的 `*Realm` 调用 `EvalScript`，从字符串运行经典脚本（即 test262 的 `$262.evalScript`）。直接 `eval`
+  能看到调用者的绑定，包括模块的导入；被求值的代码及其创建的函数在栈追踪中以发起求值的脚本或模块为来源，其中的
+  `import()` 也以它作为 `Resolver` 的 `referrer`（若发起间接 `eval` 或调用构造函数的脚本或模块本身既不使用 `import()`、
+  `import.meta` 也不含直接 `eval`，则为 nil，见 TODO.md）。
+  既不使用 `eval` 也不使用 `with` 的代码编译结果与以前完全相同，没有任何额外开销。
+- **动态代码的限制。** `Options.MaxDynamicSource` 限制 `eval`、`Function` 系列构造函数与 `Realm.EvalScript`
+  编译的源码长度：默认 1 MiB（UTF-8），为负数时不限制。超长的源码在解析前就抛出 `RangeError`。编译的时间与内存
+  都与源码长度成线性关系，因此这一上限同时限制了两者，编译过程中也能被中断。`Options.DisableDynamicCode`
+  为运行时关闭动态代码：上述入口都抛出 `EvalError`，不做任何编译。两者都不影响 `Compile` 与 `CompileScript`。
 - **Promise。** `NewPromise` 为宿主函数创建一个可返回的 promise，以及稍后将其敲定的 Go 函数。`PromiseResult`
   读取 promise 的状态与结果；`SetPromiseRejectionTracker` 与 Sobek 的同名接口一样，报告没有处理函数的 rejection。
 - **错误。** 抛出的值为 `*Exception`。`Name()` 与 `Message()` 读取抛出值的 `name` 与 `message` 数据属性
   （抛出原始值时即该值本身），从不执行 JavaScript。宿主函数返回 Go error 时，向 JavaScript 抛出以该错误文本为
-  message 的 `Error`，对应的 `*Exception` 可解包出原 Go error。中断为 `*InterruptedError`，错误的模块为带位置的
+  message 的 `Error`，对应的 `*Exception` 可解包出原 Go error。中断为 `*InterruptedError`，错误的模块或脚本为带位置的
   `*SyntaxError`，调用中的 Go panic（例如宿主函数 panic）为 `*InternalError`；运行时仍可继续使用。
+  `Runtime.StackTrace(exc)` 返回被抛出的 `Error` 的 V8 格式 `stack`，同样不执行 JavaScript。
 - **默认共享冻结的内建对象。** 所有运行时共享同一套深度冻结的内建对象，即 Hardened JavaScript（SES `lockdown()`）
-  模型：写入 `Array.prototype` 会抛出 `TypeError`，插件之间也无法互相污染原型。需要修改内建对象的宿主可用
+  模型：写入 `Array.prototype` 在严格代码中抛出 `TypeError`，在非严格代码中与写入任何冻结对象一样静默失败，插件之间因此无法互相污染原型。需要修改内建对象的宿主可用
   `Options{MutableIntrinsics: true}` 为每个运行时构建可变副本，创建成本约为前者的 25 倍。
 - **按运行时设置时区。** `Options.TimeZone` 设置 `Date` 的本地时区（nil 表示 `time.Local`）。
 

@@ -23,19 +23,50 @@ import (
 	"github.com/Calcium-Ion/moejs/syntax"
 )
 
-// Dirs are the directories under test/ that the suite runs. intl402,
-// annexB and staging are out of scope.
-var Dirs = []string{"language", "built-ins", "harness"}
+// Dirs are the directories under test/ that the suite runs. intl402 and
+// staging are out of scope.
+var Dirs = []string{"language", "built-ins", "annexB", "harness"}
 
 // Timeout is the interrupt deadline of one test (a variable for the
 // runner's own tests).
 var Timeout = 10 * time.Second
 
-// The skip reasons that do not name a feature.
+// SloppySuffix ends the name of the sloppy-mode run of a default test.
+const SloppySuffix = " [sloppy]"
+
+// mode is one way of running a test file.
+type mode uint8
+
 const (
-	SkipSloppy  = "sloppy mode"
-	SkipModules = "modules"
+	strictMode mode = iota // a script with "use strict"; prepended
+	sloppyMode             // a script as it is
+	rawMode                // a script as it is, without the harness
+	moduleMode             // a module
 )
+
+var (
+	defaultModes = []mode{strictMode, sloppyMode}
+	strictModes  = []mode{strictMode}
+	sloppyModes  = []mode{sloppyMode}
+	rawModes     = []mode{rawMode}
+	moduleModes  = []mode{moduleMode}
+)
+
+// modes returns the modes a test runs in: the one its flags name, or strict
+// and then sloppy for a default test.
+func modes(m *Meta) []mode {
+	switch {
+	case m.HasFlag("module"):
+		return moduleModes
+	case m.HasFlag("raw"):
+		return rawModes
+	case m.HasFlag("onlyStrict"):
+		return strictModes
+	case m.HasFlag("noStrict"):
+		return sloppyModes
+	}
+	return defaultModes
+}
 
 // The lines doneprintHandle.js prints for an async test.
 const (
@@ -52,9 +83,9 @@ const (
 	Skip
 )
 
-// Result is the outcome of one test file.
+// Result is the outcome of one run of a test file.
 type Result struct {
-	Path     string   // relative to test/, with forward slashes
+	Path     string   // relative to test/, with forward slashes; SloppySuffix for the sloppy run of a default test
 	Status   Status   //
 	Message  string   // the skip reason, or the failure (first line)
 	Features []string // listed and include-implied, sorted
@@ -68,6 +99,8 @@ type Suite struct {
 	Root    string // the checkout: test/ and harness/
 	implied map[string][]string
 	bundles sync.Map // include list -> *bundle
+	// fixtures are the modules that tests import, by path relative to test/.
+	fixtures sync.Map // path -> *fixture
 }
 
 // NewSuite opens the checkout at root.
@@ -112,9 +145,10 @@ func Workers() int {
 	return n
 }
 
-// Run runs paths on a pool of workers and returns the results in order.
+// Run runs the test files paths on a pool of workers and returns their
+// results in order, one per mode a file runs in.
 func (s *Suite) Run(paths []string, workers int) []Result {
-	results := make([]Result, len(paths))
+	results := make([][]Result, len(paths))
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for range workers {
@@ -126,19 +160,51 @@ func (s *Suite) Run(paths []string, workers int) []Result {
 				if i >= len(paths) {
 					return
 				}
-				results[i] = s.RunTest(paths[i])
+				results[i] = s.RunFile(paths[i])
 			}
 		}()
 	}
 	wg.Wait()
+	return slices.Concat(results...)
+}
+
+// RunFile runs one test file (path relative to test/) in each of its modes,
+// strict first, and returns one result per mode; a skipped file is skipped
+// in each of them. A file whose frontmatter does not parse has one failed
+// result.
+func (s *Suite) RunFile(path string) []Result {
+	b, err := os.ReadFile(filepath.Join(s.Root, "test", filepath.FromSlash(path)))
+	if err != nil {
+		return []Result{{Path: path, Status: Fail, Message: err.Error()}}
+	}
+	src := string(b)
+	meta, err := ParseMeta(src)
+	if err != nil {
+		return []Result{{Path: path, Status: Fail, Message: "frontmatter: " + err.Error()}}
+	}
+	features := s.features(path, meta)
+	skip, blockers := s.skip(meta, src, features)
+	ms := modes(meta)
+	results := make([]Result, len(ms))
+	for i, md := range ms {
+		res := &results[i]
+		res.Path, res.Features = path, features
+		if md == sloppyMode && len(ms) > 1 {
+			res.Path += SloppySuffix
+		}
+		if skip != "" {
+			res.Status, res.Message, res.Blockers = Skip, skip, blockers
+			continue
+		}
+		s.runMode(res, path, md, meta, src)
+	}
 	return results
 }
 
-// RunTest runs one test (path relative to test/) and never panics: a Go
+// runMode runs a test that is not skipped in mode md and never panics: a Go
 // panic in the engine is recorded as a failure with the panic text.
-func (s *Suite) RunTest(path string) (res Result) {
+func (s *Suite) runMode(res *Result, path string, md mode, meta *Meta, src string) {
 	start := time.Now()
-	res.Path = path
 	defer func() {
 		if p := recover(); p != nil {
 			res.Status, res.Panic = Fail, true
@@ -146,24 +212,7 @@ func (s *Suite) RunTest(path string) (res Result) {
 		}
 		res.Duration = time.Since(start)
 	}()
-	b, err := os.ReadFile(filepath.Join(s.Root, "test", filepath.FromSlash(path)))
-	if err != nil {
-		res.Status, res.Message = Fail, err.Error()
-		return res
-	}
-	src := string(b)
-	meta, err := ParseMeta(src)
-	if err != nil {
-		res.Status, res.Message = Fail, "frontmatter: "+err.Error()
-		return res
-	}
-	res.Features = s.features(path, meta)
-	if res.Message, res.Blockers = s.skip(meta, src, res.Features); res.Message != "" {
-		res.Status = Skip
-		return res
-	}
-	res.Status, res.Message = s.execute(path, meta, src)
-	return res
+	res.Status, res.Message = s.execute(path, md, meta, src)
 }
 
 // features returns the test's features plus those its includes imply. A
@@ -182,8 +231,7 @@ func (s *Suite) features(path string, m *Meta) []string {
 }
 
 // skip returns the reason a test does not run, if any, and the unimplemented
-// features it needs. Non-goals come first, then unimplemented features, then
-// the modes moejs does not support yet.
+// features it needs. Non-goals come first, then unimplemented features.
 func (s *Suite) skip(m *Meta, src string, features []string) (string, []string) {
 	for _, f := range features {
 		if nonGoal(f) {
@@ -205,32 +253,23 @@ func (s *Suite) skip(m *Meta, src string, features []string) (string, []string) 
 	if len(blockers) > 0 {
 		return "feature: " + blockers[0], blockers
 	}
-	if m.HasFlag("noStrict") || m.HasFlag("raw") {
-		return SkipSloppy, nil
-	}
 	return "", nil
 }
 
-// execute compiles and runs a test that is not skipped.
-func (s *Suite) execute(path string, m *Meta, src string) (Status, string) {
+// execute compiles and runs a test that is not skipped in mode md.
+func (s *Suite) execute(path string, md mode, m *Meta, src string) (Status, string) {
 	// The test is parsed and compiled before anything is evaluated, so a
 	// parse-phase negative test never runs.
-	module := m.HasFlag("module")
+	module := md == moduleMode
 	var code *bytecode.Function
 	var err error
-	if module {
-		// The resolver rejects module requests as unsupported, so look for
-		// them in a parse that allows unsupported constructs; a syntax error
-		// shows again in the real parse.
-		if mod, err := syntax.ParseModule(path, src, syntax.Options{AllowUnsupported: true}); err == nil && importsModules(mod) {
-			return Skip, SkipModules
-		}
-		var mod *syntax.Module
-		if mod, err = syntax.ParseModule(path, src, syntax.Options{}); err == nil {
-			code, err = compiler.CompileModule(mod)
-		}
-	} else {
+	switch md {
+	case moduleMode:
+		code, err = compileModule(path, src, syntax.Options{})
+	case strictMode:
 		code, err = compileScript(path, "\"use strict\";\n"+src)
+	default:
+		code, err = compileScript(path, src)
 	}
 	neg := m.Negative
 	if err != nil {
@@ -246,26 +285,62 @@ func (s *Suite) execute(path string, m *Meta, src string) (Status, string) {
 	if neg != nil && neg.Phase == "parse" {
 		return Fail, "expected a parse-phase " + neg.Type + ", but the test compiled"
 	}
-	async := m.HasFlag("async")
-	names := m.Includes
-	if async {
-		names = append([]string{"doneprintHandle.js"}, names...)
+	// A module that imports others is linked with them before anything is
+	// evaluated: a module that does not parse or an import that does not
+	// resolve is a resolution-phase error.
+	var graph *engine.ModuleGraph
+	if module && code.Module.Links != nil {
+		if graph, err = s.link(path, code, src); err != nil {
+			msg := compileMessage(err)
+			if neg != nil && neg.Phase == "resolution" && !unsupported(msg) {
+				if errorName(msg) == neg.Type {
+					return Pass, ""
+				}
+				return Fail, "expected a resolution-phase " + neg.Type + ", got " + msg
+			}
+			return Fail, msg
+		}
 	}
-	includes, err := s.includes(names)
-	if err != nil {
-		return Fail, "includes: " + err.Error()
+	if neg != nil && neg.Phase == "resolution" {
+		return Fail, "expected a resolution-phase " + neg.Type + ", but the test linked"
+	}
+	async := m.HasFlag("async")
+	var includes *bytecode.Function
+	if md != rawMode {
+		names := m.Includes
+		if async {
+			names = append([]string{"doneprintHandle.js"}, names...)
+		}
+		// The harness is as strict as the test, as if concatenated with it.
+		if includes, err = s.includes(names, md != sloppyMode); err != nil {
+			return Fail, "includes: " + err.Error()
+		}
 	}
 
 	h := &host{}
+	if module {
+		h.imports = s.importHooks(path, code, src, graph)
+	} else {
+		h.imports = s.importHooks(path, nil, src, nil)
+	}
 	r := h.newRealm()
 	timer := time.AfterFunc(Timeout, h.interrupt)
 	defer timer.Stop()
-	if _, err := r.RunScript(includes); err != nil {
-		return Fail, "includes: " + runMessage(r, err)
+	if includes != nil {
+		if _, err := r.RunScript(includes); err != nil {
+			return Fail, "includes: " + runMessage(r, err)
+		}
 	}
-	if module {
+	switch {
+	case graph != nil:
+		var p *engine.Object
+		if _, p, err = r.EvaluateGraph(graph); p != nil {
+			err = r.ModuleEvaluationError(p, err)
+		}
+	case module:
 		_, err = r.EvaluateModule(code)
-	} else {
+	default:
+		r.SetHostDefined(code, path)
 		_, err = r.RunScript(code)
 	}
 	switch {
@@ -308,24 +383,6 @@ func asyncOutcome(printed []string) (Status, string) {
 	return Fail, "the async test did not call $DONE"
 }
 
-// importsModules reports whether a module requests other modules, which
-// needs a module loader.
-func importsModules(m *syntax.Module) bool {
-	for _, st := range m.Body {
-		switch x := st.(type) {
-		case *syntax.ImportDecl:
-			return true
-		case *syntax.ExportAll:
-			return true
-		case *syntax.ExportNamed:
-			if x.Source != nil {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // bundle is a compiled include list, built once per process.
 type bundle struct {
 	once sync.Once
@@ -335,27 +392,32 @@ type bundle struct {
 
 // includes returns the compiled harness for a test: assert.js and sta.js,
 // then names (doneprintHandle.js first for an async test, then the test's
-// includes).
-func (s *Suite) includes(names []string) (*bytecode.Function, error) {
+// includes), in strict mode code when strict is set.
+func (s *Suite) includes(names []string, strict bool) (*bytecode.Function, error) {
 	all := []string{"assert.js", "sta.js"}
 	for _, n := range names {
 		if !slices.Contains(all, n) {
 			all = append(all, n)
 		}
 	}
-	v, _ := s.bundles.LoadOrStore(strings.Join(all, ","), &bundle{})
+	key := strings.Join(all, ",")
+	if strict {
+		key = "strict:" + key
+	}
+	v, _ := s.bundles.LoadOrStore(key, &bundle{})
 	b := v.(*bundle)
-	b.once.Do(func() { b.code, b.err = s.compileIncludes(all) })
+	b.once.Do(func() { b.code, b.err = s.compileIncludes(all, strict) })
 	return b.code, b.err
 }
 
-// compileIncludes compiles harness files as one script that ends by
-// publishing its top-level bindings on the global object. Every moejs
-// script has its own top-level scope, so the test, a separate script run
-// next in the same realm, reaches the harness through the global object,
-// as it would reach the global declarations of a concatenated script.
-func (s *Suite) compileIncludes(names []string) (*bytecode.Function, error) {
+// compileIncludes compiles harness files as one script. The test runs next,
+// as a second script in the same realm, and sees the harness's global
+// declarations as it would those of a concatenated script.
+func (s *Suite) compileIncludes(names []string, strict bool) (*bytecode.Function, error) {
 	var src strings.Builder
+	if strict {
+		src.WriteString("\"use strict\";\n")
+	}
 	for _, n := range names {
 		b, err := os.ReadFile(filepath.Join(s.Root, "harness", n))
 		if err != nil {
@@ -366,13 +428,6 @@ func (s *Suite) compileIncludes(names []string) (*bytecode.Function, error) {
 		}
 		src.Write(b)
 		src.WriteString("\n;\n")
-	}
-	sc, err := syntax.ParseScript("harness", src.String(), syntax.Options{})
-	if err != nil {
-		return nil, fmt.Errorf("%s: %s", strings.Join(names, " + "), compileMessage(err))
-	}
-	for _, b := range sc.Scope.Bindings {
-		fmt.Fprintf(&src, "globalThis.%s = %s;\n", b.Name, b.Name)
 	}
 	code, err := compileScript("harness", src.String())
 	if err != nil {
@@ -390,6 +445,10 @@ func compileMessage(err error) string {
 		return se.Msg
 	case errors.As(err, &ce):
 		return ce.Msg
+	}
+	var le *engine.LinkError
+	if errors.As(err, &le) && le.Err == nil {
+		return "SyntaxError: " + le.Msg
 	}
 	return err.Error()
 }

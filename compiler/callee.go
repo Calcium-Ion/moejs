@@ -71,7 +71,11 @@ func calleeTable(fn *bytecode.Function) map[uint32]string {
 	}
 	code := []syntax.Node{prog}
 	if fn.Kind != bytecode.KindModule && fn.Kind != bytecode.KindScript {
-		if code = functionCode(prog, fn); code == nil {
+		code = functionCode(prog, fn)
+		if code == nil && fn.Kind == bytecode.KindArrow && src.Start == 0 && src.End == len(src.Src) {
+			code = []syntax.Node{prog} // eval code (CompileEval): the whole source, like a script
+		}
+		if code == nil {
 			return nil
 		}
 	}
@@ -80,7 +84,7 @@ func calleeTable(fn *bytecode.Function) map[uint32]string {
 	for pc := 0; pc < len(fn.Code); {
 		op := bytecode.DecodeOp(fn.Code[pc])
 		switch op {
-		case bytecode.Call, bytecode.CallSpread, bytecode.New, bytecode.NewSpread:
+		case bytecode.Call, bytecode.CallSpread, bytecode.CallEval, bytecode.New, bytecode.NewSpread:
 			line, col := fn.Position(uint32(pc))
 			k := siteKey{op == bytecode.New || op == bytecode.NewSpread, line, col}
 			pcs[k] = append(pcs[k], uint32(pc))

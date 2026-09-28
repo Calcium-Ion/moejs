@@ -24,6 +24,23 @@
 // of NewPromise): the first exception a callback throws is the method's
 // error when it succeeded otherwise, and an interrupt drops the jobs left.
 //
+// A module that imports others is linked once with the modules it imports,
+// which the host resolves (moejs never reads files or the network):
+//
+//	mod, err := moejs.Link(entry, func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+//		return host.modules[specifier], nil // compiled once, by the host
+//	})
+//
+// A runtime that loads the linked module evaluates each module of its graph
+// once; its hooks and exports are the entry's, re-exported names included.
+// import() and import.meta are the host's too, through the Importer of
+// Options, which resolves with the same kind of resolver:
+//
+//	rt := moejs.NewRuntime(moejs.Options{Importer: &moejs.Importer{Resolve: resolve}})
+//
+// A module import() loads joins the runtime's modules: one the runtime
+// evaluated before is not evaluated again.
+//
 // A Module is immutable and may be loaded by many runtimes concurrently. A
 // Runtime is one global environment with one loaded module; it must be used
 // from one goroutine at a time, except Interrupt and ClearInterrupt.

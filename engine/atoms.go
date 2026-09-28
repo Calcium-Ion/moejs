@@ -60,6 +60,7 @@ var (
 	AtomSyntaxError               = staticAtom("SyntaxError")
 	AtomReferenceError            = staticAtom("ReferenceError")
 	AtomEvalError                 = staticAtom("EvalError")
+	AtomEval                      = staticAtom("eval")
 	AtomURIError                  = staticAtom("URIError")
 	AtomInternalError             = staticAtom("InternalError")
 	AtomJSON                      = staticAtom("JSON")
@@ -257,4 +258,5 @@ var (
 	AtomSize                      = staticAtom("size")
 	AtomDuration                  = staticAtom("duration")
 	AtomSeed                      = staticAtom("seed")
+	AtomCompile                   = staticAtom("compile")
 )

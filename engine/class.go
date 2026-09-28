@@ -269,6 +269,9 @@ func (r *Realm) setSuper(base, receiver, k, v Value) error {
 		return err
 	}
 	if !ok {
+		if receiver.IsObject() {
+			return r.readOnlyError(receiver.AsObject(), key)
+		}
 		return r.TypeError("Cannot assign to read only property '%s' of object", key.GoString())
 	}
 	return nil

@@ -396,7 +396,7 @@ func TestRegExpCache(t *testing.T) {
 	d := newRegExp(t, r2, `\s+`, "g").AsObject().RegExpData()
 	assert.Same(t, a.c, d.c)
 	assert.NotContains(t, r2.regexps.cache, regexpCacheKey{pattern: "xa0"})
-	assert.Nil(t, r.date)
+	assert.Nil(t, r.host)
 	// Concurrent realms compiling and matching the same pattern (with the
 	// lazily built anchored/context variants) agree on results (run with -race).
 	var wg sync.WaitGroup

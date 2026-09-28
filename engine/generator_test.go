@@ -80,7 +80,7 @@ var generatorCases = []struct{ name, body, want string }{
 	{"not a constructor", `function* g() {} try { new g(); } catch (e) { return e.name; }`, `"TypeError"`},
 	{"method not a constructor", `const o = { *m() {} }; try { new o.m(); } catch (e) { return e.name; }`, `"TypeError"`},
 	{"incompatible receiver", `function* g() {} const next = g().next; try { next.call({}); } catch (e) { return e.message; }`, `"Generator.prototype.next called on incompatible receiver [object Object]"`},
-	{"GeneratorFunction constructor", `const GF = Object.getPrototypeOf(function* () {}).constructor; try { GF("yield 1"); } catch (e) { return e.message; }`, `"new Function is not supported yet (see TODO.md)"`},
+	{"GeneratorFunction constructor", `const GF = Object.getPrototypeOf(function* () {}).constructor; try { GF("yield 1"); } catch (e) { return e.message; }`, `"code generation from strings is not available: no compiler is installed (engine.SetCompiler)"`},
 	{"generator methods length", `function* g() {} const P = Object.getPrototypeOf(g()).__proto__; return [P.next.length, P.return.length, P.throw.length, Object.keys(P)];`, `[1,1,1,[]]`},
 	{"infinite with take", `function* nat() { let n = 0; while (true) yield n++; } function* take(it, k) { for (const x of it) { if (k-- <= 0) return; yield x; } } return [...take(nat(), 4)];`, `[0,1,2,3]`},
 	{"recursive delegation", `function* walk(t) { if (!t) return; yield* walk(t.l); yield t.v; yield* walk(t.r); } const t = { v: 2, l: { v: 1 }, r: { v: 3, r: { v: 4 } } }; return [...walk(t)];`, `[1,2,3,4]`},

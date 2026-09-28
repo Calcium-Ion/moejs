@@ -126,7 +126,7 @@ var classCases = []struct{ name, body, want string }{
 		const b = new B(false), n = new N(21), s = new S("hi");
 		return [b instanceof B, b.valueOf(), n.twice(), n + 1, s.length, s.first(), s instanceof S, String(s)];`,
 		`[true,false,42,22,2,"h",true,"hi"]`},
-	{"extends Function", `class F extends Function {} new F();`, `throws TypeError: new Function is not supported yet (see TODO.md)`},
+	{"extends Function", `class F extends Function {} new F();`, `throws EvalError: code generation from strings is not available: no compiler is installed (engine.SetCompiler)`},
 	{"extends Array default ctor", `class A extends Array { constructor(...a) { super(...a); this.tag = "t"; } } const a = new A(5, 6); return [a.length, a.tag, a[1]];`, `[2,"t",6]`},
 }
 

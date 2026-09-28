@@ -103,9 +103,11 @@ func (f *funcState) expr(e syntax.Expr, dst int) {
 	case *syntax.NewTarget:
 		f.loadLoc(e.Binding, dst)
 	case *syntax.ImportMeta:
-		f.c.unsupported(e.Pos, "import.meta")
+		f.markScriptOrModule()
+		f.setPos(e.Pos)
+		f.emitA(bytecode.ImportMeta, dst)
 	case *syntax.ImportCall:
-		f.c.unsupported(e.Pos, "dynamic import()")
+		f.importCall(e, dst)
 	case *syntax.TaggedTemplate:
 		f.taggedTemplate(e, dst)
 	case *syntax.YieldExpr:
@@ -137,6 +139,25 @@ func (f *funcState) exprNamed(e syntax.Expr, dst int, name string) {
 		}
 	}
 	f.expr(e, dst)
+}
+
+// importCall compiles `import(x)` into dst.
+func (f *funcState) importCall(e *syntax.ImportCall, dst int) {
+	mark := f.nregs
+	src := f.exprReg(e.Source)
+	f.markScriptOrModule()
+	f.setPos(e.Pos)
+	f.emitAB(bytecode.ImportCall, dst, src)
+	f.free(mark)
+}
+
+// markScriptOrModule records that the code uses import() or import.meta,
+// which read the record of its script or module at run time.
+func (f *funcState) markScriptOrModule() {
+	for f.parent != nil {
+		f = f.parent
+	}
+	f.out.ScriptOrModule = true
 }
 
 // exprReg compiles e and returns a register holding its value. Un-captured
@@ -302,24 +323,63 @@ func (f *funcState) emitConst(c constant, dst int) {
 
 // --- identifiers -----------------------------------------------------------------
 
+// loadIdent loads the value of the identifier into dst.
 func (f *funcState) loadIdent(id *syntax.Ident, dst int) {
+	if f.withsFor(id.Binding) != nil {
+		mark := f.nregs
+		f.get(f.resolveIdent(id), dst)
+		f.free(mark)
+		return
+	}
+	f.loadName(id, dst)
+}
+
+// loadName loads the identifier's binding, past any with statement.
+func (f *funcState) loadName(id *syntax.Ident, dst int) {
 	if id.Binding == nil {
-		f.emitA(bytecode.GetGlobal, dst)
-		f.emitExtra(bytecode.ExtraArg(f.nameConst(id.Name), f.newIC()))
+		f.getGlobal(id.Name, dst)
 		return
 	}
 	f.loadLoc(id.Binding, dst)
 }
 
+// immutable reports whether assigning to b throws a TypeError: const,
+// the name of a named function expression, and import bindings (initialized
+// indirect bindings, so the assignment never reads the exporter's binding).
+func immutable(b *syntax.Binding) bool {
+	switch b.Kind {
+	case syntax.BindConst, syntax.BindFuncName, syntax.BindImport, syntax.BindImportNS:
+		return true
+	}
+	return false
+}
+
 // storeIdent assigns register src to the identifier.
 func (f *funcState) storeIdent(id *syntax.Ident, src int, mode bindMode) {
-	b := id.Binding
-	if b == nil {
-		f.emitA(bytecode.SetGlobal, src)
-		f.emitExtra(bytecode.ExtraArg(f.nameConst(id.Name), f.newIC()))
+	if f.withsFor(id.Binding) != nil {
+		mark := f.nregs
+		f.put(f.resolveIdent(id), src, mode)
+		f.free(mark)
 		return
 	}
+	f.storeName(id, src, mode)
+}
+
+// storeName assigns register src to the identifier's binding, past any with
+// statement.
+func (f *funcState) storeName(id *syntax.Ident, src int, mode bindMode) {
+	b := id.Binding
+	if b == nil {
+		f.setGlobal(id.Name, src)
+		return
+	}
+	loc := f.c.locs[b]
 	if mode == bindAssign {
+		if loc.isGlobal() {
+			// The engine checks a global lexical binding.
+			f.setGlobal(b.Name, src)
+			return
+		}
 		// An uninitialized binding throws a ReferenceError before a const
 		// one throws its TypeError (SetMutableBinding).
 		if b.NeedsTDZ {
@@ -327,13 +387,16 @@ func (f *funcState) storeIdent(id *syntax.Ident, src int, mode bindMode) {
 			f.loadLoc(b, f.alloc()) // performs the TDZ check
 			f.free(mark)
 		}
-		if b.Kind == syntax.BindConst || b.Kind == syntax.BindFuncName {
+		if immutable(b) {
+			if b.Kind == syntax.BindFuncName && !f.out.Strict {
+				return // a non-strict immutable binding ignores the write
+			}
 			f.emitNone(bytecode.ThrowConstAssign)
 			f.emitExtra(uint32(f.stringConst(b.Name)))
 			return
 		}
 	}
-	f.storeLoc(f.c.locs[b], src)
+	f.storeLoc(loc, src)
 }
 
 // mentions reports whether e references binding b (outside nested functions,
@@ -507,13 +570,43 @@ func typeofIsParts(e *syntax.BinaryExpr) (*syntax.UnaryExpr, uint8, bool) {
 // typeofOperand evaluates the operand of typeof: unresolvable globals yield
 // undefined instead of throwing.
 func (f *funcState) typeofOperand(x syntax.Expr) int {
-	if id, ok := x.(*syntax.Ident); ok && id.Binding == nil {
+	id, ok := x.(*syntax.Ident)
+	if !ok {
+		return f.exprReg(x)
+	}
+	if ws := f.withsFor(id.Binding); ws != nil {
+		t, ref := f.alloc(), f.alloc()
+		f.withRef(ws, id.Name, ref)
+		wl, end := f.newLabel(), f.newLabel()
+		f.emitJump(bytecode.JmpNotUndef, ref, wl)
+		f.typeofName(id, t)
+		f.emitJump(bytecode.Jmp, 0, end)
+		f.bind(wl)
+		f.withOp(bytecode.WithGet, t, ref, id.Name)
+		f.bind(end)
+		f.free(t + 1)
+		return t
+	}
+	if id.Binding == nil || f.c.locs[id.Binding].isGlobal() {
 		t := f.alloc()
-		f.emitA(bytecode.GetGlobalOrUndef, t)
-		f.emitExtra(bytecode.ExtraArg(f.nameConst(id.Name), f.newIC()))
+		f.typeofName(id, t)
 		return t
 	}
 	return f.exprReg(x)
+}
+
+// typeofName loads the identifier's binding for typeof, past any with
+// statement: an unresolvable name yields undefined, and so does a script's
+// global var or function whose property is gone (an object environment
+// record's HasBinding decides at run time), while a global lexical
+// binding in its TDZ still throws.
+func (f *funcState) typeofName(id *syntax.Ident, dst int) {
+	if b := id.Binding; b != nil && !f.c.locs[b].isGlobal() {
+		f.loadName(id, dst)
+		return
+	}
+	f.emitA(bytecode.GetGlobalOrUndef, dst)
+	f.emitExtra(bytecode.ExtraArg(f.nameConst(id.Name), f.newIC()))
 }
 
 func (f *funcState) unary(e *syntax.UnaryExpr, dst int) {
@@ -561,6 +654,10 @@ func (f *funcState) deleteExpr(x syntax.Expr, dst int) {
 		f.emitA(bytecode.LoadTrue, dst)
 		f.bind(done)
 		f.optLabel = saved
+	case *syntax.Ident:
+		// Sloppy code only: `delete identifier` is an early error in strict
+		// code.
+		f.deleteIdent(t, dst)
 	default:
 		f.exprEffect(x)
 		f.emitA(bytecode.LoadTrue, dst)
@@ -576,13 +673,17 @@ func (f *funcState) deleteMember(m *syntax.MemberExpr, dst int) {
 	if m.Optional {
 		f.optShort(obj)
 	}
+	delProp, delElem := bytecode.DelProp, bytecode.DelElem
+	if !f.out.Strict {
+		delProp, delElem = bytecode.DelPropSloppy, bytecode.DelElemSloppy
+	}
 	if name, ok := f.propName(m); ok {
-		f.emitAB(bytecode.DelProp, dst, obj)
+		f.emitAB(delProp, dst, obj)
 		f.emitExtra(uint32(f.nameConst(name)))
 		return
 	}
 	key := f.exprReg(m.Prop)
-	f.emitABC(bytecode.DelElem, dst, obj, key)
+	f.emitABC(delElem, dst, obj, key)
 }
 
 // optShort emits the short-circuit test of an optional link.
@@ -683,8 +784,12 @@ func (f *funcState) emitGetNamed(dst, obj int, name string) {
 // emitSet emits the property write R[obj][key] = R[val] for member e whose
 // computed key (if any) is already in register key.
 func (f *funcState) emitSet(obj, key, val int, e *syntax.MemberExpr) {
+	setProp, setElem := bytecode.SetProp, bytecode.SetElem
+	if !f.out.Strict {
+		setProp, setElem = bytecode.SetPropSloppy, bytecode.SetElemSloppy
+	}
 	if name, ok := f.propName(e); ok {
-		f.emitAB(bytecode.SetProp, obj, val)
+		f.emitAB(setProp, obj, val)
 		f.emitExtra(bytecode.ExtraArg(f.nameConst(name), f.newIC()))
 		return
 	}
@@ -692,7 +797,7 @@ func (f *funcState) emitSet(obj, key, val int, e *syntax.MemberExpr) {
 		f.emitABC(bytecode.SetPrivate, obj, key, val)
 		return
 	}
-	f.emitABC(bytecode.SetElem, obj, key, val)
+	f.emitABC(setElem, obj, key, val)
 }
 
 // --- assignment -------------------------------------------------------------------
@@ -749,10 +854,36 @@ func (f *funcState) assign(e *syntax.AssignExpr, dst int, want bool) {
 		}
 		f.expr(e.Value, v)
 		f.bindPattern(target, v, bindAssign)
+	case *syntax.CallExpr:
+		f.callTarget(target, "Invalid left-hand side in assignment")
 	default:
 		pos, _ := e.Target.Range()
 		f.c.fail(pos, "SyntaxError: Invalid left-hand side in assignment")
 	}
+}
+
+// intoReg reports whether the value e may be compiled straight into the
+// register of the variable it is assigned to. A handler of the function
+// that catches a throw from the middle of e must not find a partial value
+// there (the callee of a call, an array being built), so inside a try
+// statement only a value that cannot throw once it has written its
+// register may: an identifier (whose loads check before they write), a
+// literal or a function. The guards of for-of loops, which only close the
+// iterator, are the ones iterCloses counts; those of array patterns outside
+// generators make the answer false where it could be true.
+func (f *funcState) intoReg(e syntax.Expr) bool {
+	if f.guards <= len(f.iterCloses) {
+		return true
+	}
+	switch e := e.(type) {
+	case *syntax.Ident, *syntax.NumberLit, *syntax.BigIntLit, *syntax.StringLit, *syntax.BoolLit, *syntax.NullLit:
+		return true
+	case *syntax.Function:
+		return true
+	case *syntax.TemplateLit:
+		return len(e.Exprs) == 0
+	}
+	return false
 }
 
 // logicalSkip emits the short-circuit jump of a logical assignment operator
@@ -776,7 +907,7 @@ func (f *funcState) logicalSkip(op syntax.Token, cur int) *label {
 
 func (f *funcState) assignIdent(e *syntax.AssignExpr, target *syntax.Ident, dst int, want bool) {
 	b := target.Binding
-	writable := b == nil || (b.Kind != syntax.BindConst && b.Kind != syntax.BindFuncName)
+	writable := b == nil || !immutable(b)
 	reg := -1
 	if writable {
 		reg = f.regOf(b)
@@ -786,23 +917,26 @@ func (f *funcState) assignIdent(e *syntax.AssignExpr, target *syntax.Ident, dst 
 		name = ""
 	}
 	if e.Op == syntax.Assign {
-		if reg >= 0 && !mentions(e.Value, b) {
+		if reg >= 0 && !mentions(e.Value, b) && f.intoReg(e.Value) {
 			f.exprNamed(e.Value, reg, name)
 			if want {
 				f.emitMove(dst, reg)
 			}
 			return
 		}
+		// The reference is resolved before the value is evaluated.
+		r := f.resolveIdent(target)
 		v := dst
 		if !want {
 			v = f.alloc()
 		}
 		f.exprNamed(e.Value, v, name)
-		f.storeIdent(target, v, bindAssign)
+		f.put(r, v, bindAssign)
 		return
 	}
-	// Compound and logical assignment.
-	if reg >= 0 && !containsAssign(e.Value) {
+	// Compound and logical assignment: an arithmetic one writes the register
+	// with its one operator.
+	if _, arith := compoundOps[e.Op]; reg >= 0 && !containsAssign(e.Value) && (arith || f.intoReg(e.Value)) {
 		if lbl := f.logicalSkip(e.Op, reg); lbl != nil {
 			f.exprNamed(e.Value, reg, name)
 			f.bind(lbl)
@@ -815,20 +949,21 @@ func (f *funcState) assignIdent(e *syntax.AssignExpr, target *syntax.Ident, dst 
 		}
 		return
 	}
+	r := f.resolveIdent(target)
 	cur := dst
 	if !want {
 		cur = f.alloc()
 	}
-	f.loadIdent(target, cur)
+	f.get(r, cur)
 	if lbl := f.logicalSkip(e.Op, cur); lbl != nil {
 		f.exprNamed(e.Value, cur, name)
-		f.storeIdent(target, cur, bindAssign)
+		f.put(r, cur, bindAssign)
 		f.bind(lbl)
 		return
 	}
 	v := f.operand(e.Value)
 	f.emitABC(binaryOps[compoundOps[e.Op]], cur, cur, v)
-	f.storeIdent(target, cur, bindAssign)
+	f.put(r, cur, bindAssign)
 }
 
 // update compiles ++/--; when want is set the expression value is left in dst.
@@ -845,7 +980,8 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 	switch t := e.X.(type) {
 	case *syntax.Ident:
 		b := t.Binding
-		if b != nil && (b.Kind == syntax.BindConst || b.Kind == syntax.BindFuncName) {
+		if b != nil && immutable(b) && (b.Kind != syntax.BindFuncName || f.out.Strict) &&
+			f.withsFor(b) == nil {
 			// ToNumeric(oldValue) runs (a valueOf is observable) before
 			// PutValue throws.
 			cur := f.alloc()
@@ -855,7 +991,7 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 			f.emitExtra(uint32(f.stringConst(b.Name)))
 			return
 		}
-		if r := f.regOf(b); r >= 0 {
+		if r := f.regOf(b); r >= 0 && b.Kind != syntax.BindFuncName {
 			if e.Prefix {
 				f.emitAB(op, r, r)
 				if want {
@@ -871,11 +1007,12 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 			f.emitAB(op, r, r)
 			return
 		}
+		ref := f.resolveIdent(t)
 		cur := f.alloc()
-		f.loadIdent(t, cur)
+		f.get(ref, cur)
 		if e.Prefix {
 			f.emitAB(op, cur, cur)
-			f.storeIdent(t, cur, bindAssign)
+			f.put(ref, cur, bindAssign)
 			if want {
 				f.emitMove(dst, cur)
 			}
@@ -887,7 +1024,7 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 		}
 		f.emitAB(bytecode.ToNumeric, old, cur)
 		f.emitAB(op, cur, old)
-		f.storeIdent(t, cur, bindAssign)
+		f.put(ref, cur, bindAssign)
 	case *syntax.MemberExpr:
 		if isSuper(t) {
 			f.superUpdate(e, t, op, dst, want)
@@ -920,6 +1057,8 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 		f.emitAB(bytecode.ToNumeric, old, cur)
 		f.emitAB(op, cur, old)
 		f.emitSet(obj, key, cur, t)
+	case *syntax.CallExpr:
+		f.callTarget(t, "Invalid left-hand side expression in update operation")
 	default:
 		pos, _ := e.X.Range()
 		f.c.fail(pos, "SyntaxError: Invalid left-hand side expression in update operation")
@@ -983,6 +1122,10 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 		f.bind(done)
 		f.optLabel = saved
 	default:
+		if id, ok := callee.(*syntax.Ident); ok && f.withsFor(id.Binding) != nil {
+			f.withCallee(id, base)
+			break
+		}
 		f.expr(callee, base)
 		f.emitA(bytecode.LoadUndef, base+1)
 	}
@@ -992,9 +1135,17 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 	}
 	spread := f.args(e.Args, base)
 	f.setPos(callPos(e.Callee))
-	if spread {
+	switch {
+	case isDirectEval(e):
+		n, c := len(e.Args), 0
+		if spread {
+			n, c = 0, 1
+		}
+		f.emitABC(bytecode.CallEval, base, n, c)
+		f.emitExtra(f.evalSite(e.Pos))
+	case spread:
 		f.emitA(bytecode.CallSpread, base)
-	} else {
+	default:
 		f.emitAB(bytecode.Call, base, len(e.Args))
 	}
 	f.emitMove(dst, base)
@@ -1078,6 +1229,10 @@ func (f *funcState) taggedTemplate(e *syntax.TaggedTemplate, dst int) {
 		f.setPos(tag.Pos)
 		f.emitGet(base, base+1, tag)
 	default:
+		if id, ok := tag.(*syntax.Ident); ok && f.withsFor(id.Binding) != nil {
+			f.withCallee(id, base)
+			break
+		}
 		f.expr(tag, base)
 		f.emitA(bytecode.LoadUndef, base+1)
 	}
@@ -1226,7 +1381,15 @@ func (f *funcState) objectLit(e *syntax.ObjectLit, dst int) {
 					f.emitABC(bytecode.DefineMethod, dst, k, v)
 					break
 				}
-				f.expr(p.Value, v)
+				if !isInertValue(p.Value) {
+					// The value's evaluation may run code: ToPropertyKey first.
+					f.emitAB(bytecode.ToPropertyKey, k, k)
+				}
+				if c, ok := p.Value.(*syntax.Class); ok && c.Name == nil {
+					f.classExpr(c, v, "", k) // named after the key at run time
+				} else {
+					f.expr(p.Value, v)
+				}
 				f.emitABC(bytecode.DefineElem, dst, k, v)
 				break
 			}
@@ -1254,6 +1417,16 @@ func (f *funcState) objectLit(e *syntax.ObjectLit, dst int) {
 		}
 		f.free(mark)
 	}
+}
+
+// isInertValue reports whether evaluating e runs no code and so cannot
+// observe when a computed key before it is converted.
+func isInertValue(e syntax.Expr) bool {
+	switch e.(type) {
+	case *syntax.NumberLit, *syntax.StringLit, *syntax.BoolLit, *syntax.NullLit, *syntax.BigIntLit, *syntax.RegexLit, *syntax.Function:
+		return true
+	}
+	return false
 }
 
 // accessor emits the definition of getter or setter fn with key on object

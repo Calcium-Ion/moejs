@@ -1,6 +1,8 @@
 package bytecode
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,4 +158,36 @@ func TestClassKindsAndOps(t *testing.T) {
   0005 ThrowError r1 K0
 `
 	assert.Equal(t, want, Disassemble(fn))
+}
+
+// TestEvalLevelSlot: Slot finds the first slot a name owns, in a small
+// level by a scan, in a larger one by the index it builds on first use,
+// which concurrent callers share.
+func TestEvalLevelSlot(t *testing.T) {
+	small := &EvalLevel{Names: []string{"a", "", "b", "a"}}
+	assert.Equal(t, 0, small.Slot("a"))
+	assert.Equal(t, 2, small.Slot("b"))
+	assert.Equal(t, -1, small.Slot("c"))
+	assert.Equal(t, -1, small.Slot(""), "a slot without a binding has no name")
+
+	names := make([]string, 100)
+	for i := range names {
+		if i%10 != 0 {
+			names[i] = "v" + strconv.Itoa(i%50)
+		}
+	}
+	big := &EvalLevel{Names: names}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.Equal(t, 1, big.Slot("v1"))
+			assert.Equal(t, 49, big.Slot("v49"))
+			assert.Equal(t, 11, big.Slot("v11"), "the first of the slots of a name")
+			assert.Equal(t, -1, big.Slot("v0"))
+			assert.Equal(t, -1, big.Slot(""))
+		}()
+	}
+	wg.Wait()
 }

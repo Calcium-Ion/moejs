@@ -12,7 +12,9 @@
 package compiler
 
 import (
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 	"github.com/Calcium-Ion/moejs/syntax"
@@ -36,9 +38,10 @@ const unsupportedSuffix = " is not supported yet (see TODO.md)"
 
 // CompileModule compiles a parsed module into its top-level function
 // template (Kind == KindModule). The module's bindings become the slots of
-// the function's own environment; Function.Exports maps export names to
-// those slots. A module with top-level await compiles as an async function
-// body (Function.Async): the call returns the promise of its evaluation.
+// the function's own environment; Function.Module maps export names to
+// those slots and lists what the module imports. A module with top-level
+// await compiles as an async function body (Function.Async): the call
+// returns the promise of its evaluation.
 func CompileModule(m *syntax.Module) (fn *bytecode.Function, err error) {
 	c := &compiler{file: m.File}
 	defer c.recover(&err)
@@ -47,56 +50,151 @@ func CompileModule(m *syntax.Module) (fn *bytecode.Function, err error) {
 	f.out.Source = &bytecode.SourceInfo{Name: m.File.Name, Src: m.File.Src, Start: m.Pos, End: m.End}
 	f.out.Async = m.Async
 	f.enterTopLevel(m.Scope, m.Body)
+	bodyPC := f.pc()
 	f.asyncStart()
 	f.stmts(m.Body)
 	f.endBody()
 	out := f.finish()
-	out.Exports = make(map[string]int, len(m.Exports))
+	mod := &bytecode.Module{Exports: make([]bytecode.Export, 0, len(m.Exports)), BodyPC: bodyPC}
 	for _, e := range m.Exports {
-		loc := c.locs[e.Binding]
-		if loc.env == nil {
-			c.fail(e.Pos, "SyntaxError: export '"+e.Name+"' is not a module binding")
-		}
-		out.Exports[e.Name] = loc.slot
+		mod.Exports = append(mod.Exports, bytecode.Export{Name: e.Name, Slot: c.moduleSlot(e.Binding, e.Pos, "export '"+e.Name+"'")})
 	}
+	slices.SortFunc(mod.Exports, func(a, b bytecode.Export) int { return strings.Compare(a.Name, b.Name) })
+	if len(m.Requests) > 0 || out.ScriptOrModule {
+		mod.Links = c.links(m)
+	}
+	// The import() calls of its eval code read the module's record too,
+	// which a module evaluated alone has none of.
+	out.ScriptOrModule = out.ScriptOrModule || m.HasDirectEval
+	out.Module = mod
 	return out, nil
 }
 
-// CompileScript compiles a strict-mode script into a KindScript function
-// whose return value is the completion value of the script.
-func CompileScript(s *syntax.Script) (fn *bytecode.Function, err error) {
-	c := &compiler{file: s.File}
+// moduleSlot returns the environment slot of the binding b of an export or
+// import entry (what).
+func (c *compiler) moduleSlot(b *syntax.Binding, pos int, what string) int {
+	loc := c.locs[b]
+	if loc.env == nil {
+		c.fail(pos, "SyntaxError: "+what+" is not a module binding")
+	}
+	return loc.slot
+}
+
+// links lists what module m requests and imports, with the source position
+// of every entry for the errors of linking.
+func (c *compiler) links(m *syntax.Module) *bytecode.Links {
+	at := func(pos int) (int32, int32) {
+		line, col := c.file.Position(pos)
+		return int32(line), int32(col)
+	}
+	l := &bytecode.Links{
+		Requests:  make([]bytecode.Request, len(m.Requests)),
+		Imports:   make([]bytecode.Import, len(m.Imports)),
+		Reexports: make([]bytecode.Reexport, len(m.Reexports)),
+		Stars:     make([]bytecode.Star, len(m.Stars)),
+	}
+	for i, r := range m.Requests {
+		l.Requests[i] = bytecode.Request{Specifier: r.Specifier}
+		l.Requests[i].Line, l.Requests[i].Col = at(r.Pos)
+	}
+	for i, e := range m.Imports {
+		l.Imports[i] = bytecode.Import{Request: e.Request, Name: e.Name, Namespace: e.Namespace, Slot: c.moduleSlot(e.Binding, e.Pos, "import '"+e.Binding.Name+"'")}
+		l.Imports[i].Line, l.Imports[i].Col = at(e.Pos)
+	}
+	for i, e := range m.Reexports {
+		l.Reexports[i] = bytecode.Reexport{Name: e.Name, Request: e.Request, Import: e.Import, All: e.All}
+		l.Reexports[i].Line, l.Reexports[i].Col = at(e.Pos)
+	}
+	for i, e := range m.Stars {
+		l.Stars[i] = bytecode.Star{Request: e.Request}
+		l.Stars[i].Line, l.Stars[i].Col = at(e.Pos)
+	}
+	return l
+}
+
+// CompileScript compiles a script into a KindScript function whose return
+// value is the completion value of the script. The script's declarations
+// are global (GlobalDeclarationInstantiation, run by the engine before the
+// function): its var and function names are properties of the global
+// object and its let, const and class names bindings of the realm's global
+// declarative environment, both read and written by name. The script is
+// sloppy mode code unless its directive prologue says "use strict".
+func CompileScript(s *syntax.Script) (*bytecode.Function, error) {
+	return compileScriptStop(s, nil)
+}
+
+// compileScriptStop is CompileScript, calling stop as scriptState.stop.
+func compileScriptStop(s *syntax.Script, stop func() error) (fn *bytecode.Function, err error) {
+	c := &compiler{file: s.File, script: &scriptState{stop: stop}}
 	defer c.recover(&err)
 	f := c.newFuncState(nil, nil, bytecode.KindScript, s.Scope)
+	f.out.Strict = s.Strict
+	f.out.ScriptOrModule = s.HasDirectEval // for its eval code's import()
 	f.out.Source = &bytecode.SourceInfo{Name: s.File.Name, Src: s.File.Src, Start: s.Pos, End: s.End}
-	for _, b := range s.Scope.Bindings {
-		var names *[]string
-		switch {
-		case b.Kind.IsLexical():
-			names = &f.globals().Lexical
-		case b.Kind == syntax.BindFunction:
-			names = &f.globals().Function
-		case b.Kind == syntax.BindVar:
-			names = &f.globals().Var
-		default:
-			continue
-		}
-		*names = append(*names, b.Name)
-	}
 	f.completion = f.alloc()
 	f.emitA(bytecode.LoadUndef, f.completion)
-	f.enterTopLevel(s.Scope, s.Body)
+	f.enterScript(s.Scope)
 	f.stmts(s.Body)
 	f.emitA(bytecode.Ret, f.completion)
 	return f.finish(), nil
 }
 
+// enterScript gives every declaration of the script scope s a global
+// location, lists the names for GlobalDeclarationInstantiation and stores
+// the hoisted function declarations.
+func (f *funcState) enterScript(s *syntax.Scope) {
+	sc := f.c.script
+	for _, b := range s.Bindings {
+		var names *[]string
+		switch {
+		case b.Kind.IsLexical():
+			names = &f.globals().Lexical
+		case b.Kind == syntax.BindFunction:
+			// Listed below, in the order of their last declarations.
+		case b.Kind == syntax.BindVar && b.AnnexB:
+			names = &f.globals().AnnexB
+		case b.Kind == syntax.BindVar:
+			names = &f.globals().Var
+		default:
+			f.c.locs[b] = location{reg: f.alloc()}
+			continue
+		}
+		f.c.locs[b] = location{slot: len(sc.globals), reg: -1}
+		sc.globals = append(sc.globals, b)
+		if names != nil {
+			*names = append(*names, b.Name)
+		}
+	}
+	// GlobalDeclarationInstantiation initializes the last declaration of
+	// each function name, in the order of those declarations.
+	var fns []string
+	for i := len(s.Funcs) - 1; i >= 0; i-- {
+		if name := s.Funcs[i].Func.Name.Name; !slices.Contains(fns, name) {
+			fns = append(fns, name)
+		}
+	}
+	if len(fns) > 0 {
+		slices.Reverse(fns)
+		f.globals().Function = fns
+	}
+	f.instantiateFuncs(s)
+}
+
 // globals returns the script's GlobalNames, allocated on first use.
 func (f *funcState) globals() *bytecode.GlobalNames {
-	if f.out.Globals == nil {
-		f.out.Globals = &bytecode.GlobalNames{}
+	x := f.extra()
+	if x.Globals == nil {
+		x.Globals = &bytecode.GlobalNames{}
 	}
-	return f.out.Globals
+	return x.Globals
+}
+
+// extra returns the function's Extra, allocated on first use.
+func (f *funcState) extra() *bytecode.Extra {
+	if f.out.Extra == nil {
+		f.out.Extra = &bytecode.Extra{}
+	}
+	return f.out.Extra
 }
 
 // compiler holds per-compilation state shared by all function states.
@@ -107,16 +205,55 @@ type compiler struct {
 
 	classOf map[*syntax.Function]*syntax.Class    // class constructor -> its class
 	bodies  map[*syntax.Function]func(*funcState) // synthetic member initializers (class.go)
+
+	script *scriptState // CompileScript only
+}
+
+// scriptState is the compiler state only scripts (and code with direct
+// eval calls) need, kept out of the compiler so that modules do not pay for
+// it.
+type scriptState struct {
+	globals []*syntax.Binding // the script-scope bindings, by global location slot
+	withs   []*syntax.Scope   // the with statements around the code being compiled, innermost last
+	stop    func() error      // code from a string: ends the compile with its error (Hook, syntax.Options.Stop)
+	evals   *evalMemo         // the direct eval call sites' scopes (eval.go)
 }
 
 type bailout struct{}
 
+// stopped is the panic that ends a compile scriptState.stop stopped,
+// carrying its error.
+type stopped struct{ err error }
+
+// stopEvery is the number of statements of a list between two calls of
+// scriptState.stop, as syntax.Options.Stop's.
+const stopEvery = 1024
+
 func (c *compiler) recover(err *error) {
 	if r := recover(); r != nil {
-		if _, ok := r.(bailout); !ok {
+		switch r := r.(type) {
+		case bailout:
+			*err = c.err
+		case stopped:
+			*err = r.err
+		default:
 			panic(r)
 		}
-		*err = c.err
+	}
+}
+
+// poll calls the stop function of a compile of code from a string before
+// the statement at index i of a list, every stopEvery statements.
+func (c *compiler) poll(i int) {
+	if i&(stopEvery-1) == 0 && c.script != nil && c.script.stop != nil {
+		c.stopNow()
+	}
+}
+
+//go:noinline
+func (c *compiler) stopNow() {
+	if err := c.script.stop(); err != nil {
+		panic(stopped{err})
 	}
 }
 
@@ -127,17 +264,21 @@ func (c *compiler) fail(pos int, msg string) {
 	panic(bailout{})
 }
 
-func (c *compiler) unsupported(pos int, feature string) {
-	c.fail(pos, "SyntaxError: "+feature+unsupportedSuffix)
-}
-
-// location says where a binding lives: a register of its function, or a
-// slot of a materialized environment.
+// location says where a binding lives: a register of its function, a slot
+// of a materialized environment, or, for a declaration of a script's top
+// level, the global environment (env == nil, reg < 0; slot indexes
+// scriptState.globals), accessed by name.
 type location struct {
 	env  *envScope
 	slot int
 	reg  int
 }
+
+// inReg reports whether the binding lives in register l.reg.
+func (l location) inReg() bool { return l.env == nil && l.reg >= 0 }
+
+// isGlobal reports whether the binding is a script's global declaration.
+func (l location) isGlobal() bool { return l.env == nil && l.reg < 0 }
 
 // envScope is one materialized closure environment (a scope with at least
 // one captured binding, or the top-level scope).
@@ -230,7 +371,8 @@ type funcState struct {
 	optLabel      *label     // short-circuit target of the enclosing optional chain
 
 	curPos   int
-	lastLine int32
+	lastPos  int   // the position whose line and column emitWord last looked up
+	lastLine int32 // the line and column of the last line-table entry
 	lastCol  int32
 
 	noFold, noFoldEnd syntax.Expr // left-spine nodes known not to fold (see foldChain)
@@ -255,6 +397,7 @@ func (c *compiler) newFuncState(parent *funcState, fn *syntax.Function, kind byt
 		numConst:   make(map[uint64]uint16),
 		strConst:   make(map[string]uint16),
 		keyConst:   make(map[string]uint16),
+		lastPos:    -1,
 		lastLine:   -1,
 		completion: -1,
 	}
@@ -377,7 +520,10 @@ func (f *funcState) setPosNode(n syntax.Node) {
 }
 
 func (f *funcState) emitWord(w uint32) int {
-	if f.curPos >= 0 {
+	// The words emitted at one position share its line-table entry, so the
+	// position is looked up once.
+	if f.curPos >= 0 && f.curPos != f.lastPos {
+		f.lastPos = f.curPos
 		line, col := f.c.file.Position(f.curPos)
 		if int32(line) != f.lastLine || int32(col) != f.lastCol {
 			f.lastLine, f.lastCol = int32(line), int32(col)
@@ -555,7 +701,7 @@ func (f *funcState) initTDZ(s *syntax.Scope) {
 			continue
 		}
 		loc := f.c.locs[b]
-		if loc.env == nil {
+		if loc.inReg() {
 			f.emitA(bytecode.LoadHole, loc.reg)
 			continue
 		}
@@ -618,6 +764,12 @@ func (f *funcState) envDepthOf(es *envScope) int {
 func (f *funcState) loadLoc(b *syntax.Binding, dst int) {
 	loc := f.c.locs[b]
 	if loc.env == nil {
+		if loc.reg < 0 {
+			// A global declaration: the engine checks a lexical
+			// binding's initialization.
+			f.getGlobal(b.Name, dst)
+			return
+		}
 		if b.NeedsTDZ {
 			f.emitA(bytecode.CheckTDZ, loc.reg)
 			f.emitExtra(uint32(f.stringConst(b.Name)))
@@ -627,6 +779,10 @@ func (f *funcState) loadLoc(b *syntax.Binding, dst int) {
 	}
 	depth := f.envDepthOf(loc.env)
 	f.checkDepth(depth)
+	if b.Kind == syntax.BindImport {
+		f.loadImport(dst, depth, loc.slot, b.Name)
+		return
+	}
 	if loc.slot <= bytecode.MaxRegister {
 		if b.NeedsTDZ {
 			f.emitABC(bytecode.GetEnvChk, dst, depth, loc.slot)
@@ -646,10 +802,39 @@ func (f *funcState) loadLoc(b *syntax.Binding, dst int) {
 	f.emitExtra(uint32(loc.slot))
 }
 
+// loadImport emits the read of an import binding in slot of env^depth: the
+// slot holds a reference to the exporter's binding, which is in its TDZ
+// until the exporter initializes it.
+func (f *funcState) loadImport(dst, depth, slot int, name string) {
+	if slot <= bytecode.MaxRegister {
+		f.emitABC(bytecode.GetImport, dst, depth, slot)
+		f.emitExtra(uint32(f.stringConst(name)))
+		return
+	}
+	f.emitAB(bytecode.GetImportW, dst, depth)
+	f.emitExtra(uint32(slot))
+	f.emitExtra(uint32(f.stringConst(name)))
+}
+
 // storeLoc emits code that stores register src into a binding location
-// (initialization or assignment; no TDZ check).
+// (initialization or assignment; no TDZ check). A global lexical
+// declaration is initialized, a global var or function assigned.
 func (f *funcState) storeLoc(loc location, src int) {
 	if loc.env == nil {
+		if loc.reg < 0 {
+			b := f.c.script.globals[loc.slot]
+			if !b.Kind.IsLexical() {
+				f.setGlobal(b.Name, src)
+				return
+			}
+			isConst := uint16(0)
+			if b.Kind == syntax.BindConst {
+				isConst = 1
+			}
+			f.emitA(bytecode.InitGlobal, src)
+			f.emitExtra(bytecode.ExtraArg(f.nameConst(b.Name), isConst))
+			return
+		}
 		f.emitMove(loc.reg, src)
 		return
 	}
@@ -667,7 +852,7 @@ func (f *funcState) storeLoc(loc location, src int) {
 // into: the binding's own register, or a fresh temporary for environment
 // bindings (to be stored with storeFromTarget).
 func (f *funcState) locTarget(loc location) int {
-	if loc.env == nil {
+	if loc.inReg() {
 		return loc.reg
 	}
 	return f.alloc()
@@ -675,9 +860,27 @@ func (f *funcState) locTarget(loc location) int {
 
 // storeFromTarget completes a locTarget write.
 func (f *funcState) storeFromTarget(loc location, reg int) {
-	if loc.env != nil {
+	if !loc.inReg() {
 		f.storeLoc(loc, reg)
 	}
+}
+
+// getGlobal emits the read of global name into dst.
+func (f *funcState) getGlobal(name string, dst int) {
+	f.emitA(bytecode.GetGlobal, dst)
+	f.emitExtra(bytecode.ExtraArg(f.nameConst(name), f.newIC()))
+}
+
+// setGlobal emits PutValue of src to global name: an unresolvable name
+// throws in strict code and becomes a global object property in sloppy
+// code.
+func (f *funcState) setGlobal(name string, src int) {
+	op := bytecode.SetGlobal
+	if !f.out.Strict {
+		op = bytecode.SetGlobalSloppy
+	}
+	f.emitA(op, src)
+	f.emitExtra(bytecode.ExtraArg(f.nameConst(name), f.newIC()))
 }
 
 // regOf returns the register of an un-captured binding that needs no TDZ
@@ -687,7 +890,7 @@ func (f *funcState) regOf(b *syntax.Binding) int {
 		return -1
 	}
 	loc, ok := f.c.locs[b]
-	if !ok || loc.env != nil {
+	if !ok || loc.env != nil || f.withsFor(b) != nil {
 		return -1
 	}
 	return loc.reg
@@ -711,9 +914,6 @@ func (f *funcState) checkBx(n int) uint16 {
 // compileFunction compiles a nested function and returns its child index.
 // inferredName is used when the function is anonymous (NamedEvaluation).
 func (f *funcState) compileFunction(fn *syntax.Function, inferredName string) uint16 {
-	if fn.HasDirectEval {
-		f.c.unsupported(fn.Pos, "direct eval")
-	}
 	kind := bytecode.KindNormal
 	switch fn.Kind {
 	case syntax.FuncArrow:
@@ -735,6 +935,7 @@ func (f *funcState) compileFunction(fn *syntax.Function, inferredName string) ui
 		// An accessor's inferred name carries the "get "/"set " prefix.
 		name = fn.Name.Name
 	}
+	child.out.Strict = fn.IsStrict
 	child.out.Name = name
 	child.out.Length = fn.Length
 	child.out.NumParams = uint16(fn.ParamCount)
@@ -821,7 +1022,27 @@ func (f *funcState) compileBody() {
 	}
 	f.initTDZ(s)
 	f.prologue()
+	if !fn.IsStrict {
+		// OrdinaryCallBindThis and CreateMappedArgumentsObject, before
+		// anything reads this or the arguments object.
+		if fn.UsesThis && !fn.IsArrow {
+			f.emitNone(bytecode.CoerceThis)
+		}
+		if fn.HasSimpleParams && args != nil {
+			f.emitA(bytecode.MapArguments, argsReg)
+		}
+	}
 	f.asyncStart()
+	if fn.HasDirectEval && !fn.IsStrict {
+		// Names resolve through the %evalvars objects of the variable
+		// environments (sloppy.go).
+		if f.c.script == nil {
+			f.c.script = &scriptState{}
+		}
+		sc := f.c.script
+		defer func(n int) { sc.withs = sc.withs[:n] }(len(sc.withs))
+		f.evalVars(s)
+	}
 
 	// Named function expression self binding.
 	if fn.SelfBinding != nil {
@@ -891,7 +1112,7 @@ func (f *funcState) enterBodyScope(vs *syntax.Scope) {
 		if b.Kind != syntax.BindVar {
 			continue
 		}
-		if p := vs.Parent.Lookup(b.Name); p != nil && p.Kind == syntax.BindParam {
+		if p := vs.Parent.Lookup(b.Name); p != nil && (p.Kind == syntax.BindParam || p.Kind == syntax.BindArgs) {
 			mark := f.nregs
 			r := f.alloc()
 			f.loadLoc(p, r)
@@ -900,6 +1121,9 @@ func (f *funcState) enterBodyScope(vs *syntax.Scope) {
 		}
 	}
 	f.initTDZ(vs)
+	if f.fn.HasDirectEval && !f.fn.IsStrict {
+		f.evalVars(vs)
+	}
 	f.instantiateFuncs(vs)
 }
 

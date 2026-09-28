@@ -94,8 +94,8 @@ type regexpGuard struct {
 
 func (g *regexpGuard) rearm(p *Object) bool {
 	g.shape = nil
-	if p.flags&(flagDict|flagHasLazy) != 0 {
-		return false
+	if p.flags&(flagDict|flagHasLazy) != 0 && !p.onlyCompilePending() {
+		return false // compile, which no path watches, may be pending
 	}
 	g.missing = 0
 	for i, key := range regexpGuardKeys {

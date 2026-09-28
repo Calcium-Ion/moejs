@@ -24,9 +24,21 @@ func (p *parser) parseAssign(noIn bool) Expr {
 	p.enter()
 	defer p.leave()
 	start := p.start
+	var lhs Expr
 	switch p.tok {
 	case KwYield:
 		return p.parseYield(noIn)
+	case LParen:
+		// A parenthesized arrow function is a whole AssignmentExpression;
+		// parsePrimary rejects one anywhere else. The nesting unit is the
+		// one parseUnary takes on the way to parsePrimary.
+		p.enter()
+		x, arrow := p.parseParenOrArrow(true, noIn)
+		p.leave()
+		if arrow {
+			return x
+		}
+		lhs = p.parseConditionalFrom(x, start, noIn)
 	case Identifier:
 		if p.isIdent("async") {
 			if tok, nl, _ := p.peek(); tok == Identifier && !nl {
@@ -46,14 +58,29 @@ func (p *parser) parseAssign(noIn bool) Expr {
 			param := p.parseBindingIdent()
 			return p.parseArrowBody(start, []Pattern{param}, nil, false, noIn)
 		}
+		lhs = p.parseConditional(noIn)
+	case KwLet:
+		if tok, nl, _ := p.peek(); tok == Arrow && !nl && !p.strict {
+			param := p.parseBindingIdent()
+			return p.parseArrowBody(start, []Pattern{param}, nil, false, noIn)
+		}
+		lhs = p.parseConditional(noIn)
+	default:
+		lhs = p.parseConditional(noIn)
 	}
-	lhs := p.parseConditional(noIn)
 	if p.tok.isAssignOp() {
 		op := p.tok
 		var target Pattern
-		if op == Assign {
+		switch op {
+		case Assign:
 			target = p.toAssignTarget(lhs, "Invalid left-hand side in assignment")
-		} else {
+		case LogAndAssign, LogOrAssign, NullishAssign:
+			if _, call := lhs.(*CallExpr); call {
+				pos, _ := lhs.Range()
+				p.fail(pos, "Invalid left-hand side in assignment")
+			}
+			fallthrough
+		default:
 			target = p.toSimpleTarget(lhs, "Invalid left-hand side in assignment")
 		}
 		p.next()
@@ -184,10 +211,29 @@ func (p *parser) parseConditional(noIn bool) Expr {
 	if !p.eat(Question) {
 		return test
 	}
+	return p.parseConditionalTail(test, start, noIn)
+}
+
+// parseConditionalTail parses the branches after `test ?`.
+func (p *parser) parseConditionalTail(test Expr, start int, noIn bool) Expr {
 	cons := p.parseAssign(false)
 	p.expect(Colon)
 	alt := p.parseAssign(noIn)
 	return &CondExpr{Span{start, p.prevEnd}, test, cons, alt}
+}
+
+// parseConditionalFrom is parseConditional once parseAssign has parsed the
+// parenthesized expression x it starts with.
+func (p *parser) parseConditionalFrom(x Expr, start int, noIn bool) Expr {
+	x = p.parseCallTail(x, start, true)
+	if (p.tok == Inc || p.tok == Dec) && !p.nlBefore {
+		x = p.parsePostfix(x, start)
+	}
+	x = p.parseBinaryRest(x, start, 0, noIn)
+	if !p.eat(Question) {
+		return x
+	}
+	return p.parseConditionalTail(x, start, noIn)
 }
 
 // parseBinary parses binary operators with precedence climbing.
@@ -271,7 +317,7 @@ func (p *parser) parseUnary() Expr {
 		p.next()
 		x := p.parseUnary()
 		if op == KwDelete {
-			if _, ok := x.(*Ident); ok {
+			if _, ok := x.(*Ident); ok && p.strict {
 				p.fail(start, "Delete of an unqualified identifier in strict mode.")
 			}
 			if isPrivateMember(x) {
@@ -292,12 +338,17 @@ func (p *parser) parseUnary() Expr {
 	}
 	x := p.parseLeftHandSide()
 	if (p.tok == Inc || p.tok == Dec) && !p.nlBefore {
-		op := p.tok
-		target := p.toSimpleTarget(x, "Invalid left-hand side expression in postfix operation")
-		p.next()
-		return &UpdateExpr{Span{start, p.prevEnd}, op, false, target.(Expr)}
+		return p.parsePostfix(x, start)
 	}
 	return x
+}
+
+// parsePostfix parses the `++` or `--` after x.
+func (p *parser) parsePostfix(x Expr, start int) Expr {
+	op := p.tok
+	target := p.toSimpleTarget(x, "Invalid left-hand side expression in postfix operation")
+	p.next()
+	return &UpdateExpr{Span{start, p.prevEnd}, op, false, target.(Expr)}
 }
 
 // parseLeftHandSide parses new/call/member chains.
@@ -333,7 +384,9 @@ func (p *parser) parseNew() Expr {
 		callee = p.parseNew()
 	} else {
 		if p.tok == KwImport {
-			p.fail(p.start, "Cannot use new with import")
+			if tok, _, _ := p.peek(); tok != Dot {
+				p.fail(p.start, "Cannot use new with import")
+			}
 		}
 		callee = p.parsePrimary()
 	}
@@ -457,6 +510,12 @@ func (p *parser) parsePrimary() Expr {
 		id := &Ident{Span: Span{start, p.end}, Name: p.val}
 		p.next()
 		return id
+	case KwLet:
+		if !p.strict { // sloppy code: an identifier
+			id := &Ident{Span: Span{start, p.end}, Name: p.val}
+			p.next()
+			return id
+		}
 	case KwThis:
 		p.next()
 		return &ThisExpr{Span: Span{start, p.prevEnd}}
@@ -498,7 +557,8 @@ func (p *parser) parsePrimary() Expr {
 	case LBrace:
 		return p.parseObjectLit()
 	case LParen:
-		return p.parseParenOrArrow()
+		x, _ := p.parseParenOrArrow(false, false)
+		return x
 	case KwFunction:
 		return p.parseFunctionExpr(start, false)
 	case KwClass:
@@ -506,15 +566,31 @@ func (p *parser) parsePrimary() Expr {
 	case KwImport:
 		p.next()
 		if p.eat(Dot) {
-			if !p.isIdent("meta") {
+			switch {
+			case p.isIdent("source"):
+				p.unsupported(start, "import source")
+			case p.isIdent("defer"):
+				p.unsupported(start, "import defer")
+			case !p.isIdent("meta"):
 				p.unexpected()
+			case !p.isModule:
+				p.fail(start, "Cannot use 'import.meta' outside a module")
 			}
 			p.next()
 			return &ImportMeta{Span{start, p.prevEnd}}
 		}
 		p.expect(LParen)
 		src := p.parseAssign(false)
-		p.eat(Comma)
+		if p.eat(Comma) && p.tok != RParen {
+			// import(specifier, options) is import attributes', but no
+			// ImportCall has a third argument.
+			opts := p.start
+			p.parseAssign(false)
+			if p.eat(Comma) && p.tok != RParen {
+				p.fail(p.start, "import() takes at most two arguments")
+			}
+			p.unsupported(opts, "import attribute syntax")
+		}
 		p.expect(RParen)
 		return &ImportCall{Span{start, p.prevEnd}, src}
 	}
@@ -685,7 +761,7 @@ func (p *parser) parsePropertyBody(prop *Property) {
 		return
 	}
 	// Shorthand property or cover-initialized name.
-	if keyTok != Identifier {
+	if keyTok != Identifier && (keyTok != KwLet || p.strict) {
 		_, keyEnd := prop.Key.Range()
 		p.unexpectedAt(keyTok, prop.Pos, p.src[prop.Pos:keyEnd])
 	}
@@ -709,12 +785,13 @@ func isProtoKey(key Expr) bool {
 	return false
 }
 
-// parseParenOrArrow parses `( ... )`: either a parenthesised expression or
-// an arrow function parameter list, decided by the token after `)`.
-func (p *parser) parseParenOrArrow() Expr {
+// parseParenOrArrow parses `( ... )`: either a parenthesised expression or,
+// where arrowOK (an arrow function is an AssignmentExpression, not an
+// operand), an arrow function parameter list, decided by the token after
+// `)`, whose concise body excludes `in` with noIn. It reports whether it
+// parsed an arrow function.
+func (p *parser) parseParenOrArrow(arrowOK, noIn bool) (Expr, bool) {
 	start := p.start
-	heritage := p.heritage
-	p.heritage = false
 	p.next()
 	if p.tok == RParen {
 		rparen := p.start
@@ -722,10 +799,10 @@ func (p *parser) parseParenOrArrow() Expr {
 		if p.tok != Arrow || p.nlBefore {
 			p.fail(rparen, "Unexpected token ')'")
 		}
-		if heritage {
+		if !arrowOK {
 			p.unexpected()
 		}
-		return p.parseArrowBody(start, nil, nil, false, false)
+		return p.parseArrowBody(start, nil, nil, false, noIn), true
 	}
 	var items []Expr
 	var rest Pattern
@@ -751,24 +828,24 @@ func (p *parser) parseParenOrArrow() Expr {
 	rparen := p.start
 	p.expect(RParen)
 	if p.tok == Arrow && !p.nlBefore {
-		if heritage {
+		if !arrowOK {
 			p.unexpected()
 		}
 		params := make([]Pattern, len(items))
 		for i, item := range items {
 			params[i] = p.toParam(item)
 		}
-		return p.parseArrowBody(start, params, rest, false, false)
+		return p.parseArrowBody(start, params, rest, false, noIn), true
 	}
 	if rest != nil || trailingComma {
 		p.fail(rparen, "Unexpected token ')'")
 	}
 	if len(items) == 1 {
 		p.markParenthesized(items[0])
-		return items[0]
+		return items[0], false
 	}
 	seq := &SeqExpr{Span{start, p.prevEnd}, items}
-	return seq
+	return seq, false
 }
 
 // markParenthesized records that x was wrapped in parentheses, which
@@ -799,7 +876,14 @@ func (p *parser) isParenthesized(x Expr) bool {
 
 // ---- Assignment targets and cover grammar -----------------------------------
 
-// toSimpleTarget checks that x is an identifier or member expression.
+// toSimpleTarget checks that x is an identifier or member expression, or a
+// function call in sloppy code.
+//
+// Annex B (Runtime Errors for Function Call Assignment Targets) makes a
+// sloppy call the target of =, a compound assignment, ++/-- or a for-in/of
+// head a ReferenceError at run time, after the call, instead of an early
+// error. A super call stays an early error, and so do an optional chain, a
+// tagged template, a logical assignment and a destructuring target.
 func (p *parser) toSimpleTarget(x Expr, msg string) Pattern {
 	switch t := x.(type) {
 	case *Ident:
@@ -807,6 +891,10 @@ func (p *parser) toSimpleTarget(x Expr, msg string) Pattern {
 		return t
 	case *MemberExpr:
 		return t
+	case *CallExpr:
+		if _, super := t.Callee.(*SuperExpr); !super && !p.strict {
+			return t
+		}
 	}
 	pos, _ := x.Range()
 	p.fail(pos, msg)
@@ -817,7 +905,7 @@ func (p *parser) toSimpleTarget(x Expr, msg string) Pattern {
 // an assignment target, applying the destructuring cover grammar.
 func (p *parser) toAssignTarget(x Expr, msg string) Pattern {
 	switch t := x.(type) {
-	case *Ident, *MemberExpr:
+	case *Ident, *MemberExpr, *CallExpr:
 		return p.toSimpleTarget(x, msg)
 	case *ObjectLit:
 		if !t.parenthesized {
@@ -892,6 +980,8 @@ func (p *parser) toBindingPattern(pat Pattern) Pattern {
 		p.checkBindingName(t)
 	case *MemberExpr:
 		p.fail(t.Pos, "Invalid destructuring assignment target")
+	case *CallExpr:
+		p.fail(t.Pos, "Invalid destructuring assignment target")
 	case *AssignPattern:
 		p.toBindingPattern(t.Target)
 	case *ObjectPattern:
@@ -918,7 +1008,7 @@ func (p *parser) toBindingPattern(pat Pattern) Pattern {
 func (p *parser) elemToPattern(x Expr, binding bool) Pattern {
 	switch t := x.(type) {
 	case *AssignExpr:
-		if t.Op != Assign || p.isParenthesized(t) {
+		if _, call := t.Target.(*CallExpr); call || t.Op != Assign || p.isParenthesized(t) {
 			break
 		}
 		target := t.Target
@@ -1011,14 +1101,16 @@ func (p *parser) arrayToPattern(arr *ArrayLit, binding bool) *ArrayPattern {
 
 // funcContext is the statement context saved across a function boundary.
 type funcContext struct {
-	inLoop, inSwitch, labelBase, pendingLabels int
-	awaitKw                                    bool
+	inLoop, inSwitch         int32
+	labelBase, pendingLabels int
+	awaitKw, yieldKw, strict bool
 }
 
 func (p *parser) enterFunction(fn *Function) funcContext {
 	p.enter()
-	saved := funcContext{p.inLoop, p.inSwitch, p.labelBase, p.pendingLabels, p.awaitKw}
-	p.setAwaitKw(p.isModule || fn.IsAsync)
+	saved := funcContext{p.inLoop, p.inSwitch, p.labelBase, p.pendingLabels, p.awaitKw, p.yieldKw, p.strict}
+	p.awaitKw, p.yieldKw = p.isModule || fn.IsAsync, fn.IsGenerator
+	p.reword()
 	p.inLoop, p.inSwitch, p.pendingLabels = 0, 0, 0
 	p.labelBase = len(p.labels)
 	p.funcDepth++
@@ -1035,13 +1127,14 @@ func (p *parser) leaveFunction(fn *Function, saved funcContext) {
 		p.nonArrowDepth--
 	}
 	p.inLoop, p.inSwitch, p.labelBase, p.pendingLabels = saved.inLoop, saved.inSwitch, saved.labelBase, saved.pendingLabels
-	p.setAwaitKw(saved.awaitKw)
+	p.awaitKw, p.yieldKw, p.strict = saved.awaitKw, saved.yieldKw, saved.strict
+	p.reword()
 }
 
 // parseFunctionDecl parses `function name(params) { body }` at start (which
 // may be the position of a preceding `async`).
 func (p *parser) parseFunctionDecl(start int, isAsync, requireName bool) *FuncDecl {
-	fn := &Function{IsAsync: isAsync, IsStrict: true}
+	fn := &Function{IsAsync: isAsync, IsStrict: p.strict}
 	p.expect(KwFunction)
 	fn.IsGenerator = p.eat(Mul)
 	if p.tok == Identifier || p.tok == KwLet {
@@ -1054,17 +1147,19 @@ func (p *parser) parseFunctionDecl(start int, isAsync, requireName bool) *FuncDe
 }
 
 func (p *parser) parseFunctionExpr(start int, isAsync bool) *Function {
-	fn := &Function{IsAsync: isAsync, IsStrict: true}
+	fn := &Function{IsAsync: isAsync, IsStrict: p.strict}
 	p.expect(KwFunction)
 	fn.IsGenerator = p.eat(Mul)
-	// The name is bound inside the function: await is reserved in it only
-	// as in the body (a static block's await is not).
-	outer := p.awaitKw
-	p.setAwaitKw(p.isModule || isAsync)
+	// The name is bound inside the function: await and yield are reserved
+	// in it only as in the body (a static block's await is not).
+	outerAwait, outerYield := p.awaitKw, p.yieldKw
+	p.awaitKw, p.yieldKw = p.isModule || isAsync, fn.IsGenerator
+	p.reword()
 	if p.tok == Identifier || p.tok == KwLet {
 		fn.Name = p.parseBindingIdent()
 	}
-	p.setAwaitKw(outer)
+	p.awaitKw, p.yieldKw = outerAwait, outerYield
+	p.reword()
 	p.parseFunctionRest(fn, start)
 	return fn
 }
@@ -1073,7 +1168,7 @@ func (p *parser) parseFunctionExpr(start int, isAsync bool) *Function {
 // method whose key has just been parsed. A computed key names the method
 // at run time only.
 func (p *parser) parseMethod(start int, key Expr, computed bool, kind FuncKind, isAsync, isGen bool) *Function {
-	fn := &Function{Kind: kind, IsAsync: isAsync, IsGenerator: isGen, IsStrict: true}
+	fn := &Function{Kind: kind, IsAsync: isAsync, IsGenerator: isGen, IsStrict: p.strict}
 	if id, ok := key.(*Ident); ok && !computed {
 		fn.Name = &Ident{Span: id.Span, Name: id.Name}
 	}
@@ -1095,33 +1190,28 @@ func (p *parser) parseFunctionRest(fn *Function, start int) {
 	case fn.Kind == FuncSetter && len(fn.Params) != 1:
 		p.fail(lparen, "Setter must have exactly one formal parameter.")
 	}
-	fn.Body = p.parseBlock()
-	p.checkUseStrict(fn)
+	fn.Body = p.parseFunctionBody(fn, saved.strict)
 	p.leaveFunction(fn, saved)
 	fn.Span = Span{start, p.prevEnd}
 }
 
-// checkUseStrict rejects a "use strict" directive in the body of a function
-// whose parameter list is not simple. The directive prologue is the leading
-// run of statements that are a bare string literal; a directive is matched on
-// its source text, so escapes or parentheses make it an ordinary string.
-func (p *parser) checkUseStrict(fn *Function) {
-	if fn.HasSimpleParams {
-		return
+// parseFunctionBody parses `{ body }`, starting with its directive
+// prologue. The token after the body is scanned as the enclosing code
+// (outerStrict), which a "use strict" directive does not cover.
+func (p *parser) parseFunctionBody(fn *Function, outerStrict bool) *BlockStmt {
+	start := p.start
+	p.expect(LBrace)
+	body := p.parseDirectives(fn)
+	for p.tok != RBrace {
+		if p.tok == EOF {
+			p.unexpected()
+		}
+		poll(p.stop, len(body))
+		body = append(body, p.parseStatementListItem())
 	}
-	for _, s := range fn.Body.Body {
-		es, ok := s.(*ExprStmt)
-		if !ok {
-			return
-		}
-		str, ok := es.X.(*StringLit)
-		if !ok || str.Pos != es.Pos {
-			return
-		}
-		if p.src[str.Pos+1:str.End-1] == "use strict" {
-			p.fail(str.Pos, "Illegal 'use strict' directive in function with non-simple parameter list")
-		}
-	}
+	p.strict = outerStrict
+	p.next()
+	return &BlockStmt{Span: Span{start, p.prevEnd}, Body: body}
 }
 
 func (p *parser) parseParams(fn *Function) {
@@ -1170,6 +1260,9 @@ func (p *parser) finishParams(fn *Function) {
 	if fn.Rest != nil {
 		names = boundNames(fn.Rest, names)
 	}
+	if !p.strict && fn.HasSimpleParams && fn.Kind == FuncNormal {
+		return // sloppy code allows duplicates in a simple parameter list
+	}
 	for i, id := range names {
 		for _, prev := range names[:i] {
 			if prev.Name == id.Name {
@@ -1182,12 +1275,11 @@ func (p *parser) finishParams(fn *Function) {
 // parseArrowBody parses `=> body` for an arrow whose parameters are known.
 func (p *parser) parseArrowBody(start int, params []Pattern, rest Pattern, isAsync, noIn bool) Expr {
 	p.expect(Arrow)
-	fn := &Function{Span: Span{start, 0}, Params: params, Rest: rest, Kind: FuncArrow, IsArrow: true, IsAsync: isAsync, IsStrict: true}
+	fn := &Function{Span: Span{start, 0}, Params: params, Rest: rest, Kind: FuncArrow, IsArrow: true, IsAsync: isAsync, IsStrict: p.strict}
 	p.finishParams(fn)
 	saved := p.enterFunction(fn)
 	if p.tok == LBrace {
-		fn.Body = p.parseBlock()
-		p.checkUseStrict(fn)
+		fn.Body = p.parseFunctionBody(fn, saved.strict)
 	} else {
 		fn.ExprBody = p.parseAssign(noIn)
 	}
@@ -1234,6 +1326,9 @@ func (p *parser) parseClass(requireName bool) *Class {
 	p.enter()
 	defer p.leave()
 	start := p.start
+	// All parts of a class are strict mode code, from its name on.
+	outerStrict := p.strict
+	p.strict = true
 	p.expect(KwClass)
 	c := &Class{}
 	if p.tok == Identifier || p.tok == KwLet {
@@ -1242,7 +1337,6 @@ func (p *parser) parseClass(requireName bool) *Class {
 		p.unexpected()
 	}
 	if p.eat(KwExtends) {
-		p.heritage = p.tok == LParen // an arrow function is not a LeftHandSideExpression
 		c.Super = p.parseLeftHandSide()
 	}
 	p.expect(LBrace)
@@ -1275,6 +1369,7 @@ func (p *parser) parseClass(requireName bool) *Class {
 		}
 		c.Members = append(c.Members, m)
 	}
+	p.strict = outerStrict
 	p.next()
 	c.Span = Span{start, p.prevEnd}
 	return c

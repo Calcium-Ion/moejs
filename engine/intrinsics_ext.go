@@ -53,6 +53,11 @@ type extIntrinsics struct {
 
 	AggregateErrorPrototype, AggregateErrorCtor *Object
 
+	// evalFn is %eval%, nil until the realm defines the eval global: a
+	// CallEval site whose callee is it runs a direct eval (eval.go), and
+	// defines the global first.
+	evalFn *Object
+
 	RegExpStringIteratorPrototype, regexpStringIterNextFn *Object
 	// regexpGuard watches the %RegExp.prototype% properties the RegExp
 	// Symbol protocol reads (regexp_protocol.go).
@@ -91,6 +96,9 @@ func (r *Realm) visitExtIntrinsics(visit func(*Object)) {
 		x.async.AsyncIteratorPrototype, x.async.AsyncFromSyncIteratorPrototype, x.async.asyncFromSyncNext,
 	} {
 		visit(o)
+	}
+	if x.evalFn != nil {
+		visit(x.evalFn)
 	}
 	if p := x.promise; p != nil {
 		visit(p.proto)

@@ -42,7 +42,7 @@ func (f *funcState) fold(e syntax.Expr) (constant, bool) {
 	case *syntax.NullLit:
 		return constant{kind: kNull}, true
 	case *syntax.Ident:
-		if e.Binding == nil {
+		if e.Binding == nil && f.withsFor(nil) == nil {
 			switch e.Name {
 			case "undefined":
 				return constant{kind: kUndefined}, true

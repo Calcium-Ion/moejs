@@ -191,6 +191,22 @@ func (rt *SobekRuntime) Export(raw RawResult) any { return raw.(sobek.Value).Exp
 
 func (rt *SobekRuntime) Close() {}
 
+// RunScript runs source as a script, sloppy unless it starts with a "use
+// strict" directive, and exports its completion value (the corpus programs
+// that test sloppy mode are scripts).
+func (rt *SobekRuntime) RunScript(name, source string) (out any, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			out, err = nil, sobekRecovered(rec)
+		}
+	}()
+	v, err := rt.rt.RunScript(name, source)
+	if err != nil {
+		return nil, wrapSobekError(err)
+	}
+	return v.Export(), nil
+}
+
 func sobekRecovered(rec any) error {
 	switch v := rec.(type) {
 	case *sobek.Exception:

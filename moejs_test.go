@@ -296,8 +296,9 @@ func TestErrors(t *testing.T) {
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, moejs.SyntaxError{File: "bad.js", Line: 1, Column: 18, Message: se.Message}, *se)
 	assert.Equal(t, "bad.js:1:18: SyntaxError: "+se.Message, se.Error())
-	_, err = moejs.Compile("import.js", `import x from "y";`)
-	require.ErrorAs(t, err, &se)
+	imp, err := moejs.Compile("import.js", `import x from "y";`)
+	require.NoError(t, err)
+	assert.EqualError(t, moejs.NewRuntime(moejs.Options{}).Load(imp), `moejs: module "import.js" imports "y": link it with moejs.Link and a resolver`)
 
 	thrower, err := moejs.Compile("thrower.js", `export const a = 1; throw new Error("top level");`)
 	require.NoError(t, err)
@@ -613,14 +614,15 @@ Promise.resolve().then(() => host());
 
 // TestHooksOfAFailedModule checks the exported functions of a module whose
 // top level did not finish: Call and Has refuse them with Load's error once
-// the top level threw or was interrupted, and while it awaits they throw a
-// ReferenceError for the bindings it has not initialized yet, which Export
-// does not find either.
+// the top level threw or was interrupted, and so does Export, which still
+// reads the other bindings initialized before the failure; while it awaits
+// they throw a ReferenceError for the bindings it has not initialized yet,
+// which Export does not find either.
 func TestHooksOfAFailedModule(t *testing.T) {
 	for _, src := range []string{
-		`export function f() { return px.a; } queueMicrotask(host); throw new Error("top"); const px = { a: 1 }; export const z = 3;`,
-		`export function f() { return px.a; } queueMicrotask(host); throw new Error("top"); const px = { a: 1 }; await 0; export const z = 3;`,
-		`export function f() { return px.a; } queueMicrotask(host); stop(); for (;;); const px = { a: 1 }; export const z = 3;`,
+		`export const y = 2; export function f() { return px.a; } queueMicrotask(host); throw new Error("top"); const px = { a: 1 }; export const z = 3;`,
+		`export const y = 2; export function f() { return px.a; } queueMicrotask(host); throw new Error("top"); const px = { a: 1 }; await 0; export const z = 3;`,
+		`export const y = 2; export function f() { return px.a; } queueMicrotask(host); stop(); for (;;); const px = { a: 1 }; export const z = 3;`,
 	} {
 		mod, err := moejs.Compile("failed.js", src)
 		require.NoError(t, err)
@@ -647,7 +649,10 @@ func TestHooksOfAFailedModule(t *testing.T) {
 			assert.Same(t, loadErr, inJob, src)
 		}
 		_, ok = rt.Export("f")
-		assert.True(t, ok, "its bindings stay readable")
+		assert.False(t, ok, "its functions could read px uninitialized")
+		y, ok := rt.Export("y")
+		assert.True(t, ok, "its other bindings stay readable")
+		assert.Equal(t, 2.0, y.AsNumber(), src)
 		_, ok = rt.Export("z")
 		assert.False(t, ok, "but not those left uninitialized")
 	}

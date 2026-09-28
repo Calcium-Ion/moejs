@@ -7,7 +7,8 @@ import (
 
 // stmts compiles a statement list, dropping code after an abrupt completion.
 func (f *funcState) stmts(list []syntax.Stmt) {
-	for _, s := range list {
+	for i, s := range list {
+		f.c.poll(i)
 		f.stmt(s)
 		switch s.(type) {
 		case *syntax.ReturnStmt, *syntax.ThrowStmt, *syntax.BreakStmt, *syntax.ContinueStmt:
@@ -16,13 +17,28 @@ func (f *funcState) stmts(list []syntax.Stmt) {
 	}
 }
 
+// clearCompletion sets a script's completion value to undefined where a
+// statement's completion is UpdateEmpty(C, undefined) (if, the loops,
+// switch, try, catch and with: 14.6.2, 14.7, 14.12.4, 14.15.3, 14.11.2),
+// so that a body with no value of its own yields undefined.
+func (f *funcState) clearCompletion() {
+	if f.completion >= 0 {
+		f.emitA(bytecode.LoadUndef, f.completion)
+	}
+}
+
 func (f *funcState) stmt(s syntax.Stmt) {
 	f.setPosNode(s)
+	switch s.(type) {
+	case *syntax.IfStmt, *syntax.ForStmt, *syntax.ForInOfStmt, *syntax.WhileStmt, *syntax.DoWhileStmt, *syntax.SwitchStmt, *syntax.TryStmt:
+		f.clearCompletion()
+	}
 	switch s := s.(type) {
 	case *syntax.VarDecl:
 		f.varDecl(s)
 	case *syntax.FuncDecl:
 		// Instantiated at scope entry (Scope.Funcs).
+		f.annexBCopy(s)
 	case *syntax.ClassDecl:
 		f.classDecl(s.Class, s.Class.Name.Binding, "")
 	case *syntax.ExprStmt:
@@ -83,18 +99,14 @@ func (f *funcState) stmt(s syntax.Stmt) {
 		f.switchStmt(s)
 	case *syntax.TryStmt:
 		f.tryStmt(s)
+	case *syntax.WithStmt:
+		f.withStmt(s)
 	case *syntax.ExportDecl:
 		f.stmt(s.Decl)
-	case *syntax.ExportNamed:
-		if s.Source != nil {
-			f.c.unsupported(s.Pos, "export ... from")
-		}
+	case *syntax.ExportNamed, *syntax.ExportAll, *syntax.ImportDecl:
+		// bound when the module graph is linked and instantiated
 	case *syntax.ExportDefault:
 		f.exportDefault(s)
-	case *syntax.ExportAll:
-		f.c.unsupported(s.Pos, "export ... from")
-	case *syntax.ImportDecl:
-		f.c.unsupported(s.Pos, "import")
 	default:
 		pos, _ := s.Range()
 		f.c.fail(pos, "internal: unexpected statement node")
@@ -149,13 +161,30 @@ func (f *funcState) varDecl(d *syntax.VarDecl) {
 		}
 		if id, ok := decl.Target.(*syntax.Ident); ok && id.Binding != nil {
 			loc := f.c.locs[id.Binding]
-			if loc.env == nil && !mentions(decl.Init, id.Binding) {
+			if f.withsFor(id.Binding) != nil {
+				// A var declared outside the with statement: its reference
+				// resolves through the with objects before the initializer.
+				r := f.resolveIdent(id)
+				t := f.alloc()
+				f.exprNamed(decl.Init, t, id.Name)
+				f.put(r, t, bindInit)
+			} else if loc.inReg() && !mentions(decl.Init, id.Binding) && (d.Kind != syntax.DeclVar || f.intoReg(decl.Init)) {
 				f.exprNamed(decl.Init, loc.reg, id.Name)
 			} else {
 				t := f.alloc()
 				f.exprNamed(decl.Init, t, id.Name)
 				f.storeLoc(loc, t)
 			}
+			f.free(mark)
+			continue
+		}
+		if id, ok := decl.Target.(*syntax.Ident); ok {
+			// A var of sloppy eval code, declared in its caller's variable
+			// environment: resolved before the initializer runs.
+			r := f.resolveIdent(id)
+			t := f.alloc()
+			f.exprNamed(decl.Init, t, id.Name)
+			f.put(r, t, bindInit)
 			f.free(mark)
 			continue
 		}
@@ -317,6 +346,9 @@ func (f *funcState) forInOf(s *syntax.ForInOfStmt) {
 	mark0 := f.nregs
 	// The loop scope is materialized before the right-hand side so that
 	// references to the loop variable inside it hit the TDZ marker.
+	if d, ok := s.Left.(*syntax.VarDecl); ok && d.Decls[0].Init != nil {
+		f.forInInit(d)
+	}
 	es, mark := f.enterScope(s.Scope)
 	it := f.allocN(4)
 	f.expr(s.Right, it)
@@ -360,6 +392,12 @@ func (f *funcState) forInOf(s *syntax.ForInOfStmt) {
 	switch left := s.Left.(type) {
 	case *syntax.VarDecl:
 		f.bindPattern(left.Decls[0].Target, value, bindInit)
+	case *syntax.CallExpr:
+		if s.Of {
+			f.callTarget(left, "Invalid left-hand side in for-of loop")
+		} else {
+			f.callTarget(left, "Invalid left-hand side in for-in loop")
+		}
 	case syntax.Pattern:
 		f.bindPattern(left, value, bindAssign)
 	}
@@ -499,6 +537,7 @@ func (f *funcState) tryStmt(s *syntax.TryStmt) {
 			Start: uint32(tryStart), End: uint32(tryEnd), Handler: uint32(f.pc()),
 			StackDepth: uint16(tryDepth), Kind: bytecode.HandlerCatch, Reg: uint16(exc),
 		})
+		f.clearCompletion() // the try block's value is discarded
 		es, m := f.enterScope(s.CatchScope)
 		if s.Param != nil {
 			f.setPosNode(s.Param)
@@ -525,7 +564,18 @@ func (f *funcState) tryStmt(s *syntax.TryStmt) {
 	})
 	f.closeGuard()
 	f.bind(fs.body)
+	saved := -1
+	if f.completion >= 0 {
+		// A finally block that completes normally keeps the completion
+		// of the try statement's other blocks.
+		saved = f.alloc()
+		f.emitMove(saved, f.completion)
+		f.clearCompletion()
+	}
 	f.block(s.Finalizer)
+	if saved >= 0 {
+		f.emitMove(f.completion, saved)
+	}
 
 	// Completion dispatch.
 	f.setPos(s.Finalizer.Pos)

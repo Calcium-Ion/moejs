@@ -119,6 +119,7 @@ func TestGoldenUnsupportedShapes(t *testing.T) {
 		{"getters-setters", `x = { get a() { return 1; }, set a(v) {} };`, "(module\n  (= x (object (get a ()\n    (return 1)) (set a (v)))))"},
 		{"new-target-super", `x = { f() { new.target; super.x; } };`, "(module\n  (= x (object (method f ()\n    new.target\n    (. super x)))))"},
 		{"import-meta-call", `import.meta; import("x");`, "(module\n  import.meta\n  (import \"x\"))"},
+		{"new-import-meta", `new import.meta; new import.meta.C(1);`, "(module\n  (new import.meta)\n  (new (. import.meta C) 1))"},
 		{"arguments", `function f() { return arguments; }`, "(module\n  (function f ()\n    (return arguments)))"},
 	}
 	for _, tt := range tests {

@@ -70,7 +70,8 @@ func TestAsyncErrors(t *testing.T) {
 		// Parameters.
 		{true, "async function f(a = 1) { 'use strict'; }", 1, 27, "Illegal 'use strict' directive in function with non-simple parameter list"},
 		{true, "x = async (a, a) => 1;", 1, 15, "Duplicate parameter name not allowed in this context"},
-		{true, "async function f(a, a) {}", 1, 21, "Duplicate parameter name not allowed in this context"},
+		{true, "async function f(a, a) { 'use strict'; }", 1, 21, "Duplicate parameter name not allowed in this context"},
+		{false, "async function f(a, a) {}", 1, 21, "Duplicate parameter name not allowed in this context"},
 		{true, "x = async (...a,) => 1;", 1, 12, "Rest parameter must be last formal parameter"},
 		{true, "x = async (...a = []) => 1;", 1, 12, "Rest parameter may not have a default initializer"},
 		{true, "x = async (a = await => 1) => 1;", 1, 16, "Unexpected reserved word"},

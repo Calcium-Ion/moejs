@@ -103,6 +103,14 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		g.recv, g.state = uint8(a), genSuspendedYield
 		return pc, g.save(regs, pc)
 	default:
+		// The module and sloppy ops follow the async iteration ops: one
+		// range test sends them on without asyncIterOp's hop.
+		if op := bytecode.Op(w); op >= bytecode.ImportCall {
+			if op >= bytecode.SetGlobalSloppy {
+				return r.sloppyOp(fd, base, w, pc)
+			}
+			return r.moduleOp(fd, base, w, pc)
+		}
 		return r.asyncIterOp(fd, base, w, pc)
 	}
 	return pc, nil
@@ -201,7 +209,7 @@ func sharedAsyncIntrinsics() *Intrinsics {
 func installAsyncIntrinsics(r *Realm, ai *asyncIntrinsics) {
 	// %AsyncFunction.prototype%: constructor, @@toStringTag.
 	afp := r.newIntrinsic(ClassObject, r.FunctionPrototype, 2)
-	af := r.newConstructor(AtomAsyncFunction, 1, functionCall, functionConstruct, afp)
+	af := r.newConstructor(AtomAsyncFunction, 1, asyncFunctionCall, asyncFunctionConstruct, afp)
 	af.SetPrototypeOf(r, r.FunctionCtor)
 	r.installOrReplace(afp, StringKey(AtomConstructor), propCell{value: ObjectValue(af), attrs: attrConfigurable})
 	r.installToStringTag(afp, AtomAsyncFunction)
@@ -215,7 +223,7 @@ func installAsyncIntrinsics(r *Realm, ai *asyncIntrinsics) {
 	// throw, @@toStringTag. The links are read-only, as the generator ones.
 	agfp := r.newIntrinsic(ClassObject, r.FunctionPrototype, 3)
 	agp := r.newIntrinsic(ClassObject, aip, 5)
-	agf := r.newConstructor(AtomAsyncGeneratorFunction, 1, functionCall, functionConstruct, agfp)
+	agf := r.newConstructor(AtomAsyncGeneratorFunction, 1, asyncGeneratorFunctionCall, asyncGeneratorFunctionConstruct, agfp)
 	agf.SetPrototypeOf(r, r.FunctionCtor)
 	r.installOrReplace(agfp, StringKey(AtomConstructor), propCell{value: ObjectValue(agf), attrs: attrConfigurable})
 	r.installOrReplace(agfp, StringKey(AtomPrototype), propCell{value: ObjectValue(agp), attrs: attrConfigurable})

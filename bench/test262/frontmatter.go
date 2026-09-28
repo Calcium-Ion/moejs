@@ -45,7 +45,8 @@ func ParseMeta(src string) (*Meta, error) {
 	if end < 0 {
 		return nil, errors.New("unterminated frontmatter")
 	}
-	lines := strings.Split(strings.ReplaceAll(src[start+len("/*---"):start+end], "\r\n", "\n"), "\n")
+	// Any of CRLF, CR and LF ends a line (a few tests use CR alone).
+	lines := strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(src[start+len("/*---"):start+end]), "\n")
 	m := &Meta{}
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]

@@ -30,7 +30,37 @@ func TestFunctionPrototypeShape(t *testing.T) {
 		assert.Equal(t, []string{"length", "name"}, keyNames(o.OwnPropertyKeys()))
 	}
 	_, err := r.Call(ObjectValue(r.FunctionCtor), Undefined(), []Value{str("return 1")})
-	assert.EqualError(t, err, "TypeError: new Function is not supported yet (see TODO.md)")
+	assert.EqualError(t, err, "EvalError: code generation from strings is not available: no compiler is installed (engine.SetCompiler)")
+}
+
+// TestDynamicSourceRopeOverLimit: a rope of more code units than
+// MaxDynamicSource is refused by that count before it is converted. It stays
+// a rope: counting its UTF-8 bytes first would flatten it, a copy of the
+// whole string per call.
+func TestDynamicSourceRopeOverLimit(t *testing.T) {
+	r := NewRealm()
+	for _, unit := range []string{"x", "é"} {
+		s := FromGoString(unit)
+		for s.Len() < 1<<24 {
+			s = concat(s, s)
+		}
+		for _, c := range []struct {
+			name string
+			fn   Value
+			args []Value
+			want int
+		}{
+			{"eval", jsGlobal(t, r, "eval"), []Value{StringValue(s)}, 1 << 24},
+			{"Function", ObjectValue(r.FunctionCtor), []Value{str("a"), StringValue(s)}, 1<<24 + 1},
+		} {
+			t.Run(unit+"/"+c.name, func(t *testing.T) {
+				_, err := r.Call(c.fn, Undefined(), c.args)
+				assert.EqualError(t, err, fmt.Sprintf("RangeError: Source text of %d code units is longer than the %d bytes this realm compiles at run time (MaxDynamicSource)", c.want, DefaultMaxDynamicSource))
+				assert.Equal(t, strRope, s.kind, "not flattened")
+				assert.NotNil(t, s.left)
+			})
+		}
+	}
 }
 
 // recorder returns a native that records this and args and returns marker.

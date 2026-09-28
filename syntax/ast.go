@@ -44,17 +44,31 @@ type Program struct {
 // Module is a parsed ES module.
 type Module struct {
 	Program
-	// Exports lists every export entry in source order. Filled by the scope
-	// pass; Binding is the module-scope binding the export reads.
+	// Exports lists every local export entry in source order. Filled by the
+	// scope pass; Binding is the module-scope binding the export reads.
 	Exports []*ExportEntry
+	// Requests lists the specifiers of the modules this module requests,
+	// each once, in source order. Imports, Reexports and Stars refer to
+	// them by index. All four are filled by the scope pass and are empty
+	// for a module without import declarations or export ... from.
+	Requests  []*ModuleRequest
+	Imports   []*ImportEntry
+	Reexports []*ReexportEntry
+	Stars     []*StarExport
 	// Async is set by the scope pass when the body awaits outside any
 	// function (top-level await): the module evaluates asynchronously.
-	Async bool
+	// HasDirectEval is set by the scope pass when a direct eval call
+	// appears in the module's code, at any depth.
+	Async, HasDirectEval bool
 }
 
-// Script is a parsed strict-mode script.
+// Script is a parsed script. Strict is set when its directive prologue
+// holds a "use strict" directive; otherwise it is sloppy-mode code.
+// HasDirectEval is set by the scope pass when a direct eval call appears
+// in the script's code, at any depth.
 type Script struct {
 	Program
+	Strict, HasDirectEval bool
 }
 
 // ExportEntry describes one exported name of a module.
@@ -63,6 +77,39 @@ type ExportEntry struct {
 	Local   string   // local binding name ("*default*" for an anonymous default export)
 	Binding *Binding // module-scope binding
 	Pos     int      // position of the export specifier or declaration
+}
+
+// ModuleRequest is a requested module specifier.
+type ModuleRequest struct {
+	Specifier string // WTF-8 value of the string literal
+	Pos       int    // position of its first occurrence
+}
+
+// ImportEntry binds a local name to an export of a requested module.
+type ImportEntry struct {
+	Request   int      // index in Module.Requests
+	Name      string   // imported export name (unset for a namespace import)
+	Namespace bool     // import * as Local: the binding is the module namespace object
+	Binding   *Binding // local binding (BindImport, or BindImportNS for a namespace import)
+	Pos       int      // position of the import specifier
+}
+
+// ReexportEntry exports a name of a requested module without a local
+// binding: export {x as y} from, export * as y from (All), and export {y}
+// of an import binding (All for a namespace import).
+type ReexportEntry struct {
+	Name    string // exported name
+	Request int    // index in Module.Requests
+	Import  string // imported export name (unset when All)
+	All     bool   // export * as Name from: the requested module's namespace object
+	Pos     int
+}
+
+// StarExport is export * from: every name of the requested module except
+// default.
+type StarExport struct {
+	Request int // index in Module.Requests
+	Pos     int
 }
 
 // Export returns the binding exported under name, or nil.
@@ -106,10 +153,10 @@ type NewTarget struct {
 	Binding *Binding
 }
 
-// ImportMeta is `import.meta` (not supported yet).
+// ImportMeta is `import.meta`, only in module code.
 type ImportMeta struct{ Span }
 
-// ImportCall is a dynamic `import(x)` (not supported yet).
+// ImportCall is a dynamic `import(x)`.
 type ImportCall struct {
 	Span
 	Source Expr
@@ -260,14 +307,14 @@ type Function struct {
 	IsArrow     bool
 	IsAsync     bool
 	IsGenerator bool
-	IsStrict    bool // always true (strict mode only)
+	IsStrict    bool // strict mode code: a class member, inside strict code, or with its own "use strict"
 
 	// Scope annotations.
 	Scope           *Scope // parameters, var declarations and body-level lexical declarations (Body.Scope when kept apart)
 	SelfBinding     *Binding
 	UsesThis        bool // `this` (or super/new.target) appears in the body or in a nested arrow
 	UsesArguments   bool // `arguments` appears in the body or in a nested arrow
-	HasDirectEval   bool // a call to an unresolved `eval` appears (unsupported)
+	HasDirectEval   bool // a direct eval call appears in the function or a function nested in it
 	ParamCount      int  // formal parameters excluding rest
 	Length          int  // ES `length`: formals before the first default or rest
 	HasSimpleParams bool // every formal is a plain identifier without default; no rest
@@ -341,12 +388,13 @@ type UnaryExpr struct {
 	X  Expr
 }
 
-// UpdateExpr is ++ or -- in prefix or postfix form.
+// UpdateExpr is ++ or -- in prefix or postfix form. X is *Ident,
+// *MemberExpr or a sloppy *CallExpr (which throws after the call).
 type UpdateExpr struct {
 	Span
 	Op     Token // Inc or Dec
 	Prefix bool
-	X      Expr // *Ident or *MemberExpr
+	X      Expr
 }
 
 // BinaryExpr is an arithmetic, bitwise, comparison, `in` or `instanceof`
@@ -367,6 +415,7 @@ type LogicalExpr struct {
 }
 
 // AssignExpr is `=` or a compound assignment. Target is *Ident, *MemberExpr,
+// a sloppy *CallExpr (not for logical assignment; it throws after the call)
 // or (for `=` only) a destructuring pattern.
 type AssignExpr struct {
 	Span
@@ -565,8 +614,9 @@ type ForStmt struct {
 }
 
 // ForInOfStmt is for-in (Of == false) or for-of. Left is a *VarDecl with a
-// single initializer-less declarator, or a Pattern. Scope is nil unless Left
-// is a let/const declaration.
+// single declarator, or a Pattern. The declarator has no initializer, except
+// a sloppy `for (var x = init in o)` (Annex B). Scope is nil unless Left is
+// a let/const declaration.
 type ForInOfStmt struct {
 	Span
 	Of    bool
@@ -613,6 +663,15 @@ type BreakStmt struct {
 type ContinueStmt struct {
 	Span
 	Label *Ident
+}
+
+// WithStmt is `with (Object) Body` (sloppy code only). Scope holds the
+// hidden binding of the object environment the body's names consult.
+type WithStmt struct {
+	Span
+	Object Expr
+	Body   Stmt
+	Scope  *Scope
 }
 
 // LabeledStmt is `Label: Body`.
@@ -662,7 +721,7 @@ type ExportSpec struct {
 	Exported *Ident
 }
 
-// ExportNamed is `export { ... }` optionally `from "..."` (unsupported).
+// ExportNamed is `export { ... }` optionally `from "..."`.
 type ExportNamed struct {
 	Span
 	Specs  []*ExportSpec
@@ -676,7 +735,7 @@ type ExportDefault struct {
 	Decl Node
 }
 
-// ExportAll is `export * [as x] from "..."` (unsupported).
+// ExportAll is `export * [as x] from "..."`.
 type ExportAll struct {
 	Span
 	As     *Ident
@@ -690,7 +749,7 @@ type ImportSpec struct {
 	Local    *Ident
 }
 
-// ImportDecl is an import declaration (unsupported).
+// ImportDecl is an import declaration.
 type ImportDecl struct {
 	Span
 	Default   *Ident
@@ -737,6 +796,7 @@ func (*AwaitExpr) exprNode()      {}
 
 func (*Ident) patternNode()         {}
 func (*MemberExpr) patternNode()    {}
+func (*CallExpr) patternNode()      {} // a sloppy assignment target that throws (Annex B)
 func (*ObjectPattern) patternNode() {}
 func (*ArrayPattern) patternNode()  {}
 func (*AssignPattern) patternNode() {}
@@ -758,6 +818,7 @@ func (*ThrowStmt) stmtNode()     {}
 func (*BreakStmt) stmtNode()     {}
 func (*ContinueStmt) stmtNode()  {}
 func (*LabeledStmt) stmtNode()   {}
+func (*WithStmt) stmtNode()      {}
 func (*SwitchStmt) stmtNode()    {}
 func (*TryStmt) stmtNode()       {}
 func (*ExportDecl) stmtNode()    {}

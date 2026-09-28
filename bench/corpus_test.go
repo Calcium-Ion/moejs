@@ -42,7 +42,10 @@ func corpusFiles(t *testing.T) []string {
 }
 
 // TestCorpusAgainstSobek evaluates every bench/corpus/*.js program on Sobek
-// (oracle) and on moejs and compares the exported results.
+// (oracle) and on moejs and compares the exported results. A program whose
+// first line is "// script" is a script, not a module: sloppy unless it
+// starts with a "use strict" directive, with its completion value as the
+// result instead of run(arg).
 func TestCorpusAgainstSobek(t *testing.T) {
 	oracle := engines.NewSobekEngine()
 	subjects := []engines.Engine{engines.NewMoejsEngine()}
@@ -97,6 +100,9 @@ Object.defineProperty(Promise, "withResolvers", {writable: true, configurable: t
 // run returns is compared as {state, value} once the call has drained the
 // job queue.
 func runCorpus(t *testing.T, e engines.Engine, name, src string) any {
+	if strings.HasPrefix(src, "// script\n") {
+		return runCorpusScript(t, e, name, src)
+	}
 	mod, err := e.Compile(name+".js", src)
 	if err != nil {
 		return map[string]any{"compileError": err.Error()}
@@ -112,6 +118,29 @@ func runCorpus(t *testing.T, e engines.Engine, name, src string) any {
 		return map[string]any{"instantiateError": err.Error()}
 	}
 	out, err := rt.Call("run", nil, corpusArg())
+	return corpusResult(t, out, err)
+}
+
+// scriptRunner is an engine runtime that runs scripts.
+type scriptRunner interface {
+	RunScript(name, source string) (any, error)
+}
+
+// runCorpusScript returns the normalized completion value of a script
+// program, or a map describing its error.
+func runCorpusScript(t *testing.T, e engines.Engine, name, src string) any {
+	rt, err := e.NewRuntime()
+	require.NoError(t, err)
+	defer rt.Close()
+	sr, ok := rt.(scriptRunner)
+	require.True(t, ok, "%s runs no scripts", e.Name())
+	out, err := sr.RunScript(name+".js", src)
+	return corpusResult(t, out, err)
+}
+
+// corpusResult normalizes a program's result, or describes its error so that
+// engines are also compared on failures.
+func corpusResult(t *testing.T, out any, err error) any {
 	if err != nil {
 		if he, ok := engines.AsHookError(err); ok {
 			return map[string]any{"thrown": he.Name + ": " + he.Message}

@@ -290,7 +290,7 @@ func (c *cloner) clone(v Value) (Value, error) {
 		}
 	case ClassObject:
 		switch o.Internal().(type) { // Internal hides a host map node's Go map
-		case nil, *lazyProps, *lazyKeys, *Realm: // deferred properties, not a payload
+		case nil, *lazyProps, *lazyKeys, *pendingCompile, *Realm: // deferred properties, not a payload
 		default:
 			return Undefined(), c.uncloneable(v)
 		}

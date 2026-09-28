@@ -17,7 +17,7 @@ func (f *funcState) bindPattern(pat syntax.Pattern, src int, mode bindMode) {
 		mark := f.nregs
 		if isSuper(p) {
 			b := f.allocN(2)
-			f.emitABC(bytecode.SetSuper, b, f.superRef(p, b), src)
+			f.emitABC(f.setSuperOp(), b, f.superRef(p, b), src)
 			f.free(mark)
 			return
 		}
@@ -72,6 +72,10 @@ func (f *funcState) objectPattern(p *syntax.ObjectPattern, src int, mode bindMod
 		if prop.Computed {
 			k = f.alloc()
 			f.expr(prop.Key, k)
+			if f.isRefTarget(prop.Value) {
+				// The target's evaluation may run code: ToPropertyKey first.
+				f.emitAB(bytecode.ToPropertyKey, k, k)
+			}
 		} else if name = f.literalKeyName(prop.Key); isArrayIndexName(name) || excl >= 0 {
 			k = f.alloc()
 			f.emitABx(bytecode.LoadConst, k, f.stringConst(name))
@@ -86,7 +90,7 @@ func (f *funcState) objectPattern(p *syntax.ObjectPattern, src int, mode bindMod
 			f.emitAB(bytecode.ArrayPush, excl, k)
 		}
 		if isRef {
-			f.storeTarget(target, v)
+			f.storeTarget(target, v, mode)
 		} else {
 			f.bindPattern(prop.Value, v, mode)
 		}
@@ -98,7 +102,7 @@ func (f *funcState) objectPattern(p *syntax.ObjectPattern, src int, mode bindMod
 		f.emitABx(bytecode.NewObject, r, 0)
 		f.emitABC(bytecode.CopyDataPropsEx, r, src, excl)
 		if isRef {
-			f.storeTarget(target, r)
+			f.storeTarget(target, r, mode)
 		} else {
 			f.bindPattern(p.Rest, r, mode)
 		}
@@ -133,7 +137,7 @@ func (f *funcState) arrayPattern(p *syntax.ArrayPattern, src int, mode bindMode)
 		target, isRef := f.prepareTarget(el)
 		f.emitAB(bytecode.IterValue, it, it+2)
 		if isRef {
-			f.storeTarget(target, it+2)
+			f.storeTarget(target, it+2, mode)
 		} else {
 			f.bindPattern(el, it+2, mode)
 		}
@@ -144,7 +148,7 @@ func (f *funcState) arrayPattern(p *syntax.ArrayPattern, src int, mode bindMode)
 		r := f.alloc()
 		f.emitAB(bytecode.IterRest, it, r)
 		if isRef {
-			f.storeTarget(target, r)
+			f.storeTarget(target, r, mode)
 		} else {
 			f.bindPattern(p.Rest, r, mode)
 		}
@@ -162,29 +166,51 @@ func (f *funcState) arrayPattern(p *syntax.ArrayPattern, src int, mode bindMode)
 	f.emitAB(bytecode.IterThrow, it, it+2)
 }
 
-// memberTarget is a member-expression assignment target whose reference
-// (object and computed key) has been evaluated ahead of the source read, as
-// the spec's destructuring assignment does; def is its default, if any.
+// memberTarget is a destructuring target whose reference has been
+// evaluated ahead of the source read, as the spec's destructuring does: a
+// member expression (object and computed key), or an identifier a with
+// statement may intercept (id, m nil); def is its default, if any.
 type memberTarget struct {
 	m        *syntax.MemberExpr
 	obj, key int
+	id       identRef
 	def      syntax.Expr
 }
 
-// prepareTarget evaluates the reference of a member-expression target (with
-// or without a default) into fresh registers: the source read that follows
+// isRefTarget reports whether prepareTarget evaluates the reference of
+// target pat ahead of the source read.
+func (f *funcState) isRefTarget(pat syntax.Pattern) bool {
+	if ap, ok := pat.(*syntax.AssignPattern); ok {
+		pat = ap.Target
+	}
+	switch p := pat.(type) {
+	case *syntax.MemberExpr:
+		return true
+	case *syntax.Ident:
+		return f.withsFor(p.Binding) != nil
+	}
+	return false
+}
+
+// prepareTarget evaluates the reference of a member-expression target, or
+// resolves an identifier target through the enclosing with statements (with
+// or without a default), into fresh registers: the source read that follows
 // may run user code that reassigns the locals the target names, so nothing
 // is aliased. ok is false for every other target, which bindPattern stores
 // after the read.
 func (f *funcState) prepareTarget(pat syntax.Pattern) (memberTarget, bool) {
 	var t memberTarget
+	if !f.isRefTarget(pat) {
+		return t, false
+	}
 	if ap, ok := pat.(*syntax.AssignPattern); ok {
 		t.def = ap.Default
 		pat = ap.Target
 	}
 	m, ok := pat.(*syntax.MemberExpr)
 	if !ok {
-		return t, false
+		t.id = f.resolveIdent(pat.(*syntax.Ident))
+		return t, true
 	}
 	t.m = m
 	if isSuper(m) {
@@ -204,15 +230,23 @@ func (f *funcState) prepareTarget(pat syntax.Pattern) (memberTarget, bool) {
 
 // storeTarget applies the default and stores register v through a prepared
 // target.
-func (f *funcState) storeTarget(t memberTarget, v int) {
+func (f *funcState) storeTarget(t memberTarget, v int, mode bindMode) {
 	if t.def != nil {
 		skip := f.newLabel()
 		f.emitJump(bytecode.JmpNotUndef, v, skip)
-		f.expr(t.def, v)
+		if t.m == nil {
+			f.exprNamed(t.def, v, t.id.id.Name)
+		} else {
+			f.expr(t.def, v)
+		}
 		f.bind(skip)
 	}
+	if t.m == nil {
+		f.put(t.id, v, mode)
+		return
+	}
 	if isSuper(t.m) {
-		f.emitABC(bytecode.SetSuper, t.obj, t.key, v)
+		f.emitABC(f.setSuperOp(), t.obj, t.key, v)
 		return
 	}
 	f.emitSet(t.obj, t.key, v, t.m)

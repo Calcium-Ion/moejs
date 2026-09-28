@@ -148,11 +148,19 @@ func (r *Realm) setNamedSlow(o *Object, key PropertyKey, v Value, e *ICEntry) er
 	if err := o.SetProp(r, key, v); err != nil {
 		return err
 	}
+	r.fillSetIC(e, o, key)
+	return nil
+}
+
+// fillSetIC records where a successful [[Set]] of key on o wrote, if the
+// location is cacheable: an own writable data property of a shape-mode
+// object, or a setter, own or inherited.
+func (r *Realm) fillSetIC(e *ICEntry, o *Object, key PropertyKey) {
 	if o.flags&(flagDict|flagShared) != 0 || key.IsIndex() || o.flags&flagHasLazy != 0 && o.lazyPending(key) {
-		return nil
+		return
 	}
 	if key == lengthKey && (o.class == ClassArray || o.class == ClassString) {
-		return nil
+		return
 	}
 	slot, attrs, ok := o.shape.Lookup(key)
 	if !ok || attrs&attrAccessor != 0 {
@@ -162,20 +170,23 @@ func (r *Realm) setNamedSlow(o *Object, key PropertyKey, v Value, e *ICEntry) er
 		if t.Epoch&1 != 0 && t.Holder(o).slots[t.Slot()].asAccessor().Set != nil {
 			*e = t
 		}
-		return nil
+		return
 	}
 	if attrs&attrWritable == 0 {
-		return nil
+		return
 	}
 	*e = newICEntry(o.shape, r.protoEpoch, slot, 0)
-	return nil
 }
 
-// getGlobalSlow resolves an identifier against the global object.
+// getGlobalSlow resolves an identifier against the global environment: the
+// global lexical bindings of scripts, then the global object.
 func (r *Realm) getGlobalSlow(key PropertyKey, e *ICEntry, orUndef bool) (Value, error) {
 	g := r.Global
 	if a := r.accessorIC(e, g); a != nil {
 		return r.callGetter(a, ObjectValue(g))
+	}
+	if l, i := r.globalLexical(key, e); l != nil {
+		return l.get(r, key, i)
 	}
 	if has, err := r.hasProperty(g, key); err != nil {
 		return Undefined(), err
@@ -196,6 +207,9 @@ func (r *Realm) setGlobalSlow(key PropertyKey, v Value, e *ICEntry) error {
 	g := r.Global
 	if a := r.accessorIC(e, g); a != nil {
 		return r.callSetter(a, ObjectValue(g), key, v)
+	}
+	if l, i := r.globalLexical(key, e); l != nil {
+		return l.set(r, key, i, v)
 	}
 	if has, err := r.hasProperty(g, key); err != nil {
 		return err

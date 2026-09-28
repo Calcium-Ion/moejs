@@ -173,6 +173,19 @@ func (s *String) GoString() string {
 	return utf16ToGoString(s.u)
 }
 
+// wtf8 is GoString with lone surrogates encoded as WTF-8 three-byte
+// sequences instead of U+FFFD: the source text of dynamic code, whose
+// literals keep them (fromWTF8Text).
+func (s *String) wtf8() string {
+	if s.kind == strRope {
+		s.flatten()
+	}
+	if s.kind == strASCII {
+		return s.s
+	}
+	return wtf8FromUTF16(s.u)
+}
+
 func utf16ToGoString(u []uint16) string {
 	var b strings.Builder
 	b.Grow(len(u) + len(u)/2)

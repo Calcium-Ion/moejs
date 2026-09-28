@@ -63,6 +63,9 @@ func TestICCensus(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if strings.HasPrefix(string(src), "// script\n") {
+					continue // a script has no run to call again
+				}
 				name := strings.TrimSuffix(filepath.Base(file), ".js")
 				mod, err := e.Compile(name+".js", string(src))
 				if err != nil {

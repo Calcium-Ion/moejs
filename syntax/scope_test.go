@@ -124,6 +124,24 @@ func TestScopeTDZ(t *testing.T) {
 			assert.Equal(t, tt.want, b.NeedsTDZ)
 		})
 	}
+	// With EarlyExports, or imports, the exports read early from the start:
+	// a module of an import cycle may call them before the body runs.
+	for _, tt := range []struct {
+		src  string
+		opts Options
+		want bool
+	}{
+		{"let m = 1; export function f() { m; }", Options{EarlyExports: true}, true},
+		{"let m = 1; export function f() { g(); } function g() { m; }", Options{EarlyExports: true}, true},
+		{"let m = 1; function f() { m; }", Options{EarlyExports: true}, false},
+		{"let m = 1; export const f = () => m;", Options{EarlyExports: true}, false},
+		{"let m = 1; export function f() { m; }", Options{}, false},
+		{"import 'x'; let m = 1; export function f() { m; }", Options{}, true},
+	} {
+		m, err := ParseModule("t.js", tt.src, tt.opts)
+		require.NoError(t, err)
+		assert.Equal(t, tt.want, m.Scope.Lookup("m").NeedsTDZ, tt.src)
+	}
 	// var, param and function bindings never need TDZ checks.
 	m := parseModule(t, "v; var v = 1; function f(p) { p; f; }")
 	assert.False(t, m.Scope.Lookup("v").NeedsTDZ)

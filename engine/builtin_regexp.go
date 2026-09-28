@@ -34,6 +34,11 @@ type RegExpData struct {
 	source *String // [[OriginalSource]]
 	flags  *String // [[OriginalFlags]] in canonical "dgimsuvy" order
 	c      *compiledRegExp
+	// legacy is [[Realm]] when [[LegacyFeaturesEnabled]] (the object was
+	// created by %RegExp% itself or a literal, not a subclass), else nil:
+	// RegExp.prototype.compile (regexp_legacy.go) accepts only an object
+	// whose legacy is the calling realm.
+	legacy *Realm
 }
 
 // Source returns the pattern text ([[OriginalSource]]).
@@ -608,12 +613,49 @@ func (r *Realm) setRegExpLastIndex(rx *Object, v int) error {
 	return rx.SetProp(r, lastIndexKey, IntValue(v))
 }
 
+// errRecompiled is execLastIndex's report that reading lastIndex recompiled
+// the RegExp.
+var errRecompiled = errors.New("engine: RegExp recompiled by lastIndex")
+
+// execLastIndex is regexpLastIndex for RegExpBuiltinExec, which reads the
+// flags and matcher after lastIndex: when the ToLength of a lastIndex that
+// is not a number recompiles rx (RegExp.prototype.compile from valueOf),
+// it returns the index it read and errRecompiled, and d.c is the new
+// program. A number, the lastIndex of every RegExp that has not been given
+// another, runs no user code.
+func (r *Realm) execLastIndex(rx *Object, d *RegExpData) (int64, error) {
+	if p, attrs, ok := rx.lookupNamed(lastIndexKey); ok && attrs&attrAccessor == 0 && p.IsNumber() {
+		if f := p.AsNumber(); f >= 0 && f < maxSafeInteger {
+			return int64(f), nil
+		}
+	}
+	c := d.c
+	n, err := r.regexpLastIndex(rx)
+	if err == nil && d.c != c {
+		err = errRecompiled
+	}
+	return n, err
+}
+
+// lastIndexIsNumber reports whether rx's lastIndex is its own data property
+// holding a number: coercing it runs no user code, so a path that ignores
+// its value may skip it.
+func lastIndexIsNumber(rx *Object) bool {
+	p, attrs, ok := rx.lookupNamed(lastIndexKey)
+	return ok && attrs&attrAccessor == 0 && p.IsNumber()
+}
+
 // regexpBuiltinExec implements RegExpBuiltinExec, returning capture indices
-// in code units (nil for no match). lastIndex is read and updated per spec.
+// in code units (nil for no match). lastIndex is read and updated per spec,
+// then the flags and matcher of d, which reading lastIndex may have changed:
+// sub, initialized for the program before, is then initialized again.
 func (r *Realm) regexpBuiltinExec(rx *Object, d *RegExpData, s *String, sub *reSubject) ([]int, error) {
-	lastIndex, err := r.regexpLastIndex(rx)
+	lastIndex, err := r.execLastIndex(rx, d)
 	if err != nil {
-		return nil, err
+		if err != errRecompiled {
+			return nil, err
+		}
+		r.initRegExpSubject(sub, s, d.c)
 	}
 	global, sticky := d.c.flags.global, d.c.flags.sticky
 	if !global && !sticky {
@@ -701,7 +743,7 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 	}
 	groups := Undefined()
 	if d.c.tr.hasNames {
-		groups = ObjectValue(r.regexpGroups(d, items))
+		groups = ObjectValue(r.regexpGroups(d.c, items))
 	}
 	if !d.c.flags.hasIndices {
 		if st.execShape == nil {
@@ -739,7 +781,7 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 	indices.shape = st.indicesShape
 	indexGroups := Undefined()
 	if d.c.tr.hasNames {
-		indexGroups = ObjectValue(r.regexpGroups(d, pairs))
+		indexGroups = ObjectValue(r.regexpGroups(d.c, pairs))
 	}
 	indices.slots = []Value{indexGroups}
 	if st.execShapeIndices == nil {
@@ -758,15 +800,15 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 // A name shared by several groups (only one of which can participate) is one
 // property, in the position of its first group, with the value of the group
 // that participated.
-func (r *Realm) regexpGroups(d *RegExpData, values []Value) *Object {
-	names := d.c.tr.names
+func (r *Realm) regexpGroups(c *compiledRegExp, values []Value) *Object {
+	names := c.tr.names
 	g := r.NewObjectWithProto(nil)
 	for i := 1; i < len(names); i++ {
 		if names[i] == "" {
 			continue
 		}
 		v := values[i]
-		if d.c.tr.dupNames {
+		if c.tr.dupNames {
 			if slices.Contains(names[1:i], names[i]) {
 				continue
 			}
@@ -816,7 +858,7 @@ func (r *Realm) regexpCreate(proto *Object, pattern *String, flagsText *String, 
 	o.flags = flagExtensible
 	o.slots = ro.slot[:1]
 	o.slots[0] = IntValue(0)
-	ro.data = RegExpData{source: pattern, flags: flagsText, c: c}
+	ro.data = RegExpData{source: pattern, flags: flagsText, c: c, legacy: r}
 	o.internal = &ro.data
 	return o, nil
 }
@@ -918,6 +960,9 @@ func regexpNew(r *Realm, args []Value, newTarget *Object) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
+	if newTarget != r.RegExpCtor {
+		o.internal.(*RegExpData).legacy = nil // a subclass instance: no compile
+	}
 	return ObjectValue(o), nil
 }
 
@@ -956,10 +1001,15 @@ func installRegExp(r *Realm) {
 	fd.SetNative(regexpCall)
 	fd.SetConstructor(regexpConstruct)
 	r.RegExpCtor.ReserveSlots(r, 1) // @@species (installSpecies)
-	r.RegExpPrototype.ReserveSlots(r, len(regexpProtoMethods)+len(regexpProtoGetters)+len(regexpSymbolMethods))
+	n := len(regexpProtoMethods) + len(regexpProtoGetters) + len(regexpSymbolMethods)
+	if r.buildingShared {
+		n++ // compile
+	}
+	r.RegExpPrototype.ReserveSlots(r, n)
 	r.installBuiltins(r.RegExpPrototype, regexpProtoMethods)
 	r.installGetters(r.RegExpPrototype, regexpProtoGetters)
 	installRegExpProtocol(r)
+	installRegExpCompile(r)
 }
 
 // RegExpExec runs RegExpBuiltinExec on rx with subject s and returns the
@@ -1018,12 +1068,10 @@ func regexpProtoTest(r *Realm, this Value, args []Value) (Value, error) {
 			return Bool(!res.IsNull()), nil
 		}
 	}
-	if !d.c.flags.global && !d.c.flags.sticky {
-		// lastIndex is never written, but RegExpBuiltinExec still coerces it
-		// (a throwing valueOf is observable); then a plain match suffices.
-		if _, err := r.regexpLastIndex(rx); err != nil {
-			return Undefined(), err
-		}
+	if !d.c.flags.global && !d.c.flags.sticky && lastIndexIsNumber(rx) {
+		// lastIndex is neither written nor used, and coercing a number is
+		// unobservable (any other value, whose valueOf may throw or even
+		// recompile rx, takes RegExpBuiltinExec); a plain match suffices.
 		if d.c.simple != nil {
 			_, _, ok := d.c.simple.find(s, 0)
 			return Bool(ok), nil
@@ -1345,13 +1393,14 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 			return Undefined(), err
 		}
 	}
-	if d.c.simple != nil && !d.c.flags.sticky {
+	global := d.c.flags.global
+	if d.c.simple != nil && !d.c.flags.sticky && (global || lastIndexIsNumber(rx)) {
 		return r.simpleReplace(rx, d, s, replaceValue, tmpl)
 	}
 	var sub reSubject
 	r.initRegExpSubject(&sub, s, d.c)
 	var matches [][]int
-	if d.c.flags.global {
+	if global {
 		if err := r.setRegExpLastIndex(rx, 0); err != nil {
 			return Undefined(), err
 		}
@@ -1380,17 +1429,19 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 	if len(matches) == 0 {
 		return StringValue(s), nil
 	}
-	if d.c.flags.global {
+	if global {
 		for _, m := range matches {
 			sub.toUnits(m)
 		}
 	}
-	ngroups := d.c.ngroups()
+	// The program that found the matches: a replacer may recompile rx.
+	c := d.c
+	ngroups := c.ngroups()
 	var sb StringBuilder
 	sb.growFor(s, s.Len()+16)
 	next := 0
 	var captures []Value
-	if functional || ngroups > 0 || d.c.tr.hasNames {
+	if functional || ngroups > 0 || c.tr.hasNames {
 		captures = make([]Value, ngroups+1)
 	}
 	for _, m := range matches {
@@ -1406,8 +1457,8 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 			}
 		}
 		namedCaptures := Undefined()
-		if d.c.tr.hasNames {
-			namedCaptures = ObjectValue(r.regexpGroups(d, captures))
+		if c.tr.hasNames {
+			namedCaptures = ObjectValue(r.regexpGroups(c, captures))
 		}
 		if position >= next {
 			writeSlice(&sb, s, next, position)
@@ -1460,15 +1511,17 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 // subject's storage kind, so `str.replace(/\s+/g, " ")` allocates the
 // result and nothing else.
 func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue Value, tmpl *String) (Value, error) {
-	global := d.c.flags.global
+	// A non-global rx comes with a numeric lastIndex (regexpReplace), which
+	// RegExpBuiltinExec coerces unobservably and ignores. The spec finds
+	// every match before the first replacer call, which may recompile rx:
+	// the loop keeps the matcher it started with.
+	simple, global := d.c.simple, d.c.flags.global
 	if global {
 		if err := r.setRegExpLastIndex(rx, 0); err != nil {
 			return Undefined(), err
 		}
-	} else if _, err := r.regexpLastIndex(rx); err != nil {
-		return Undefined(), err // RegExpBuiltinExec coerces lastIndex even when it ignores it
 	}
-	start, end, ok := d.c.simple.find(s, 0)
+	start, end, ok := simple.find(s, 0)
 	if !ok {
 		return StringValue(s), nil
 	}
@@ -1497,7 +1550,7 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 		if !global {
 			break
 		}
-		if start, end, ok = d.c.simple.find(s, end); !ok {
+		if start, end, ok = simple.find(s, end); !ok {
 			break
 		}
 		if n&1023 == 1023 {

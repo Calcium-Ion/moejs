@@ -210,6 +210,16 @@ func TestObjectLiteralAccessors(t *testing.T) {
 		{`var log = []; var o = { [(log.push("k1"), "a")]: log.push("v1"), get [(log.push("k2"), "b")]() {}, c: log.push("v3") }; return log;`,
 			`["k1","v1","k2","v3"]`},
 		{`var o = { get [{ toString: function () { throw new EvalError("key"); } }]() {} };`, `throws EvalError: key`},
+		// A computed data key is converted before its value is evaluated,
+		// and names an anonymous class value.
+		{`var log = []; var k = { toString: function () { log.push("key"); return "p"; } };
+		  var o = { [k]: (log.push("value"), 1), [k]: class extends (log.push("heritage"), Object) {}, [k]: 3 };
+		  return [o.p, log];`, `[3,["key","value","key","heritage","key"]]`},
+		{`var v = "bad"; var o = { [{ toString: function () { v = "ok"; return "p"; } }]: v }; return o.p;`, `"ok"`},
+		{`var s = Symbol("d"), a = Symbol(); var o = { [s]: class {}, [a]: class {}, ["c" + 1]: class {}, [s + "x"]: 1 };`,
+			`throws TypeError: Cannot convert a Symbol value to a string`},
+		{`var s = Symbol("d"), a = Symbol(); var o = { [s]: class {}, [a]: class {}, ["c" + 1]: class {}, [1]: class { static name = "own"; }, [2]: class C {} };
+		  return [o[s].name, o[a].name, o.c1.name, o[1].name, o[2].name];`, `["[d]","","c1","own","C"]`},
 		// Receivers.
 		{`var p = { get me() { return this; } }; var o = Object.create(p); return [p.me === p, o.me === o];`, `[true,true]`},
 		{`var p = { set x(v) { this._x = v; } }; var o = Object.create(p); o.x = 3; return [o._x, p._x, o.hasOwnProperty("x")];`,

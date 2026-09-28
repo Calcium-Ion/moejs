@@ -1211,7 +1211,12 @@ func (p *reParser) classAtom() (r rune, set Set, isSet bool, err error) {
 		p.pos++
 		return 'B', nil, false, nil
 	}
-	if e == 'k' && !p.u && !p.hasNamed {
+	if e == 'k' && !p.u {
+		// Annex B's IdentityEscape excludes k in a pattern with a group
+		// name (SourceCharacterIdentityEscape[+NamedCaptureGroups]).
+		if p.hasNamed {
+			return 0, nil, false, &Error{"Invalid escape"}
+		}
 		p.pos++
 		return 'k', nil, false, nil
 	}

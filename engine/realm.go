@@ -48,6 +48,29 @@ type RealmOptions struct {
 	// TimeZone is the local time zone of Date; nil means time.Local. It can
 	// be changed later with Realm.SetTimeZone.
 	TimeZone *time.Location
+
+	// MaxDynamicSource is the length in bytes of the longest source text the
+	// realm compiles at run time, in the UTF-8 the compiler parses: the
+	// string of an eval, the parameters and body of a Function,
+	// GeneratorFunction, AsyncFunction or AsyncGeneratorFunction call
+	// together, and the source of Realm.EvalScript. Longer text throws a
+	// RangeError before it is parsed, as parsing and compiling allocate many
+	// times its size; a string of more code units than the limit is refused
+	// by that count before it is converted. Zero means
+	// DefaultMaxDynamicSource (1 MiB), a negative value no limit. It can be
+	// changed later with Realm.SetMaxDynamicSource. Code the host compiles
+	// (the compiler package) has no limit.
+	MaxDynamicSource int
+
+	// DisableDynamicCode makes the realm refuse to compile any source text at
+	// run time: eval of a string, the Function, GeneratorFunction,
+	// AsyncFunction and AsyncGeneratorFunction constructors and
+	// Realm.EvalScript throw an EvalError where MaxDynamicSource would throw
+	// its RangeError, once the arguments are converted to strings. eval of a
+	// value that is not a string still returns it. It can be changed later
+	// with Realm.SetDynamicCodeDisabled. Code the host compiles is not
+	// affected.
+	DisableDynamicCode bool
 }
 
 // Intrinsics holds the intrinsic objects of a realm. A realm points at its
@@ -177,9 +200,10 @@ type Realm struct {
 	// Interpreter state (interp.go): the register stack and the frame chain.
 	interp interpState
 
-	// date is the host's Date clock and time zone (SetNow, SetTimeZone in
-	// date_time.go); nil while both are the defaults, time.Now and time.Local.
-	date *dateHost
+	// host is the host's Date clock and time zone (SetNow, SetTimeZone in
+	// date_time.go) and import hooks (SetImportHooks in import.go); nil
+	// while all are the defaults: time.Now, time.Local and no hooks.
+	host *realmHost
 
 	// regexps holds the per-realm compiled-pattern cache, the RegExp
 	// instance/exec-result shapes and the UTF-8 working copies of UTF-16
@@ -226,8 +250,12 @@ type realmLazy struct {
 	rng            *rand.Rand // Math.random
 	jobs           *jobState  // the job queue and WeakRef's [[KeptAlive]] (jobs.go)
 	argumentsShape *Shape     // unmapped arguments objects (arguments.go)
+	mappedShape    *Shape     // mapped arguments objects (arguments.go)
+	lex            *globalLex // the global declarative environment (sloppy.go)
+	dyn            *dynState  // code compiled from strings (dynamic.go)
 	templates      []*Object  // tagged-template objects by site (template.go)
 	joins          []*Object  // the arrays being joined, innermost last (builtin_array.go)
+	modules        *moduleMap // the module map (module_eval.go)
 }
 
 // lazyState returns the realm's rarely used state, creating it on first use.
@@ -252,6 +280,8 @@ func NewRealmWith(opts RealmOptions) *Realm {
 		r.boot = nil
 	}
 	r.SetTimeZone(opts.TimeZone)
+	r.SetMaxDynamicSource(opts.MaxDynamicSource)
+	r.SetDynamicCodeDisabled(opts.DisableDynamicCode)
 	return r
 }
 
@@ -804,18 +834,37 @@ func (r *Realm) icBaseFor(m *funcMeta, count uint32) uint32 {
 	return b - 1
 }
 
+// icExactTrees bounds the trees growIC sums the sites of.
+const icExactTrees = 64
+
 // growIC makes room for need entries. The table doubles but stops at the
-// sites of every tree bound so far, so a realm that ends up running all of
-// its functions holds one entry per site, as an eager table would.
+// sites of every tree bound so far and the entries dynamic code owns
+// (allocDynIC), so a realm that ends up running all of its functions holds
+// one entry per site, as an eager table would. A realm that has bound more
+// than icExactTrees trees only doubles: summing their sites on every growth
+// would cost each new tree time in proportion to the trees before it, and
+// doubling keeps the copies amortized.
 func (r *Realm) growIC(need int) {
 	if need <= cap(r.ic) {
 		return
 	}
-	limit := 0
-	for root := range r.icTrees {
-		limit += int(root.totalICs)
+	n := 2 * cap(r.ic)
+	if len(r.icTrees) <= icExactTrees {
+		limit := 0
+		if r.lazy != nil && r.lazy.dyn != nil {
+			limit = r.lazy.dyn.size
+		}
+		for root := range r.icTrees {
+			limit += int(root.totalICs)
+		}
+		n = min(n, limit)
 	}
-	ic := make([]ICEntry, len(r.ic), max(min(2*cap(r.ic), limit), need))
+	r.resizeIC(max(n, need))
+}
+
+// resizeIC reallocates the table with capacity n.
+func (r *Realm) resizeIC(n int) {
+	ic := make([]ICEntry, len(r.ic), n)
 	copy(ic, r.ic)
 	r.ic = ic
 }

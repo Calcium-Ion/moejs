@@ -12,6 +12,10 @@ import (
 	"github.com/Calcium-Ion/moejs/syntax"
 )
 
+// The runner compiles eval code and dynamic functions with the compiler
+// the root package installs.
+func init() { engine.SetCompiler(compiler.Hook{}) }
+
 // host is the per-test host environment: every realm the test creates (the
 // main one and those from $262.createRealm), so that the timeout interrupts
 // all of them, and what the test printed.
@@ -20,6 +24,9 @@ type host struct {
 	realms  []*engine.Realm
 	stopped bool
 	printed []string
+	// imports are the test's import() hooks, which every realm of the test
+	// uses.
+	imports *engine.ImportHooks
 }
 
 // interrupt stops every realm of the test, including those created later.
@@ -39,6 +46,7 @@ func (h *host) interrupt() {
 // most zones does not have.
 func (h *host) newRealm() *engine.Realm {
 	r := engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: false, TimeZone: time.UTC})
+	r.SetImportHooks(h.imports)
 	h.mu.Lock()
 	h.realms = append(h.realms, r)
 	if h.stopped {
@@ -83,11 +91,7 @@ func (h *host) newRealm() *engine.Realm {
 		if err != nil {
 			return engine.Undefined(), err
 		}
-		code, err := compileScript("evalScript", src.GoString())
-		if err != nil {
-			return engine.Undefined(), r.SyntaxError("%s", strings.TrimPrefix(compileMessage(err), "SyntaxError: "))
-		}
-		return r.RunScript(code)
+		return r.EvalScript("evalScript", src.GoString())
 	}))
 	define(r, g, "$262", d)
 	return r
@@ -100,7 +104,8 @@ func define(r *engine.Realm, o *engine.Object, name string, v *engine.Object) {
 	}
 }
 
-// compileScript parses and compiles a strict-mode script.
+// compileScript parses and compiles a script: sloppy mode code unless it
+// starts with a "use strict" directive.
 func compileScript(name, src string) (*bytecode.Function, error) {
 	s, err := syntax.ParseScript(name, src, syntax.Options{})
 	if err != nil {

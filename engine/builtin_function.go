@@ -1,7 +1,7 @@
 package engine
 
-// installFunction fills Function.prototype. The Function
-// constructor keeps its deferred-feature stub: `new Function` is TODO.
+// installFunction fills Function.prototype. The Function constructor
+// compiles its source through the installed compiler (eval.go).
 func installFunction(r *Realm) {
 	// +3: caller, arguments and @@hasInstance (installSymbol).
 	r.FunctionPrototype.ReserveSlots(r, len(functionPrototypeMethods)+3)
@@ -27,16 +27,6 @@ var functionPrototypeMethods = []builtinDef{
 	{AtomBind, functionProtoBind, 1},
 	{AtomCall, functionProtoCall, 1},
 	{AtomToString, functionProtoToString, 0},
-}
-
-// functionCall and functionConstruct are the deferred `Function(...)` /
-// `new Function(...)` behaviours.
-func functionCall(r *Realm, this Value, args []Value) (Value, error) {
-	return Undefined(), r.TypeError("new Function is not supported yet (see TODO.md)")
-}
-
-func functionConstruct(r *Realm, args []Value, newTarget *Object) (Value, error) {
-	return Undefined(), r.TypeError("new Function is not supported yet (see TODO.md)")
 }
 
 // functionProtoApply implements Function.prototype.apply(thisArg, argArray).
@@ -94,7 +84,7 @@ func functionProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), r.TypeError("Function.prototype.toString requires that 'this' be a Function")
 	}
 	if src := functionSourceText(this.AsObject()); src != "" {
-		return StringValue(FromGoString(src)), nil
+		return StringValue(fromWTF8Text(src)), nil
 	}
 	fd := this.AsObject().FunctionData() // nil for a callable proxy
 	name := AtomEmpty
