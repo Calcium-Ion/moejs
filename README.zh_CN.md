@@ -172,6 +172,7 @@ func main() {
 
 `Module` 不可变，可由任意多个运行时并发加载，因此宿主可以每个插件只编译一次，再为每个插件维护一个运行时池。
 同一时刻一个 `Runtime` 只能由一个 goroutine 使用，只有 `Interrupt` 与 `ClearInterrupt` 可以在其他 goroutine 调用。
+把运行时归还池之前，宿主调用 `rt.ReleaseCallData()`，使空闲的运行时不再让上一个请求的参数保持存活；模块存下的部分仍然有效。
 
 ## 宿主 API
 

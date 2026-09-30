@@ -2,6 +2,7 @@ package engine
 
 import (
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -186,7 +187,9 @@ func (r *Realm) internASCII(key string) *String {
 		}
 		r.internCacheASCII = make(map[string]*String)
 	}
-	r.internCacheASCII[key] = a
+	// Keyed by the atom's own content, never by key, which may be a slice
+	// of a JSON text or of a large string (builtin_json.go, Substring).
+	r.internCacheASCII[a.s] = a
 	return a
 }
 
@@ -194,9 +197,12 @@ func (r *Realm) internASCII(key string) *String {
 func globalASCIIAtom(key string) *String {
 	a := globalInternASCII.lookup(key)
 	if a == nil {
-		// The table gets its own String header (sharing the content), never
-		// the caller's: a header carved from a FromGo slab would otherwise
-		// pin the whole slab for as long as the name is in use (hostconv.go).
+		// The table gets its own String header and its own copy of the
+		// content, never the caller's: a header carved from a FromGo slab
+		// would otherwise pin the whole slab, and content sharing a JSON text
+		// or a large string would pin that, for as long as the name is in use
+		// (hostconv.go, builtin_json.go). Once per new atom.
+		key = strings.Clone(key)
 		s := asciiString(key)
 		s.hash = hashASCII(key)
 		s.numeric = canonicalNumericName(key)
@@ -209,8 +215,12 @@ func globalASCIIAtom(key string) *String {
 func globalUTF16Atom(key string, s *String) *String {
 	a := globalInternUTF16.lookup(key)
 	if a == nil {
-		// Fresh header for the table, as in globalASCIIAtom.
-		a = globalInternUTF16.intern(key, &String{u: s.u, n: s.n, hash: s.Hash(), kind: strUTF16})
+		// Fresh header and code units for the table, as in globalASCIIAtom:
+		// a substring shares its string's units (Substring). key is the
+		// caller's own copy (utf16Key).
+		u := make([]uint16, len(s.u))
+		copy(u, s.u)
+		a = globalInternUTF16.intern(key, &String{u: u, n: s.n, hash: s.Hash(), kind: strUTF16})
 	}
 	return a
 }

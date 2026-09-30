@@ -238,7 +238,7 @@ func (r *Realm) compileRegExp(pattern *String, flags regexpFlags) (*compiledRegE
 			return nil, r.regexpSyntaxError(pattern, flags, err)
 		}
 		if regexpProgramCount.Load() < regexpProgramsLimit {
-			if prev, loaded := regexpPrograms.LoadOrStore(key, c); loaded {
+			if prev, loaded := regexpPrograms.LoadOrStore(c.key, c); loaded {
 				c = prev.(*compiledRegExp)
 			} else {
 				regexpProgramCount.Add(1)
@@ -248,7 +248,15 @@ func (r *Realm) compileRegExp(pattern *String, flags regexpFlags) (*compiledRegE
 	if len(st.cache) >= regexpCacheLimit {
 		clear(st.cache)
 	}
-	st.cache[key] = c
+	// The cache keeps compilePattern's copy of the key, as the pattern's
+	// bytes may be a slice of a large string, or an atom's, whose bytes are
+	// its own: a literal's pattern is one (interp.go), and its next lookup
+	// then compares equal pointers.
+	k := &c.key
+	if pattern.atom != 0 {
+		k = &key
+	}
+	st.cache[*k] = c
 	return c, nil
 }
 
@@ -259,6 +267,13 @@ func compilePattern(key regexpCacheKey, units []uint16, flags regexpFlags) (*com
 	ast, err := parseRegExp(units, flags)
 	if err != nil {
 		return nil, err
+	}
+	if len(key.pattern) == 0 || key.pattern[0] != regexpWideKey {
+		// The caches keep c.key, the realm's unless the pattern is an atom
+		// (compileRegExp): its own copy of an ASCII pattern, never the
+		// pattern's bytes, which may be a slice of a large string
+		// (Substring). A wide key is a copy already (regexpKey).
+		key.pattern = strings.Clone(key.pattern)
 	}
 	c := &compiledRegExp{flags: flags, key: key, simple: compileSimpleClass(units, flags)}
 	if reExact(ast.Root) {

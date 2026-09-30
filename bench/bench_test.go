@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Calcium-Ion/moejs"
 	"github.com/Calcium-Ion/moejs/bench/engines"
 )
 
@@ -245,6 +246,32 @@ func BenchmarkHookSuite(b *testing.B) {
 				}
 			}
 		})
+		if _, ok := e.(*engines.MoejsEngine); ok {
+			b.Run(e.Name()+"+release", func(b *testing.B) { hookSuiteRelease(b, e, cases) })
+		}
+	}
+}
+
+// hookSuiteRelease is BenchmarkHookSuite with ReleaseCallData after each
+// call, as a host that pools runtimes runs one hook per request.
+func hookSuiteRelease(b *testing.B, e engines.Engine, cases []HookCase) {
+	runner := mustRunner(b, e)
+	rts := pluginRuntimes(b, runner)
+	defer closeAll(rts)
+	suiteWarmup(b, e, rts, cases)
+	native := make(map[string]*moejs.Runtime, len(rts))
+	for key, rt := range rts {
+		native[key] = rt.(*engines.MoejsRuntime).Moejs()
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		h := &cases[i%len(cases)]
+		out, err := rts[h.Plugin].Call(h.Case.Hook, h.Case.HookPath(), h.Args...)
+		if msg := h.Check(out, err); msg != "" {
+			b.Fatalf("%s/%s: %s", h.Plugin, h.Case.Name, msg)
+		}
+		native[h.Plugin].ReleaseCallData()
 	}
 }
 

@@ -270,6 +270,26 @@ func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 	return res, err
 }
 
+// ReleaseCallData drops the runtime's references to the host values of
+// finished calls, so a pooled runtime does not keep the last request alive.
+// A host that pools runtimes calls it after the request's last use of the
+// runtime (Call, ToGo, Get, AppendJSON: each can run JavaScript), before it
+// returns the runtime to its pool; Call does not, so that a request running
+// several hooks converts its data as one, and hosts that do not pool pay
+// nothing. Values already returned stay valid: their nodes keep their own
+// storage, so ToGo and Get of them work after it. Between calls only; a
+// no-op inside one (from a host function).
+//
+// What JavaScript keeps stays alive with what it references: a string of a
+// FromGo argument the module stores keeps every string converted in its
+// period (up to 512), and an object it stores keeps its chunk and, through
+// the root placeholder in it, the whole argument; a substring of an ASCII
+// string shares its bytes, so storing a slice of a large one keeps all of
+// it. The names the runtime keeps for its caches (property names, RegExp
+// patterns) are its own copies, whether they come from map keys, a parsed
+// JSON text or a slice of a string.
+func (rt *Runtime) ReleaseCallData() { rt.realm.ReleaseCallData() }
+
 // lookup walks h in the loaded module: the export, then each member as an
 // own property of the value before it (an own getter runs; for a proxy the
 // getOwnPropertyDescriptor and get traps). undefined, null, a primitive

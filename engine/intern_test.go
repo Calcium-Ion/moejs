@@ -3,13 +3,16 @@ package engine
 import (
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 	"weak"
 
 	"github.com/Calcium-Ion/moejs/compiler"
 	"github.com/Calcium-Ion/moejs/syntax"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -114,4 +117,94 @@ func TestAtomIDWrapSkipsStaticIDs(t *testing.T) {
 	require.Equal(t, ^uint32(0), takeAtomID(&c))
 	require.Equal(t, uint32(staticAtomCount+1), takeAtomID(&c))
 	require.Equal(t, uint32(staticAtomCount+2), takeAtomID(&c))
+}
+
+var identityRuns atomic.Int32
+
+// contentIn reports whether the content of a starts inside that of b; both
+// are flat.
+func contentIn(a, b *String) bool {
+	span := func(s *String) (uintptr, uintptr) {
+		if s.kind == strASCII {
+			return uintptr(unsafe.Pointer(unsafe.StringData(s.s))), uintptr(len(s.s))
+		}
+		return uintptr(unsafe.Pointer(unsafe.SliceData(s.u))), 2 * uintptr(len(s.u))
+	}
+	p, _ := span(a)
+	q, n := span(b)
+	return p >= q && p < q+n
+}
+
+// TestInternIdentityAcrossCopies checks that an atom's own copy of its
+// content (globalASCIIAtom, globalUTF16Atom) leaves one atom per name: the
+// name as a Go string, a clone of it, a JS string, a zero-copy substring of
+// a large string, through KeyFromGoString and InternKey, in two realms with
+// shared intrinsics and one with mutable intrinsics, is one pointer, whose
+// content is not the substring's.
+func TestInternIdentityAcrossCopies(t *testing.T) {
+	run := strconv.Itoa(int(identityRuns.Add(1)))
+	realms := []*Realm{
+		NewRealmWith(RealmOptions{SharedIntrinsics: true}),
+		NewRealmWith(RealmOptions{SharedIntrinsics: true}),
+		NewRealmWith(RealmOptions{}),
+	}
+	for i, r := range realms {
+		// Past internCacheAfter names, so the names below go through the
+		// realm's caches as well as the process-wide tables.
+		for j := range internCacheAfter + 1 {
+			r.InternGoString("identity_warm_" + run + "_" + strconv.Itoa(j))
+		}
+		require.NotNil(t, r.internCacheASCII, "realm %d", i)
+	}
+	for _, tc := range []struct{ kind, prefix, fill string }{
+		{"ascii", "identity_", "Z"},
+		{"utf16", "名字_", "字"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			name := tc.prefix + run
+			js := FromGoString(name)
+			lookup := func() *String {
+				if js.kind == strASCII {
+					return globalInternASCII.lookup(name)
+				}
+				return globalInternUTF16.lookup(utf16Key(js.u))
+			}
+			require.Nil(t, lookup(), "the name is new to the process")
+			big := name + strings.Repeat(tc.fill, 4096)
+			bigJS := FromGoString(big)
+			sub := bigJS.Substring(0, int(js.n))
+			require.True(t, contentIn(sub, bigJS), "the substring shares the large string")
+
+			var atom *String
+			for i, r := range realms {
+				forms := []struct {
+					how string
+					got *String
+				}{
+					// First, so realm 0 makes the atom from the substring.
+					{"JS substring", r.Intern(sub)},
+					{"Go substring", r.InternGoString(big[:len(name)])},
+					{"Go string", r.InternGoString(name)},
+					{"strings.Clone", r.InternGoString(strings.Clone(name))},
+					{"JS string", r.Intern(FromGoString(name))},
+					{"KeyFromGoString", r.KeyFromGoString(name).String()},
+					{"InternKey", InternKey(name).String()},
+				}
+				if atom == nil {
+					atom = forms[0].got
+				}
+				for _, f := range forms {
+					require.Same(t, atom, f.got, "realm %d: %s", i, f.how)
+				}
+				cached := r.internCacheASCII[name]
+				if js.kind != strASCII {
+					cached = r.internCacheUTF16[utf16Key(js.u)]
+				}
+				require.Same(t, atom, cached, "realm %d caches the atom", i)
+			}
+			require.True(t, atom.IsInterned())
+			require.Same(t, atom, lookup())
+			assert.False(t, contentIn(atom, bigJS), "the atom's content is its own")
+		})
+	}
 }

@@ -175,6 +175,18 @@ func trimScratch[T any](s []T) []T {
 	return s[:0]
 }
 
+// hostShapeKey interns the host's key k for a new cache entry and returns
+// the atom and the key the entry keeps: the atom's content, or a copy of k
+// for a non-ASCII name, never k itself, which may share the memory of a
+// request body (a zero-copy JSON decoder).
+func (r *Realm) hostShapeKey(k string) (*String, string) {
+	a := r.InternGoString(k)
+	if a.kind != strASCII {
+		return a, bytesToString([]byte(k))
+	}
+	return a, a.s
+}
+
 // hostShapeFor returns the cache entry for a sorted named-key list, building
 // the transition chain on first use.
 func hostShapeFor[V any](r *Realm, h uint64, named []hostPair[V]) *hostShapeEntry {
@@ -204,8 +216,9 @@ func hostShapeFor[V any](r *Realm, h uint64, named []hostPair[V]) *hostShapeEntr
 		pks = make([]PropertyKey, 0, len(named))
 	}
 	for i := range named {
-		keys[i] = named[i].k
-		pks = append(pks, StringKey(r.InternGoString(keys[i])))
+		a, k := r.hostShapeKey(named[i].k)
+		keys[i] = k
+		pks = append(pks, StringKey(a))
 	}
 	shape := r.plainRoot.addChain(r, pks, attrDefault)
 	if shape.shared {

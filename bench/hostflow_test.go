@@ -346,6 +346,7 @@ func BenchmarkHostFlow(b *testing.B) {
 	for _, mk := range hostFlowEngines {
 		e := mk()
 		rts := pluginRuntimes(b, mustRunner(b, e))
+		var released [][]*hostFlow
 		for _, bytes := range []bool{false, true} {
 			in := flowInput(bytes)
 			var all []*hostFlow
@@ -372,6 +373,26 @@ func BenchmarkHostFlow(b *testing.B) {
 			for _, k := range flowKinds {
 				run(string(k), byKind[k])
 			}
+			if all[0].native != nil {
+				released = append(released, all)
+			}
+		}
+		// A host that pools runtimes releases each after its request. These
+		// rows run last, so the others find the runtimes as they were
+		// without them.
+		for _, all := range released {
+			b.Run(e.Name()+"/in="+flowInput(all[0].bytes)+"/all+release", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					for _, f := range all {
+						if _, err := f.run(); err != nil {
+							b.Fatalf("%s/%s: %v", f.h.Plugin, f.h.Case.Name, err)
+						}
+						f.native.ReleaseCallData()
+					}
+				}
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(all)), "ns/call")
+			})
 		}
 		closeAll(rts)
 	}

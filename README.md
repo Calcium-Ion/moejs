@@ -211,7 +211,10 @@ func main() {
 A `Module` is immutable and can be loaded by any number of runtimes
 concurrently, so a host compiles each plugin once and keeps a pool of
 runtimes per plugin. A `Runtime` belongs to one goroutine at a time; only
-`Interrupt` and `ClearInterrupt` may be called from others.
+`Interrupt` and `ClearInterrupt` may be called from others. Before it
+returns a runtime to the pool, the host calls `rt.ReleaseCallData()`, so
+the idle runtime does not keep the last request's arguments alive; what the
+module stored of them stays valid.
 
 ## Host API
 

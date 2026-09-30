@@ -139,8 +139,10 @@ func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, n
 			m.consts[i] = BigIntValue(b)
 		case bytecode.ConstRegExp:
 			// Pattern and flags are materialized once per template so a
-			// regular expression literal costs only its RegExp object.
-			pattern, flags := fromWTF8Text(k.Str), FromGoString(k.Flags)
+			// regular expression literal costs only its RegExp object. The
+			// pattern is an atom, whose bytes the realm's RegExp cache keeps
+			// as its key (compileRegExp).
+			pattern, flags := r.Intern(fromWTF8Text(k.Str)), FromGoString(k.Flags)
 			prepareSharedString(pattern)
 			prepareSharedString(flags)
 			m.consts[i] = StringValue(pattern)

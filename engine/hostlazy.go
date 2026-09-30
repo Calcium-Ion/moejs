@@ -55,19 +55,25 @@ var hostSentinelKey = PropertyKey{Value{bits: reservedPrefix | 5}}
 // the first container conversion.
 //
 // Storage: roots, nodes and values are carved from chunks, one per kind. A
-// chunk is sized from the usage of earlier periods. A period starts at the
-// first top-level FromGo of a container (one made outside any JavaScript
-// call) after the previous period materialized something, so in a hook
-// runtime it is one call: all its arguments plus everything the call
-// materializes, including containers host functions return. A hook that
-// reads the same parts of a same-shaped argument on every call therefore
-// costs one chunk of each kind per call, as the eager conversion's slabs
-// did. A new period drops the realm's references to the old chunks: they
-// live on only through the nodes that point into them. The realm itself
-// therefore retains at most one chunk of each kind, which is no more than
-// the interpreter's register stack already retains of the last call's
-// arguments. Without a prediction (a realm's first conversions) a root is
-// allocated on its own rather than opening a chunk for one object.
+// chunk is sized from the usage of earlier periods. A period ends at
+// Realm.ReleaseCallData, which a host that pools realms calls where a
+// request ends, or else at the first top-level FromGo of a container (one
+// made outside any JavaScript call) after the period materialized something.
+// In a hook runtime it is therefore one request, or one call without
+// ReleaseCallData: all the arguments plus everything the calls materialize,
+// including containers host functions return. A hook that reads the same
+// parts of a same-shaped argument on every call therefore costs one chunk of
+// each kind per call, as the eager conversion's slabs did. Ending a period
+// drops the realm's references to its chunks: they live on only through the
+// nodes that point into them, so a string the module stores keeps every
+// string converted in its period (up to 512), and an object it stores keeps
+// its chunk and, through the root placeholder in it, the whole argument.
+// Until then the realm retains the period's chunks, at most one of each
+// kind, and through their placeholders the Go values of the arguments, as
+// the interpreter's register stack retains the last call's arguments until
+// ReleaseCallData clears it. Without a prediction (a realm's first
+// conversions) a root is allocated on its own rather than opening a chunk
+// for one object.
 type hostHeap struct {
 	// sentinel must stay the first field: hostHeapOf maps a placeholder's
 	// shape back to its heap.
@@ -152,9 +158,10 @@ func (r *Realm) hostHeap() *hostHeap {
 	return h
 }
 
-// seal starts a new period: the usage of the one that ends becomes the chunk
-// hint (decaying rather than dropping when usage shrinks) and the realm lets
-// go of its chunks.
+// seal ends the period: its usage becomes the chunk hint (decaying rather
+// than dropping when usage shrinks) and the realm lets go of its chunks.
+// ReleaseCallData seals a period that materialized nothing too, whose root
+// placeholders hold their Go values; its roots then are its usage.
 func (h *hostHeap) seal() {
 	if h.used != (hostCounts{}) {
 		h.hint = hostCounts{
