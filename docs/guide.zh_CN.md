@@ -176,9 +176,17 @@ Go 值，跳过文本和字符串复制。其他值，比如带 `toJSON` 的值�
 `AppendJSON` 会失败的情况下（BigInt、循环引用、抛出异常的 `toJSON`、无法写出的 Go 值、超过长度上限的文本），`target` 的内容保持不变。
 `json.Unmarshal` 返回错误时，`target` 里是出错之前已经写入的部分。
 
+`ToGoInto(v, target)` 的结果和错误，与依次执行 `ToGo`、`json.Marshal` 和 `json.Unmarshal` 写进 `target` 相同。已经在用这三步的宿主可以
+直接换成它，行为不变。和 `Unmarshal` 一样，普通对象、数组和没有被修改过的参数直接写进 Go 值，不生成 `ToGo` 的 Go map，也不生成文本。getter、
+代理、`Date`、`Map`、类型化数组、BigInt、函数，以及自己实现反序列化的目标类型，会改走这三步。`ToGo` 或 `json.Marshal` 会失败的情况下
+（抛出异常的 getter、NaN 或 ±Infinity、循环引用），`target` 的内容保持不变。
+
+`ToGo` 和 `AppendJSON` 结果不同的地方，`ToGoInto` 和 `ToGo` 一致：值为 `undefined` 的成员保留为 `null`，-0 保持 -0，NaN 和 ±Infinity
+返回错误，不调用 `toJSON`。和 `ToGo` 一样，只有 getter 运行时才会被中断。
+
 ### 请求之后还要保留的字符串
 
-`ToGo` 和 `Unmarshal` 从 `ParseJSON` 生成的值里返回的字符串，可能和解析的文本共用内存，并让整段文本一直存活。宿主要长期保留的字符串，先用
+`ToGo`、`Unmarshal` 和 `ToGoInto` 从 `ParseJSON` 生成的值里返回的字符串，可能和解析的文本共用内存，并让整段文本一直存活。宿主要长期保留的字符串，先用
 `strings.Clone` 复制一份。
 
 ### 嵌套深度

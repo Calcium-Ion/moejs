@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,18 @@ import (
 // The walk runs no JavaScript: a value with a toJSON, an accessor, a proxy
 // or any object that is not a plain object or dense array stops it before
 // anything could run.
+//
+// Realm.ToGoInto is the same walk for another round trip, json.Unmarshal of
+// the text json.Marshal writes for what ToGo gives (togo). That text holds
+// other things: a member that is undefined stays, as null; no toJSON is
+// called and prototypes do not matter; an integer of int64's range is an
+// int64 and any other number (-0 included) a float64, which reads back as
+// itself; a NaN or an infinity is json.Marshal's error; and a host
+// placeholder JavaScript has not modified is its Go value as json.Marshal
+// writes it (a nil slice as null). json.Marshal sorts a map's keys, and the
+// walk writes an object's members in that order (togoObject). ToGo observes
+// no interrupt for a value the walk handles, and the walk observes none
+// either.
 
 // Unmarshal stores v in the Go value target points to as encoding/json's
 // Unmarshal stores the text AppendJSON writes for v, without the text, and
@@ -83,11 +96,42 @@ func (r *Realm) Unmarshal(v Value, target any) (complete bool, err error) {
 	return ok && d.err == nil, d.err
 }
 
+// ToGoInto stores v in the Go value target points to as encoding/json's
+// Unmarshal stores the text json.Marshal writes for ToGoStrict(v), without
+// the text, and reports whether it completed; when it did not, the caller
+// is to finish with that round trip, which writes every part again. It
+// writes nothing unless all of v, the parts target discards and the Go
+// values of host placeholders included, is plain: ToGo runs no JavaScript
+// for it, and json.Marshal does not fail on what ToGo gives (a NaN or an
+// infinity, a cycle). It does not complete for: a bigint, a symbol, a
+// function, an object that is not an ordinary object or an array (a Date,
+// a Map, a typed array, a boxed primitive, a proxy), an accessor, a hole,
+// a value whose text could pass the string length limit (plain's bound,
+// kept as a bound of the walk), a host placeholder anywhere but in an
+// empty interface, and what Unmarshal does not complete for on the
+// target's side. Strings are not copied. No interrupt is observed, as ToGo
+// observes none for such a value.
+func (r *Realm) ToGoInto(v Value, target any) (complete bool) {
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() || jsonTypeOf(rv.Type()).custom {
+		return false
+	}
+	d := jsonDecoder{r: r, left: 4096, togo: true, copyHosts: jsonTypeOf(rv.Type()).holdsAny}
+	if !d.plain(v, 0) || !d.within(0) {
+		return false
+	}
+	d.size, d.left = 0, 4096
+	return d.value(v, rv.Elem(), 0)
+}
+
 type jsonDecoder struct {
 	r          *Realm
 	plainEpoch uint32 // lacksToJSON's prototype answer
 	left       int    // the nodes until the next interrupt check (tick)
 	err        error
+	// togo: the round trip is json.Unmarshal of json.Marshal of ToGo's
+	// result (ToGoInto), not of AppendJSON's text.
+	togo bool
 	// size is an upper bound, in bytes, of the output AppendJSON writes for
 	// what plain has checked: past the string length limit AppendJSON
 	// fails, so plain stops there (within) and the round trip decides.
@@ -122,20 +166,28 @@ const (
 // kind classifies v; ok is false for a value the walk does not handle.
 func (d *jsonDecoder) kind(v Value) (k int, ok bool) {
 	switch v.Type() {
-	case TypeUndefined, TypeSymbol:
+	case TypeUndefined:
+		if d.togo {
+			return jkNull, true // nil: a member stays, as null
+		}
 		return jkOmitted, true
+	case TypeSymbol:
+		return jkOmitted, !d.togo
 	case TypeNull:
 		return jkNull, true
 	case TypeBoolean:
 		return jkBool, true
 	case TypeNumber:
 		if f := v.AsNumber(); math.IsNaN(f) || math.IsInf(f, 0) {
-			return jkNull, true
+			return jkNull, !d.togo // json.Marshal fails on it
 		}
 		return jkNumber, true
 	case TypeString:
 		return jkString, true
 	case TypeObject:
+		if d.togo {
+			return togoKind(v.AsObject())
+		}
 		// A function is omitted only when no toJSON of its own or of its
 		// prototypes replaces it: the round trip finds out.
 		o := v.AsObject()
@@ -150,6 +202,32 @@ func (d *jsonDecoder) kind(v Value) (k int, ok bool) {
 		case len(o.elements) == 0 && (o.dict == nil || o.dict.sparse == nil):
 			return jkObject, true
 		}
+	}
+	return 0, false
+}
+
+// togoKind is kind of an object for ToGoInto: the JSON kind of the text
+// json.Marshal writes for what ToGo gives for o. ok is false for what the
+// walk does not handle: every object but a host placeholder JavaScript has
+// not modified (its Go value), an array and an ordinary object (ToGo reads
+// neither prototypes nor toJSON). An object with internal data is left to
+// the round trip, but a host node's Go value, which a modified one keeps.
+// kind's other differences for ToGoInto: undefined is null (ToGo's nil, a
+// member that stays), and a symbol, a bigint and a number json.Marshal
+// fails on (NaN, ±Infinity) are not handled.
+func togoKind(o *Object) (k int, ok bool) {
+	if o.flags&flagHostNode != 0 {
+		if _, ok := o.HostValue(); ok {
+			return jkHost, true
+		}
+	}
+	switch {
+	case o.flags&flagHasLazy != 0: // ToGo materializes it
+	case o.class == ClassArray:
+		return jkArray, true
+	case o.class == ClassObject && (o.internal == nil || o.flags&flagHostNode != 0) &&
+		len(o.elements) == 0 && (o.dict == nil || o.dict.sparse == nil):
+		return jkObject, true
 	}
 	return 0, false
 }
@@ -208,7 +286,7 @@ func (d *jsonDecoder) value(v Value, rv reflect.Value, depth int) bool {
 		}
 		rv.SetBool(v.AsBool())
 	case jkNumber:
-		return jsonNumberInto(v.AsNumber(), rv, t)
+		return d.numberInto(v.AsNumber(), rv, t)
 	case jkString:
 		if rv.Kind() != reflect.String || t == reflect.TypeFor[json.Number]() {
 			return false
@@ -216,9 +294,10 @@ func (d *jsonDecoder) value(v Value, rv reflect.Value, depth int) bool {
 		rv.SetString(v.AsString().GoString())
 	case jkObject:
 		switch rv.Kind() {
-		case reflect.Struct:
-			return d.object(v.AsObject(), rv, jt, depth)
-		case reflect.Map:
+		case reflect.Struct, reflect.Map:
+			if d.togo {
+				return d.togoObject(v.AsObject(), rv, jt, depth)
+			}
 			return d.object(v.AsObject(), rv, jt, depth)
 		}
 		return false
@@ -231,6 +310,15 @@ func (d *jsonDecoder) value(v Value, rv reflect.Value, depth int) bool {
 		return false
 	}
 	return true
+}
+
+// numberInto stores a finite number: togoNumberInto for ToGoInto,
+// jsonNumberInto otherwise. value calls it once, which keeps value small.
+func (d *jsonDecoder) numberInto(f float64, rv reflect.Value, t reflect.Type) bool {
+	if d.togo {
+		return togoNumberInto(f, rv, t)
+	}
+	return jsonNumberInto(f, rv, t)
 }
 
 // jsonNumberInto stores a finite number as Unmarshal stores the number
@@ -291,6 +379,89 @@ func jsonNumberInto(f float64, rv reflect.Value, t reflect.Type) bool {
 	return true
 }
 
+// togoNumberInto stores a finite number as Unmarshal stores the text
+// json.Marshal writes for what ToGo gives for it: an int64, written with all
+// its digits, for an integer of int64's range but -0, and a float64
+// otherwise, written with its shortest digits (appendGoJSONFloat). Either
+// text reads back as the number itself, -0 included, into a float64.
+func togoNumberInto(f float64, rv reflect.Value, t reflect.Type) bool {
+	if f == math.Trunc(f) && f >= -1<<63 && f < 1<<63 && (f != 0 || !math.Signbit(f)) {
+		n := int64(f)
+		switch rv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if rv.OverflowInt(n) {
+				return false
+			}
+			rv.SetInt(n)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			if n < 0 || rv.OverflowUint(uint64(n)) {
+				return false
+			}
+			rv.SetUint(uint64(n))
+		case reflect.Float64:
+			rv.SetFloat(f)
+		case reflect.Float32:
+			rv.SetFloat(float64(float32(f))) // the digits are f exactly: one rounding
+		case reflect.String:
+			if t != reflect.TypeFor[json.Number]() {
+				return false
+			}
+			rv.SetString(strconv.FormatInt(n, 10))
+		default:
+			return false
+		}
+		return true
+	}
+	var buf [32]byte
+	s := appendGoJSONFloat(buf[:0], f)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n, err := strconv.ParseInt(string(s), 10, 64) // only "-0" parses
+		if err != nil || rv.OverflowInt(n) {
+			return false
+		}
+		rv.SetInt(n)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		n, err := strconv.ParseUint(string(s), 10, 64)
+		if err != nil || rv.OverflowUint(n) {
+			return false
+		}
+		rv.SetUint(n)
+	case reflect.Float64:
+		rv.SetFloat(f)
+	case reflect.Float32:
+		g, err := strconv.ParseFloat(string(s), 32)
+		if err != nil || rv.OverflowFloat(g) {
+			return false
+		}
+		rv.SetFloat(g)
+	case reflect.String:
+		if t != reflect.TypeFor[json.Number]() {
+			return false
+		}
+		rv.SetString(string(s))
+	default:
+		return false
+	}
+	return true
+}
+
+// appendGoJSONFloat appends f as encoding/json writes a float64: its
+// shortest digits, in exponent form below 1e-6 and from 1e21 on, with no
+// leading zero in a negative exponent.
+func appendGoJSONFloat(b []byte, f float64) []byte {
+	format := byte('f')
+	if abs := math.Abs(f); abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
+	b = strconv.AppendFloat(b, f, format, -1, 64)
+	if n := len(b); format == 'e' && n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
+		b[n-2] = b[n-1] // e-07 to e-7
+		b = b[:n-1]
+	}
+	return b
+}
+
 // object stores the members of the plain object o in a struct or a map,
 // in AppendJSON's order (the shape's), as Unmarshal meets them.
 func (d *jsonDecoder) object(o *Object, rv reflect.Value, jt *jsonType, depth int) bool {
@@ -332,6 +503,73 @@ func (d *jsonDecoder) object(o *Object, rv reflect.Value, jt *jsonType, depth in
 		}
 		return true // a member with no field: plain checked it
 	})
+}
+
+// togoObject is object for ToGoInto. Unmarshal meets the members in the
+// order json.Marshal writes the keys of ToGo's map in, by their Go strings,
+// and of the members whose keys have one Go string only the last (ToGo's
+// map holds it): the walk takes them in that order too, so that what it
+// writes before it stops is what the round trip writes first, also when
+// the round trip stops at an error further on (Unmarshal ends at the error
+// of a type that unmarshals itself or of a json.Number from a string), and
+// two members that go to one field, by case folding, are written in the
+// round trip's order.
+func (d *jsonDecoder) togoObject(o *Object, rv reflect.Value, jt *jsonType, depth int) bool {
+	isMap := rv.Kind() == reflect.Map
+	if isMap {
+		if jt.mapKeys {
+			return false
+		}
+		if rv.IsNil() {
+			rv.Set(reflect.MakeMap(rv.Type()))
+		}
+	} else if jt.byExact == nil {
+		return false
+	}
+	var buf [16]togoMember
+	var elem reflect.Value
+	for _, m := range togoMembers(o, buf[:0]) {
+		if isMap {
+			if !elem.IsValid() {
+				elem = reflect.New(rv.Type().Elem()).Elem()
+			} else {
+				elem.SetZero()
+			}
+			if !d.value(m.v, elem, depth+1) {
+				return false
+			}
+			k := reflect.New(rv.Type().Key()).Elem()
+			k.SetString(m.key)
+			rv.SetMapIndex(k, elem)
+		} else if f := jt.field(m.key); f >= 0 && !d.value(m.v, rv.Field(f), depth+1) {
+			return false
+		}
+	}
+	return true
+}
+
+type togoMember struct {
+	key string
+	v   Value
+}
+
+// togoMembers appends the members of the plain object o to ms in the order
+// of togoObject: sorted by key (a stable sort, of a shape that is sorted
+// already for an object from a Go map), the last of those with one key.
+func togoMembers(o *Object, ms []togoMember) []togoMember {
+	jsonMembers(o, func(key PropertyKey, v Value) bool {
+		ms = append(ms, togoMember{key.String().GoString(), v})
+		return true
+	})
+	slices.SortStableFunc(ms, func(a, b togoMember) int { return strings.Compare(a.key, b.key) })
+	out := ms[:0]
+	for i, m := range ms {
+		if i+1 < len(ms) && ms[i+1].key == m.key {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // plain reports whether AppendJSON writes v without running JavaScript or
@@ -407,7 +645,9 @@ func (d *jsonDecoder) tick(n int) bool {
 //go:noinline
 func (d *jsonDecoder) checkpoint() bool {
 	d.left = 4096
-	d.err = d.r.CheckInterrupt()
+	if !d.togo { // ToGo observes no interrupt
+		d.err = d.r.CheckInterrupt()
+	}
 	return d.err == nil && d.size <= int64(maxStringLength)
 }
 
@@ -542,6 +782,9 @@ func (d *jsonDecoder) any(v Value, k int, depth int) (any, bool) {
 	case jkBool:
 		return v.AsBool(), true
 	case jkNumber:
+		if d.togo {
+			return v.AsNumber(), true // -0 reads back as itself
+		}
 		return v.AsNumber() + 0, true
 	case jkString:
 		return v.AsString().GoString(), true
@@ -597,7 +840,10 @@ func (d *jsonDecoder) any(v Value, k int, depth int) (any, bool) {
 // container new), as the text of the converted value reads back. ok is false
 // for what the stringifier's direct walk gives up on, for a string or key
 // that is not valid UTF-8, on an interrupt and once size passes the string
-// length limit; hostPlain counts the size of a value as hostCopy does.
+// length limit; hostPlain counts the size of a value as hostCopy does. For
+// ToGoInto (togo) the text is json.Marshal's of the Go value itself: a nil
+// slice is null, a float32 is written with a float32's shortest digits, and
+// json.Marshal fails on a NaN or an infinity.
 func (d *jsonDecoder) hostCopy(v any, depth int) (any, bool) {
 	if depth >= jsonScanDepth {
 		return nil, false
@@ -612,9 +858,26 @@ func (d *jsonDecoder) hostCopy(v any, depth int) (any, bool) {
 	case float64:
 		d.size += jsonScalarMax
 		if math.IsNaN(x) || math.IsInf(x, 0) {
-			return nil, true
+			return nil, !d.togo // json.Marshal fails on it
+		}
+		if d.togo {
+			return x, true
 		}
 		return x + 0, true
+	case float32:
+		d.size += jsonScalarMax
+		f := float64(x)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, !d.togo
+		}
+		if d.togo {
+			// json.Marshal writes a float32's shortest digits as a float32,
+			// which read back as a float64.
+			var buf [32]byte
+			g, err := strconv.ParseFloat(string(strconv.AppendFloat(buf[:0], f, 'g', -1, 32)), 64)
+			return g, err == nil
+		}
+		return f + 0, true
 	case bool:
 		d.size += jsonScalarMax
 		return x, true
@@ -628,6 +891,10 @@ func (d *jsonDecoder) hostCopy(v any, depth int) (any, bool) {
 		}
 		return jsonHostMap(d, x, depth, func(e any) (any, bool) { return d.hostCopy(e, depth+1) })
 	case []any:
+		if x == nil && d.togo {
+			d.size += 4
+			return nil, true // json.Marshal writes null
+		}
 		if !d.open(len(x), 2+int64(len(x))) {
 			return nil, false
 		}
@@ -660,6 +927,10 @@ func (d *jsonDecoder) hostCopy(v any, depth int) (any, bool) {
 		}
 		return jsonHostMap(d, x, depth, d.hostStrings)
 	case []map[string]any:
+		if x == nil && d.togo {
+			d.size += 4
+			return nil, true
+		}
 		if !d.open(len(x), 2+int64(len(x))) {
 			return nil, false
 		}
@@ -671,13 +942,10 @@ func (d *jsonDecoder) hostCopy(v any, depth int) (any, bool) {
 			}
 		}
 		return out, true
-	case int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8, float32:
+	case int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8:
 		d.size += jsonScalarMax
 		n, _, _ := scalarFromGo(x)
-		if f := n.AsNumber(); f == f && !math.IsInf(f, 0) {
-			return f + 0, true
-		}
-		return nil, true // a float32 NaN or infinity, which AppendJSON writes as null
+		return n.AsNumber(), true
 	}
 	return nil, false
 }
@@ -694,7 +962,12 @@ func (d *jsonDecoder) hostPlain(v any, depth int) bool {
 	switch x := v.(type) {
 	case string:
 		d.size += jsonGoQuotedMax(x)
-	case float64, bool, nil, int, int64, uint64:
+	case float64:
+		d.size += jsonScalarMax
+		if d.togo && (math.IsNaN(x) || math.IsInf(x, 0)) {
+			return false // json.Marshal fails on it
+		}
+	case bool, nil, int, int64, uint64:
 		d.size += jsonScalarMax
 	case []string:
 		return d.stringsPlain(x)
@@ -770,6 +1043,10 @@ func jsonHostMap[V any](d *jsonDecoder, m map[string]V, depth int, conv func(V) 
 
 // hostStrings copies a []string for hostCopy.
 func (d *jsonDecoder) hostStrings(list []string) (any, bool) {
+	if list == nil && d.togo {
+		d.size += 4
+		return nil, true // json.Marshal writes null
+	}
 	if !d.open(len(list), 2+int64(len(list))) {
 		return nil, false
 	}

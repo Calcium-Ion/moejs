@@ -40,3 +40,43 @@ func (rt *Runtime) Unmarshal(v Value, target any) (err error) {
 	}
 	return json.Unmarshal(data, target)
 }
+
+// ToGoInto stores v in the value target points to as json.Unmarshal stores
+// the text json.Marshal writes for what ToGo returns for v, and returns the
+// error ToGo, json.Marshal or json.Unmarshal would. A value made of
+// ordinary objects (class instances and objects with a null prototype
+// included), arrays, strings, numbers, booleans, null and undefined, and
+// arguments FromGo converted that it returns untouched (in an `any` of
+// target), goes into target without the round trip: no Go map or slice of
+// ToGo is built, no JSON is written or parsed, and strings are not copied.
+// Anything else (a getter, a proxy, a Date, a Map, a typed array, a BigInt,
+// a function, a target type that unmarshals itself, a value target's type
+// rejects) makes it fall back to ToGo, json.Marshal and json.Unmarshal,
+// with their result and error. When ToGo or json.Marshal fails (a getter
+// that throws, a NaN or an infinity, a cycle), target is left as it was.
+// After an error of json.Unmarshal, target may hold part of v, as with
+// json.Unmarshal.
+//
+// The result differs from Unmarshal's where ToGo's Go value differs from
+// AppendJSON's text: a member whose value is undefined is kept, as null;
+// -0 stays -0; a NaN or an infinity is json.Marshal's error; toJSON is not
+// called; an argument FromGo converted that JavaScript has not modified is
+// its Go value as json.Marshal writes it (a nil slice as null). No
+// interrupt is observed, as ToGo observes none for such a value. A string
+// of a value ParseJSON produced may share the parsed text and keep it alive
+// for as long as the host holds it: strings.Clone a string kept beyond the
+// request.
+func (rt *Runtime) ToGoInto(v Value, target any) error {
+	if rt.realm.ToGoInto(v, target) {
+		return nil
+	}
+	g, err := rt.ToGo(v)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(g)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}

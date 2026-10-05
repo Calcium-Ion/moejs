@@ -262,11 +262,26 @@ value it cannot write, text past the length limit), `target` keeps its old
 contents. When `json.Unmarshal` returns an error, `target` holds what it
 wrote before the error.
 
+`ToGoInto(v, target)` gives the result and the error of `ToGo`, then
+`json.Marshal`, then `json.Unmarshal` into `target`. A host that already
+runs those three steps can switch to it and keep the same behavior. As with
+`Unmarshal`, plain objects, arrays and unmodified arguments go in directly,
+without building `ToGo`'s Go map or writing text. A getter, a proxy, a
+`Date`, a `Map`, a typed array, a BigInt, a function or a target type that
+unmarshals itself makes it run the three steps. When `ToGo` or
+`json.Marshal` would fail (a throwing getter, NaN or ±Infinity, a cycle),
+`target` keeps its old contents.
+
+Where `ToGo` and `AppendJSON` disagree, `ToGoInto` follows `ToGo`. A member
+whose value is `undefined` stays, as `null`. A -0 stays -0. NaN and
+±Infinity are an error. `toJSON` is not called. As with `ToGo`, an
+interrupt stops it only while a getter runs.
+
 ### Strings kept after the request
 
-Strings that `ToGo` and `Unmarshal` return from a value `ParseJSON` produced
-can share memory with the parsed text and keep it alive. Call
-`strings.Clone` on the strings the host keeps.
+Strings that `ToGo`, `Unmarshal` and `ToGoInto` return from a value
+`ParseJSON` produced can share memory with the parsed text and keep it
+alive. Call `strings.Clone` on the strings the host keeps.
 
 ### Nesting
 
