@@ -1,5 +1,7 @@
 package engine
 
+import "strings"
+
 // installFunction fills Function.prototype. The Function constructor
 // compiles its source through the installed compiler (eval.go).
 func installFunction(r *Realm) {
@@ -78,7 +80,8 @@ func functionProtoBind(r *Realm, this Value, args []Value) (Value, error) {
 // functionProtoToString implements Function.prototype.toString: the source
 // slice recorded by the compiler for bytecode functions, otherwise the
 // NativeFunction form `function name() { [native code] }` (bound functions
-// print no name, "bound f" not being a valid PropertyName).
+// print no name, "bound f" not being a valid PropertyName, and nativeName
+// quotes a name no PropertyName matches).
 func functionProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	if !IsCallable(this) {
 		return Undefined(), r.TypeError("Function.prototype.toString requires that 'this' be a Function")
@@ -89,7 +92,10 @@ func functionProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	fd := this.AsObject().FunctionData() // nil for a callable proxy
 	name := AtomEmpty
 	if fd != nil && fd.kind != FuncBound && fd.name != nil {
-		name = fd.name
+		var err error
+		if name, err = nativeName(r, fd.name); err != nil {
+			return Undefined(), err
+		}
 	}
 	var sb StringBuilder
 	sb.Grow(name.Len() + 32)
@@ -97,6 +103,33 @@ func functionProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	sb.WriteString(name)
 	sb.WriteGoString("() { [native code] }")
 	return StringValue(sb.String()), nil
+}
+
+// nativeName returns the PropertyName a native function's NativeFunction
+// form prints for its name: the name, when it is empty or, after an
+// optional "get " or "set ", an IdentifierName or a computed [...] form (a
+// symbol-keyed method's); otherwise that rest as a string literal in
+// brackets, a ComputedPropertyName. The getters of RegExp.$&, $+, $` and
+// $' are the built-ins whose [[InitialName]], "get $&" and so on, no
+// PropertyName matches; they print get ["$&"], as the legacy RegExp
+// features proposal's issue 19 suggests.
+func nativeName(r *Realm, name *String) (*String, error) {
+	s := name.GoString()
+	prefix := 0
+	if strings.HasPrefix(s, "get ") || strings.HasPrefix(s, "set ") {
+		prefix = 4
+	}
+	if s = s[prefix:]; s == "" || s[0] == '[' || isIdentifierName(s) {
+		return name, nil
+	}
+	js := jsonStringifier{r: r}
+	js.sb.WriteString(name.Substring(0, prefix))
+	js.sb.WriteASCII('[')
+	if err := js.quote(name.Substring(prefix, name.Len())); err != nil {
+		return nil, err
+	}
+	js.sb.WriteASCII(']')
+	return js.sb.String(), nil
 }
 
 // functionSourceText is the source slice the compiler recorded for a

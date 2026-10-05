@@ -93,6 +93,13 @@ var (
 	// ErrNotCallable is returned when a hook names a value that is not a
 	// function.
 	ErrNotCallable = errors.New("moejs: hook is not a function")
+	// ErrForeign is returned for a function or generator of another
+	// runtime (or a bound function or proxy of one) passed to Call,
+	// SetGlobal, FromGo or a settler of NewPromise: it runs only in the
+	// runtime that created it. Inside a Go map or slice FromGo or SetGlobal
+	// converts it is not the error: reading that member throws a TypeError
+	// with ErrForeign's text.
+	ErrForeign = engine.ErrForeign
 	// ErrModulePending is Load's error for a module with top-level await
 	// whose evaluation still awaits once no job is left.
 	ErrModulePending = engine.ErrModulePending
@@ -112,8 +119,8 @@ func (e *SyntaxError) Error() string {
 }
 
 // InternalError is a Go panic that escaped the engine: an engine bug or a
-// host function that panicked. The runtime's call state is restored, but the
-// host should drop the runtime.
+// host function that panicked. The runtime's call state is restored and the
+// jobs left queued are dropped, but the host should drop the runtime.
 type InternalError struct {
 	Value any    // the recovered panic value
 	Stack []byte // the goroutine stack at the panic

@@ -45,7 +45,11 @@ import (
 // are exactly what materialization made of src, each child container being
 // the same Go value and itself unmodified (hostUnchanged). Anything else
 // exports a snapshot of the node's current JavaScript state, whose
-// unmodified children still export their Go values.
+// unmodified child nodes still export their Go values. An empty container
+// is no node (hostRoot, mapChild, sliceChild make it an ordinary object or
+// array), and a []byte or function child is a new object at each
+// materialization, which hostUnchanged cannot match: its parent exports a
+// snapshot once materialized.
 
 // hostSentinelKey is the key of every realm's host sentinel shape; like
 // rootKey it is a reserved bit pattern no property key can have.
@@ -104,6 +108,9 @@ type hostHeap struct {
 	// skips collecting, sorting and hashing its entries: the maps of a hook
 	// argument's list mostly share one key set.
 	shapes [hostShapeSlots][2]*hostShapeEntry
+	// shapeKeys counts the keys of the entries in Realm.hostShapes
+	// (hostShapeKeysMax).
+	shapeKeys int
 
 	// Pair scratch for materializing maps, kept between calls (cleared of
 	// host data) so steady-state materialization allocates none.
@@ -267,7 +274,13 @@ func (h *hostHeap) str(g string) *String {
 	h.strings = h.strings[:n+1]
 	h.used.strings++
 	s := &h.strings[n]
-	if isASCII(g) {
+	if len(g) >= jsonPlainMin {
+		if ascii, plain := jsonASCII(g); ascii {
+			*s = String{s: g, n: int32(len(g)), kind: strASCII, jsonPlain: plain}
+			h.strs[slot] = s
+			return s
+		}
+	} else if isASCII(g) {
 		*s = String{s: g, n: int32(len(g)), kind: strASCII}
 		h.strs[slot] = s
 		return s
@@ -567,8 +580,8 @@ func (hostConvList) conv(h *hostHeap, v []string) (Value, error) { return h.stri
 
 // materializeMap lays out the entries of m as eager conversion did: named
 // keys sorted under the cached host shape (replayed onto the object's root
-// if its prototype was changed while it was a placeholder), canonical array
-// indices as elements.
+// if its prototype was changed while it was a placeholder) or, past
+// maxShapeProps, in a dictionary, canonical array indices as elements.
 func materializeMap[V any, C hostConv[V]](h *hostHeap, o *Object, m map[string]V, scratch *[]hostPair[V], c C) {
 	r := h.r
 	pairs := (*scratch)[:0]
@@ -605,9 +618,23 @@ func materializeMap[V any, C hostConv[V]](h *hostHeap, o *Object, m map[string]V
 	root := r.rootShapeFor(o.proto)
 	o.shape = root
 	if len(named) > maxShapeProps {
-		for i := range named {
-			o.addNamed(r, StringKey(r.InternGoString(named[i].k)), h.cellOf(c.conv(h, named[i].v)))
+		// Past what a shape holds: a dictionary from the start.
+		d := o.dict
+		if d == nil {
+			d = &dictProps{}
+			o.dict = d
 		}
+		d.index = make(map[PropertyKey]int32, len(named))
+		d.entries = make([]dictEntry, 0, len(named))
+		for i := range named {
+			d.add(StringKey(r.InternGoString(named[i].k)), h.cellOf(c.conv(h, named[i].v)))
+		}
+		if len(d.index) != len(d.entries) {
+			d.dropShadowed() // keys that decode to one atom (shadowHostKeys)
+		}
+		o.shape, o.slots = dictShape, nil
+		o.flags |= flagDict
+		r.bumpEpoch(o)
 	} else if len(named) > 0 {
 		slots := h.valueSlice(len(named))
 		for i := range named {
@@ -616,11 +643,11 @@ func materializeMap[V any, C hostConv[V]](h *hostHeap, o *Object, m map[string]V
 				// The all-data host shape cannot describe the throwing
 				// accessor: lay the object out key by key instead.
 				for j := range i {
-					o.addNamed(r, StringKey(r.InternGoString(named[j].k)), propCell{value: slots[j], attrs: attrDefault})
+					o.addHostNamed(r, named[j].k, propCell{value: slots[j], attrs: attrDefault})
 				}
-				o.addNamed(r, StringKey(r.InternGoString(named[i].k)), h.cellOf(v, err))
+				o.addHostNamed(r, named[i].k, h.cellOf(v, err))
 				for j := i + 1; j < len(named); j++ {
-					o.addNamed(r, StringKey(r.InternGoString(named[j].k)), h.cellOf(c.conv(h, named[j].v)))
+					o.addHostNamed(r, named[j].k, h.cellOf(c.conv(h, named[j].v)))
 				}
 				slots = nil
 				break
@@ -629,7 +656,7 @@ func materializeMap[V any, C hostConv[V]](h *hostHeap, o *Object, m map[string]V
 		}
 		if slots != nil {
 			if e == nil {
-				e = hostShapeFor(r, hash, named)
+				e = hostShapeFor(h, hash, named)
 				if ways != nil && len(named) == len(pairs) {
 					ways[0], ways[1] = e, ways[0]
 				}
@@ -647,6 +674,18 @@ func materializeMap[V any, C hostConv[V]](h *hostHeap, o *Object, m map[string]V
 	}
 	clear(pairs)
 	*scratch = trimScratch(pairs)
+}
+
+// addHostNamed adds the entry k of a Go map laid out key by key. A key that
+// decodes to the atom of an earlier one replaces it (shadowHostKeys).
+func (o *Object) addHostNamed(r *Realm, k string, c propCell) {
+	key := StringKey(r.InternGoString(k))
+	if key.String().kind != strASCII {
+		if _, _, ok := o.lookupNamed(key); ok {
+			o.removeNamed(r, key)
+		}
+	}
+	o.addNamed(r, key, c)
 }
 
 // predictPairs fills pairs with the entries of m in the key order of the
@@ -877,7 +916,11 @@ func hostContainerMatches(v Value, e any, n int, isNil, isArray bool) bool {
 	if n != 0 {
 		return c.flags&flagHostNode != 0 && sameEface(c.hostSrc(), e)
 	}
-	if len(c.elements) != 0 || c.dict != nil {
+	// Elements, dense or sparse, are a change; a dictProps without sparse
+	// elements is not one by itself (dictionary mode is checked below): an
+	// empty object that became a prototype or a WeakMap key has one (its
+	// root, its weak entries) and still matches.
+	if len(c.elements) != 0 || c.dict != nil && len(c.dict.sparse) != 0 {
 		return false
 	}
 	if isArray {

@@ -951,6 +951,11 @@ func sortValues(r *Realm, items []Value, cmp Value) error {
 			return err
 		}
 		keyed[i] = sortItem{v: v, key: s}
+		// An array of primitives converts without entering bytecode, which
+		// is what checks for an interrupt.
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return err
+		}
 	}
 	err := mergeSort(keyed, make([]sortItem, len(keyed)), func(a, b sortItem) (int, error) {
 		steps++

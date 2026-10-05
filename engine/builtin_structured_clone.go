@@ -19,9 +19,9 @@ package engine
 // The clone runs in one pass: an object's copy is created (and recorded in
 // the memory map) when it is first reached, then its properties are copied
 // depth first from an explicit stack, so getters run in the spec's order
-// and nesting depth costs no Go stack. Deserializing only defines data
-// properties on fresh objects, so interleaving it with serialization is
-// unobservable.
+// and nesting depth costs no Go stack; nesting more than maxCloneDepth
+// objects converted from Go deep is a RangeError. Deserializing only defines data properties on fresh objects,
+// so interleaving it with serialization is unobservable.
 
 var (
 	AtomStructuredClone = staticAtom("structuredClone")
@@ -142,15 +142,17 @@ type cloneFrame struct {
 	items    []Value
 	coll     *collection // dst's entries (Map or Set)
 	isMap    bool
+	host     bool  // src was converted from Go (cloner.hostDepth)
 	key      Value // a Map entry's copied key, waiting for its value
 	i        int
 }
 
 type cloner struct {
-	r      *Realm
-	memory map[*Object]*Object
-	stack  []cloneFrame
-	steps  int64
+	r         *Realm
+	memory    map[*Object]*Object
+	stack     []cloneFrame
+	steps     int64
+	hostDepth int // frames of the stack whose src was converted from Go
 }
 
 func (c *cloner) run(v Value) (Value, error) {
@@ -177,7 +179,7 @@ func (c *cloner) step() error {
 	f := &c.stack[top]
 	if f.coll != nil {
 		if f.i == len(f.items) {
-			c.stack = c.stack[:top]
+			c.pop()
 			return nil
 		}
 		v := f.items[f.i]
@@ -221,8 +223,17 @@ func (c *cloner) step() error {
 		_, err = dst.CreateDataProperty(r, key, out)
 		return err
 	}
-	c.stack = c.stack[:top]
+	c.pop()
 	return nil
+}
+
+// pop drops the innermost frame.
+func (c *cloner) pop() {
+	top := len(c.stack) - 1
+	if c.stack[top].host {
+		c.hostDepth--
+	}
+	c.stack = c.stack[:top]
 }
 
 // clone returns v's copy, pushing a frame for the contents of a new
@@ -301,10 +312,24 @@ func (c *cloner) clone(v Value) (Value, error) {
 	}
 	c.remember(o, dst)
 	if len(frame.keys) != 0 || len(frame.items) != 0 {
+		if o.flags&flagHostNode != 0 {
+			if c.hostDepth >= maxCloneDepth {
+				return Undefined(), r.RangeError("Maximum call stack size exceeded")
+			}
+			c.hostDepth++
+			frame.host = true
+		}
 		c.stack = append(c.stack, frame)
 	}
 	return ObjectValue(dst), nil
 }
+
+// maxCloneDepth bounds how many objects converted from Go a clone copies
+// nested in each other. The explicit stack costs no Go stack, so JavaScript
+// nesting is not bounded, but a Go container that contains itself converts
+// to an unbounded tree of fresh objects (hostlazy.go), whose copy would grow
+// until memory ran out.
+const maxCloneDepth = MaxToGoDepth
 
 // remember records dst as the copy of o in the memory map.
 func (c *cloner) remember(o, dst *Object) {

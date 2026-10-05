@@ -34,7 +34,8 @@ func installIntrinsics(r *Realm) {
 	installAggregateError(r)
 	installGenerators(r)
 	installSpecies(r)
-	installLateGlobals(r) // last: the lateGlobal bindings
+	installRegExpStatics(r) // after @@species
+	installLateGlobals(r)   // last: the lateGlobal bindings
 }
 
 // notAvailableCall/Construct are the placeholders for constructors whose

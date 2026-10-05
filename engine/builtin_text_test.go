@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -398,10 +399,20 @@ func TestTextInterrupts(t *testing.T) {
 // TestTextDecoderInterruptLatency checks that decode sees an interrupt that
 // arrives after its ASCII prefix scan: while it widens a long prefix before
 // a sequence that is not ASCII, and while it narrows the ASCII result left
-// before a sequence the next call completes. An interrupt that lands before
-// the call returns must end it, or it must return soon after (the last
-// chunk ran), and never a quarter of the call's time later.
+// before a sequence the next call completes. An interrupt fired at any of
+// many points through such a call must end it, or let it return, within
+// the time the runtime takes to allocate the 64 MiB of code units (which it
+// zeroes, and no check can break up) and a sixteenth of the call. Without
+// the checks of either loop, one fired as that allocation or the loop's own
+// (32 MiB) starts waits for it and then the whole loop. Each call starts
+// after a collection, and so does the allocation timed before it, so both
+// reuse memory they must zero; none runs during them, as one would stop the
+// call for longer than its checks are apart: decoderBallast keeps the heap
+// goal far above what a call allocates. A call that ran more than twice its
+// time was descheduled, so its point runs again.
 func TestTextDecoderInterruptLatency(t *testing.T) {
+	decoderBallast = make([]byte, 1<<30)
+	t.Cleanup(func() { decoderBallast = nil })
 	r := NewRealm()
 	ascii := bytes.Repeat([]byte("a"), 32<<20)
 	for _, c := range []struct {
@@ -413,19 +424,36 @@ func TestTextDecoderInterruptLatency(t *testing.T) {
 		{"narrow", append(ascii, 0xE2), true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			alloc := func() time.Duration {
+				runtime.GC()
+				start := time.Now()
+				units := make([]uint16, len(c.in)+4)
+				d := time.Since(start)
+				runtime.KeepAlive(units)
+				runtime.GC()
+				return d
+			}
 			base := time.Duration(math.MaxInt64)
 			for range 2 {
+				runtime.GC()
 				start := time.Now()
 				_, err := r.decodeUTF8(&textDecoder{}, c.in, c.stream)
 				require.NoError(t, err)
 				base = min(base, time.Since(start))
 			}
-			for _, f := range []float64{0.25, 0.5, 0.75} {
-				var late time.Duration
-				for range 3 {
+			points := 24
+			if raceEnabled {
+				points = 6 // each call runs for long under the detector
+			}
+			for i := 1; i < points; i++ {
+				at := base * time.Duration(i) / time.Duration(points)
+				var late, bound time.Duration
+				for tries, slow := 0, 0; tries < 3; tries++ {
+					bound = alloc()*5/4 + base/16
 					var fired time.Time
 					done := make(chan struct{})
-					timer := time.AfterFunc(time.Duration(f*float64(base)), func() {
+					start := time.Now()
+					timer := time.AfterFunc(at, func() {
 						fired = time.Now()
 						r.Interrupt("x")
 						close(done)
@@ -438,15 +466,29 @@ func TestTextDecoderInterruptLatency(t *testing.T) {
 					}
 					<-done
 					r.ClearInterrupt()
-					if late = end.Sub(fired); err != nil || late < base/4 {
+					if err != nil {
+						var ie *InterruptedError
+						require.ErrorAs(t, err, &ie)
+					}
+					if late = end.Sub(fired); late < bound {
 						break
 					}
+					if end.Sub(start) > 2*base && slow < 20 {
+						slow++
+						tries--
+					}
 				}
-				assert.Less(t, late, base/4, "an interrupt at %.0f%% of %v", 100*f, base)
+				assert.Less(t, late, bound, "an interrupt %v into a call of %v", at, base)
 			}
 		})
 	}
 }
+
+// decoderBallast is TestTextDecoderInterruptLatency's ballast. A package
+// variable links nothing into the test binary, where runtime/debug or a
+// deferred runtime.KeepAlive would add runtime code linked before the
+// engine and move the interpreter's code.
+var decoderBallast []byte
 
 // TestTextStringLimit checks that decode raises a RangeError for a string
 // over the length limit, past a BOM it drops.

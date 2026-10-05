@@ -161,7 +161,7 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 // writeExtra renders ExtraArg word i of op.
 func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 	switch op {
-	case GetGlobal, GetGlobalOrUndef, SetGlobal, GetProp, SetProp, DefineField, GetTemplate, SetGlobalSloppy, SetPropSloppy:
+	case GetGlobal, GetGlobalOrUndef, SetGlobal, GetProp, SetProp, DefineField, GetTemplate, SetGlobalSloppy, ResolveGlobal, SetGlobalRef, SetPropSloppy:
 		sb.WriteString("K")
 		sb.WriteString(strconv.Itoa(int(ExtraLo(x))))
 		sb.WriteString(" ic")
@@ -177,6 +177,9 @@ func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 			sb.WriteString(strconv.Itoa(int(ExtraHi(x))))
 		}
 	case GetEnvW, SetEnvW, DefineAccessor, SetPrivateMethod:
+		sb.WriteString(strconv.Itoa(int(x)))
+	case GetElemRef:
+		sb.WriteString("r")
 		sb.WriteString(strconv.Itoa(int(x)))
 	case CallEval:
 		sb.WriteString("E")

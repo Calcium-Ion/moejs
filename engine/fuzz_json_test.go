@@ -32,10 +32,10 @@ func fuzzJSONNormalize(v any) any {
 }
 
 // FuzzJSON checks JSON.parse against encoding/json: the same texts are
-// valid (inputs nesting deeper than JSON.parse's 512 levels are skipped),
-// a valid text parses to the same value when encoding/json can represent
-// it (valid UTF-8, no surrogate escapes, finite numbers), and
-// stringify(parse(text)) is a fixed point of parse-then-stringify.
+// valid (both accept nesting 10,000 levels deep and no deeper), a valid
+// text parses to the same value when encoding/json can represent it (valid
+// UTF-8, no surrogate escapes, finite numbers), and stringify(parse(text))
+// is a fixed point of parse-then-stringify.
 func FuzzJSON(f *testing.F) {
 	for _, s := range []string{
 		`{"a":[1,-0,2.5e-3,1E+2,true,false,null],"b":{"":"\u00e9\n\"\\\/"}}`,
@@ -49,9 +49,6 @@ func FuzzJSON(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, text string) {
-		if strings.Count(text, "[")+strings.Count(text, "{") > 500 {
-			return
-		}
 		r := NewRealm()
 		v, err := r.JSONParse(FromGoString(text))
 		if err != nil {

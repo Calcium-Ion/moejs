@@ -139,6 +139,10 @@ const (
 	ForInInit // AB    R[A] = key list of R[B], R[A+1] = 0, R[A+2] = ToObject(R[B]) (or undefined)
 	ForInNext // AsBx  R[A+3] = next key still present on R[A+2]; when done pc += sBx
 
+	// --- references (on the jump table, numbered after the ops above so
+	// that code without them keeps its encoding) ---
+	GetElemRef // ABC+X R[C] = R[X], converted once; R[A] = R[B][R[C]]; X = register
+
 	// --- classes (dispatched off the interpreter's jump table) ---
 	CtorEntry         // A     R[A] = new.target; TypeError when a class constructor is called
 	LoadNewTarget     // A     R[A] = new.target, or undefined in a [[Call]]
@@ -195,6 +199,8 @@ const (
 
 	// --- sloppy mode, script globals and with (dispatched after the async ops) ---
 	SetGlobalSloppy // A+X   global[name] = R[A] in sloppy mode: creates an unresolvable name, a rejected write is ignored; X = name:16 | ic:16
+	ResolveGlobal   // A+X   R[A] = whether the global environment has a binding name (strict, before the value of an assignment); X = name:16 | ic:16
+	SetGlobalRef    // AB+X  global binding name = R[A] (strict) when R[B], ResolveGlobal's result, else ReferenceError; X = name:16 | ic:16 (ResolveGlobal's)
 	InitGlobal      // A+X   initialize the script's global lexical binding name to R[A]; X = name:16 | const<<16
 	SetGlobalVar    // A+X   Annex B.3.2.2: global[name] = R[A] (sloppy) unless a global lexical binding name exists; X = name const
 	DelGlobal       // A+X   R[A] = delete of the global binding name (false for a global lexical); X = name const
@@ -354,6 +360,8 @@ var opTable = [...]opInfo{
 	ForInInit: {"ForInInit", FmtAB, 0},
 	ForInNext: {"ForInNext", FmtAsBx, 0},
 
+	GetElemRef: {"GetElemRef", FmtABC, 1},
+
 	CtorEntry:         {"CtorEntry", FmtA, 0},
 	LoadNewTarget:     {"LoadNewTarget", FmtA, 0},
 	LoadHome:          {"LoadHome", FmtA, 0},
@@ -403,6 +411,8 @@ var opTable = [...]opInfo{
 	ImportMeta: {"ImportMeta", FmtA, 0},
 
 	SetGlobalSloppy: {"SetGlobalSloppy", FmtA, 1},
+	ResolveGlobal:   {"ResolveGlobal", FmtA, 1},
+	SetGlobalRef:    {"SetGlobalRef", FmtAB, 1},
 	InitGlobal:      {"InitGlobal", FmtA, 1},
 	SetGlobalVar:    {"SetGlobalVar", FmtA, 1},
 	DelGlobal:       {"DelGlobal", FmtA, 1},

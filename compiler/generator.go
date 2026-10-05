@@ -15,7 +15,8 @@ import (
 // like the statements.
 
 // genMaxDepth bounds the environment depth and code size at a suspension
-// point: the engine keeps both in the saved pc (generator.go).
+// point and at a direct eval: the engine keeps both in the saved pc
+// (generator.go, and frameOp's rerun in sloppy.go).
 const (
 	genMaxDepth = 1<<8 - 1
 	genMaxCode  = 1<<24 - 1

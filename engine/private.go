@@ -90,7 +90,11 @@ func (o *Object) privateSlot(pn *PrivateName) *Value {
 		return &o.slots[slot]
 	}
 	if o.dict == nil {
-		return nil // a host placeholder (hostlazy.go): addPrivate materializes it
+		// A host placeholder (hostlazy.go), which has no private elements:
+		// addPrivate materializes it. One that became a prototype or a
+		// WeakMap key has a dictProps (its root, its weak entries) without
+		// properties, and the lookup below finds nothing either.
+		return nil
 	}
 	c, ok := o.dict.lookup(PrivateKey(pn))
 	if !ok {

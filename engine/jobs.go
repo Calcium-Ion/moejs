@@ -82,7 +82,7 @@ func (r *Realm) enqueue(jb job) {
 // call's error, and endJob returns the call's error (see the file comment).
 // It leaves no job queued and no object kept, and so clears r.jobsPending
 // (a Go panic out of the call before it runs leaves the call's jobs queued,
-// and one out of a job the jobs after it).
+// and one out of a job the jobs after it, for DropJobs).
 //
 //go:noinline
 func (r *Realm) endJob(err error) error {
@@ -145,6 +145,29 @@ func (r *Realm) dropJobs(reaction *promiseReaction, err error) {
 		r.stopModules(reaction, j.queue[j.head:], err)
 	}
 	j.drop()
+}
+
+// DropJobs discards the queued jobs after a Go panic out of a call, which
+// skipped the drain at the call's end (or the rest of it, for a panic out
+// of a job): a host that recovers the panic at its outermost boundary calls
+// it after RestoreCallState, so that the call's jobs do not run at the end
+// of the next one. The modules in asynchronous evaluation those jobs would
+// have continued fail with err. A no-op inside a call, where the jobs are
+// the outermost call's. It also clears what a JSON.parse the panic stopped
+// left on the realm's kept stack (jsonStack).
+func (r *Realm) DropJobs(err error) {
+	if r.callDepth != 0 || r.lazy == nil {
+		return
+	}
+	if s := r.lazy.json; s != nil {
+		s.keep(s.vals[:cap(s.vals)], s.keys[:cap(s.keys)])
+	}
+	if r.lazy.jobs == nil {
+		return
+	}
+	r.jobsPending = false
+	r.lazy.jobs.clearKept()
+	r.dropJobs(nil, err)
 }
 
 // drop discards the queued jobs, releasing a large queue as the end of a

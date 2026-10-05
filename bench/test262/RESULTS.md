@@ -5,16 +5,16 @@ edit by hand. The commands and the rules are in README.md.
 
 - Revision: 045bf6f9966ce3291b8fbc1e0403cd97b9201b00
 - Scope: test/language, test/built-ins, test/annexB, test/harness
-- Wall time: 51.2s on 8 workers
-- All tests: 93443, pass 79316, fail 31, skip 14096
-- language + built-ins: 77860 run, 77829 pass (100.0%)
-- annexB: 1255 run, 1255 pass (100.0%)
+- Wall time: 53.3s on 8 workers
+- All tests: 93443, pass 79385, fail 0, skip 14058
+- language + built-ins: 77860 run, 77860 pass (100.0%)
+- annexB: 1293 run, 1293 pass (100.0%)
 
 ## By directory
 
 | Directory | Tests | Pass | Fail | Skip | Pass rate (run) |
 |---|--:|--:|--:|--:|--:|
-| annexB/built-ins | 482 | 412 | 0 | 70 | 100.0% |
+| annexB/built-ins | 482 | 450 | 0 | 32 | 100.0% |
 | annexB/language | 895 | 843 | 0 | 52 | 100.0% |
 | built-ins/AbstractModuleSource | 8 | 0 | 0 | 8 | - |
 | built-ins/AggregateError | 50 | 48 | 0 | 2 | 100.0% |
@@ -90,11 +90,11 @@ edit by hand. The commands and the rules are in README.md.
 | language/directive-prologue | 62 | 62 | 0 | 0 | 100.0% |
 | language/eval-code | 454 | 452 | 0 | 2 | 100.0% |
 | language/export | 3 | 3 | 0 | 0 | 100.0% |
-| language/expressions | 21286 | 20338 | 30 | 918 | 99.9% |
+| language/expressions | 21286 | 20368 | 0 | 918 | 100.0% |
 | language/function-code | 281 | 281 | 0 | 0 | 100.0% |
 | language/future-reserved-words | 85 | 85 | 0 | 0 | 100.0% |
 | language/global-code | 75 | 75 | 0 | 0 | 100.0% |
-| language/identifier-resolution | 22 | 21 | 1 | 0 | 95.5% |
+| language/identifier-resolution | 22 | 22 | 0 | 0 | 100.0% |
 | language/identifiers | 535 | 535 | 0 | 0 | 100.0% |
 | language/import | 135 | 4 | 0 | 131 | 100.0% |
 | language/keywords | 50 | 50 | 0 | 0 | 100.0% |
@@ -114,7 +114,7 @@ edit by hand. The commands and the rules are in README.md.
 
 | Reason | Tests |
 |---|--:|
-| unimplemented feature | 13644 |
+| unimplemented feature | 13606 |
 | non-goal | 452 |
 
 ## Implemented features
@@ -212,7 +212,7 @@ implies it.
 | async-functions | 1308 | 1206 | 0 | 102 | 100.0% |
 | async-iteration | 9795 | 9733 | 0 | 62 | 100.0% |
 | change-array-by-copy | 274 | 274 | 0 | 0 | 100.0% |
-| class | 9423 | 9290 | 0 | 133 | 100.0% |
+| class | 9423 | 9304 | 0 | 119 | 100.0% |
 | class-fields-private | 2247 | 2245 | 0 | 2 | 100.0% |
 | class-fields-private-in | 38 | 38 | 0 | 0 | 100.0% |
 | class-fields-public | 4098 | 4096 | 0 | 2 | 100.0% |
@@ -238,6 +238,7 @@ implies it.
 | hashbang | 35 | 35 | 0 | 0 | 100.0% |
 | import.meta | 28 | 28 | 0 | 0 | 100.0% |
 | json-superset | 8 | 8 | 0 | 0 | 100.0% |
+| legacy-regexp | 52 | 38 | 0 | 14 | 100.0% |
 | let | 131 | 131 | 0 | 0 | 100.0% |
 | logical-assignment-operators | 192 | 186 | 0 | 6 | 100.0% |
 | new.target | 125 | 121 | 0 | 4 | 100.0% |
@@ -283,7 +284,7 @@ that this feature alone keeps from running.
 | iterator-helpers | 786 | 784 |
 | source-phase-imports | 471 | 268 |
 | import-defer | 388 | 386 |
-| cross-realm | 376 | 332 |
+| cross-realm | 376 | 346 |
 | source-phase-imports-module-source | 203 | 0 |
 | Atomics.waitAsync (non-goal) | 202 | 0 |
 | await-dictionary | 178 | 178 |
@@ -298,7 +299,6 @@ that this feature alone keeps from running.
 | IsHTMLDDA | 70 | 70 |
 | error-stack-accessor | 70 | 66 |
 | iterator-sequencing | 64 | 64 |
-| legacy-regexp | 52 | 38 |
 | decorators | 42 | 42 |
 | json-parse-with-source | 42 | 42 |
 | RegExp.escape | 40 | 38 |
@@ -318,8 +318,6 @@ Failures grouped by message (the first line of the error, values elided).
 
 | Tests | Category | Example |
 |--:|---|---|
-| 30 | Test262Error: Expected true but got false | language/expressions/compound-assignment/S11.13.2_A7.10_T4.js |
-| 1 | expected a runtime-phase ReferenceError, but the test completed | language/identifier-resolution/assign-to-global-undefined.js |
 
 ## Panics
 

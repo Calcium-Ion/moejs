@@ -4,8 +4,9 @@ import "github.com/Calcium-Ion/moejs/bytecode"
 
 // Sloppy mode, script globals and with. The ops are off the interpreter's
 // jump table (asyncOp's default case): only sloppy code, script top
-// levels and with statements emit them, so strict code and modules never
-// pay for their dispatch.
+// levels and with statements emit them, so strict code and modules pay
+// for their dispatch only in the assignment of an undeclared name from a
+// value that may run code (ResolveGlobal and SetGlobalRef).
 
 // frameOpMarker is the error sloppyOp returns for the ops that need the run
 // loop's own state (this, and the environment and callee MapArguments and
@@ -36,6 +37,33 @@ func (r *Realm) sloppyOp(fd *FunctionData, base int, w uint32, pc int) (int, err
 			return pc + 1, nil
 		}
 		return pc + 1, r.setGlobalSloppy(keys[uint16(x)], regs[a], e)
+	case bytecode.ResolveGlobal:
+		x := code.Code[pc]
+		g := r.Global
+		e := &r.ic[fd.icBase+x>>16]
+		if g.shape == e.Shape && r.protoEpoch == e.Epoch || r.accessorIC(e, g) != nil {
+			regs[a] = True()
+			return pc + 1, nil
+		}
+		has, err := r.hasGlobalBinding(keys[uint16(x)], e)
+		if err != nil {
+			return pc + 1, err
+		}
+		st.stack[base+a] = Bool(has)
+		return pc + 1, nil
+	case bytecode.SetGlobalRef:
+		x := code.Code[pc]
+		key := keys[uint16(x)]
+		if !regs[b].IsTrue() {
+			return pc + 1, r.ReferenceError("%s is not defined", key.GoString())
+		}
+		g := r.Global
+		e := &r.ic[fd.icBase+x>>16]
+		if g.shape == e.Shape && r.protoEpoch == e.Epoch {
+			g.slots[e.Slot()] = regs[a]
+			return pc + 1, nil
+		}
+		return pc + 1, r.setGlobalResolved(key, regs[a], e)
 	case bytecode.InitGlobal:
 		x := code.Code[pc]
 		return pc + 1, r.initGlobalLexical(keys[uint16(x)], regs[a], x>>16 != 0)
@@ -269,6 +297,37 @@ func (r *Realm) setGlobalSloppy(key PropertyKey, v Value, e *ICEntry) error {
 		}
 	}
 	return r.setNamedSloppy(g, key, v, e)
+}
+
+// hasGlobalBinding is HasBinding of the global environment (ES2025
+// 9.1.1.4.1): a global lexical binding, then HasProperty of the global
+// object. A non-nil e caches a lexical binding's slot.
+func (r *Realm) hasGlobalBinding(key PropertyKey, e *ICEntry) (bool, error) {
+	if l, _ := r.globalLexical(key, e); l != nil {
+		return true, nil
+	}
+	return r.hasProperty(r.Global, key)
+}
+
+// setGlobalResolved is SetMutableBinding of the global environment for a
+// strict reference that hasGlobalBinding resolved before the value was
+// evaluated: the HasProperty of the object record's SetMutableBinding
+// throws a ReferenceError when the binding is gone (setGlobalSlow makes
+// ResolveBinding's too).
+func (r *Realm) setGlobalResolved(key PropertyKey, v Value, e *ICEntry) error {
+	g := r.Global
+	if a := r.accessorIC(e, g); a != nil {
+		return r.callSetter(a, ObjectValue(g), key, v)
+	}
+	if l, i := r.globalLexical(key, e); l != nil {
+		return l.set(r, key, i, v)
+	}
+	if has, err := r.hasProperty(g, key); err != nil {
+		return err
+	} else if !has {
+		return r.ReferenceError("%s is not defined", key.GoString())
+	}
+	return r.setNamedSlow(g, key, v, e)
 }
 
 // --- GlobalDeclarationInstantiation -------------------------------------------------

@@ -1,6 +1,9 @@
 package engine
 
-import "unicode/utf16"
+import (
+	"slices"
+	"unicode/utf16"
+)
 
 // StringBuilder accumulates code units and produces a *String. It stores
 // ASCII bytes until the first unit >= 0x80 is written, then upgrades to
@@ -143,8 +146,11 @@ func (sb *StringBuilder) WriteASCII(c byte) {
 // writeASCIIBytes appends bytes that are all < 0x80.
 func (sb *StringBuilder) writeASCIIBytes(s string) {
 	if sb.u != nil {
+		n := len(sb.u)
+		sb.u = slices.Grow(sb.u, len(s))[:n+len(s)]
+		u := sb.u[n:][:len(s)]
 		for i := range len(s) {
-			sb.u = append(sb.u, uint16(s[i]))
+			u[i] = uint16(s[i])
 		}
 		return
 	}
@@ -193,11 +199,14 @@ func (sb *StringBuilder) WriteString(s *String) {
 	sb.u = append(sb.u, s.u...)
 }
 
-// WriteUTF16 appends raw code units.
+// WriteUTF16 appends raw code units: one at a time until the first unit >=
+// 0x80 has upgraded the builder, then the rest at once.
 func (sb *StringBuilder) WriteUTF16(u []uint16) {
-	for _, c := range u {
-		sb.WriteUnit(c)
+	for len(u) > 0 && sb.u == nil {
+		sb.WriteUnit(u[0])
+		u = u[1:]
 	}
+	sb.u = append(sb.u, u...)
 }
 
 // String finishes the builder and returns the result. The builder must not be
@@ -219,6 +228,18 @@ func (sb *StringBuilder) String() *String {
 	s := asciiStringCopy(sb.inline[:sb.n])
 	sb.n = 0
 	return s
+}
+
+// truncate drops the code units written after the first n.
+func (sb *StringBuilder) truncate(n int) {
+	switch {
+	case sb.u != nil:
+		sb.u = sb.u[:n]
+	case sb.b != nil:
+		sb.b = sb.b[:n]
+	default:
+		sb.n = n
+	}
 }
 
 // Reset clears the builder for reuse, keeping no reference to the old buffer.

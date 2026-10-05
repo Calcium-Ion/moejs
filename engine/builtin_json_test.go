@@ -118,8 +118,6 @@ func TestJSONParseErrors(t *testing.T) {
 		{`[1 2]`, "Unexpected token 2 in JSON at position 3"},
 		{`{"a":1 "b":2}`, `Unexpected token " in JSON at position 7`},
 		{`é`, "Unexpected token é in JSON at position 0"},
-		{strings.Repeat("[", 513), "JSON nesting too deep"},
-		{strings.Repeat(`{"a":`, 513), "JSON nesting too deep"},
 	}
 	for _, c := range cases {
 		t.Run(c.text[:min(len(c.text), 20)], func(t *testing.T) {
@@ -127,9 +125,13 @@ func TestJSONParseErrors(t *testing.T) {
 			assertErrorKind(t, err, KindSyntaxError, c.msg)
 		})
 	}
-	// Depth 512 is fine.
-	deep := strings.Repeat("[", 512) + strings.Repeat("]", 512)
+	// Nesting is bounded by jsonMaxDepth, with a RangeError.
+	deep := strings.Repeat("[", jsonMaxDepth) + strings.Repeat("]", jsonMaxDepth)
 	jsonParseGo(t, r, deep)
+	for _, text := range []string{strings.Repeat("[", jsonMaxDepth+1), strings.Repeat(`{"a":`, jsonMaxDepth+1)} {
+		_, err := callMethodErr(r, ObjectValue(r.JSON), "parse", str(text))
+		assertErrorKind(t, err, KindRangeError, "Maximum call stack size exceeded")
+	}
 	// Interrupts are honoured.
 	r.Interrupt("stop")
 	_, err := callMethodErr(r, ObjectValue(r.JSON), "parse", str("["+strings.Repeat("1,", 5000)+"1]"))
@@ -218,7 +220,7 @@ func TestJSONParseReviverGrowing(t *testing.T) {
 	runProtoCases(t, []protoCase{
 		{"growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: Maximum call stack size exceeded"},
 		{"growing object", `return JSON.parse('{"a":1,"b":{}}', function (k, v) { if (k === 'a') this.b = {a: 1, b: {}}; return v })`, "!RangeError: Maximum call stack size exceeded"},
-		{"deepest", `const s = '['.repeat(512) + ']'.repeat(512); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "512SyntaxError"},
+		{"deepest", `const s = '['.repeat(10000) + ']'.repeat(10000); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "10000RangeError"},
 	})
 }
 
@@ -364,9 +366,9 @@ func TestJSONStringifyToJSONAndErrors(t *testing.T) {
 	g.DefineOwnAccessorFast(r, key(r, "g"), thrower, nil, attrEnumerable|attrConfigurable)
 	_, err = callMethodErr(r, ObjectValue(r.JSON), "stringify", ObjectValue(g))
 	assertErrorKind(t, err, KindTypeError, "getter boom")
-	// Deep nesting is bounded.
-	deep := jsonParseGo(t, r, strings.Repeat("[", 512)+strings.Repeat("]", 512))
-	assert.Equal(t, strings.Repeat("[", 512)+strings.Repeat("]", 512), jsonStringifyGo(t, r, deep))
+	// Nesting up to jsonMaxDepth serializes.
+	text := strings.Repeat("[", jsonMaxDepth) + strings.Repeat("]", jsonMaxDepth)
+	assert.Equal(t, text, jsonStringifyGo(t, r, jsonParseGo(t, r, text)))
 	// Interrupt.
 	bigArr := jsonParseGo(t, r, "["+strings.Repeat("1,", 5000)+"1]")
 	r.Interrupt("stop")

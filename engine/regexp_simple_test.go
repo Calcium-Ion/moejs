@@ -9,11 +9,11 @@ import (
 
 // TestSimpleClassRecognizer pins which patterns take the single-class path.
 func TestSimpleClassRecognizer(t *testing.T) {
-	accepted := []string{`\s+`, `\d`, `\S`, `\w{2,4}`, `[a-z]+`, `[^a-z0-9]+`, `[\s,]+`, `[\t\n ]`, `[-a]`, `[a-]`, `[\d-x]`, `[\x41-\x5a]{3}`, `[ ]+`, `[]`, `[^]`, `[\]\-\\]+`, `\d{2,}`, `[\b]`, `[\0]`, `[\s--1]`, `[\d-\s-a]`}
+	accepted := []string{`a`, `&`, `"`, `-`, `a+`, `<{2}`, `\/`, `\.`, `\$+`, `\]`, `é`, `\s+`, `\d`, `\S`, `\w{2,4}`, `[a-z]+`, `[^a-z0-9]+`, `[\s,]+`, `[\t\n ]`, `[-a]`, `[a-]`, `[\d-x]`, `[\x41-\x5a]{3}`, `[ ]+`, `[]`, `[^]`, `[\]\-\\]+`, `\d{2,}`, `[\b]`, `[\0]`, `[\s--1]`, `[\d-\s-a]`}
 	for _, p := range accepted {
 		assert.NotNil(t, compileSimpleClass(FromGoString(p).UTF16(), regexpFlags{global: true}), p)
 	}
-	rejected := []string{``, `a`, `.`, `\s*`, `\s?`, `\s+?`, `\d{0,3}`, `\b`, `\s+\d`, `(\s)`, `[a-\d]`, `[z-a]`, `[\uD83D]`, `\p{L}`, `[\q]`, `\01`, `\0`, `\d{1001}`, `[a-z`, `\s+x`}
+	rejected := []string{``, `ab`, `a*`, `]`, `{`, `}`, `|`, `$`, `^`, `\-`, `\uD83D`, `.`, `\s*`, `\s?`, `\s+?`, `\d{0,3}`, `\b`, `\s+\d`, `(\s)`, `[a-\d]`, `[z-a]`, `[\uD83D]`, `\p{L}`, `[\q]`, `\01`, `\0`, `\d{1001}`, `[a-z`, `\s+x`}
 	for _, p := range rejected {
 		assert.Nil(t, compileSimpleClass(FromGoString(p).UTF16(), regexpFlags{global: true}), p)
 	}
@@ -35,6 +35,7 @@ func TestSimpleClassMatchesTranslator(t *testing.T) {
 		{`[\x00-\x1f]+`, "g"}, {`[ 　]+`, "g"}, {`[^]`, "g"}, {`[]`, "g"}, {`[éü]+`, "g"}, {`[Ѐ-ӿ]+`, "gu"},
 		{`[-.]+`, "g"}, {`[.\-]`, "g"}, {`\s+`, "gm"}, {`\d+`, "gs"},
 		{`[\s--1]`, "g"}, {`[\d-x]+`, "g"}, {`[\d-\s-a]+`, "g"}, {`[\w-.]+`, "g"},
+		{`&`, "g"}, {`"`, "g"}, {`e`, ""}, {`\.`, "g"}, {`-+`, "g"}, {`ü`, "gu"}, {`\/`, "g"},
 	}
 	var subjects []*String
 	for _, g := range []string{

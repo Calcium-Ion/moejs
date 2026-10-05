@@ -27,13 +27,17 @@ func (r *Realm) tdzError(meta *funcMeta, x uint32) error {
 // fillGetIC records where key was found starting at o, if the location is
 // cacheable: shape-mode objects along the chain, a slot that always holds
 // the property (no attrLazy), depth <= 255, no pending lazy definition of
-// key (or deferred install) on the holder and no deferred install on
-// another object of o's shape (noFill). An accessor gets an accessor entry (odd Epoch).
+// key (or deferred install) on the holder and none on another object of
+// o's shape (noFill, refuseFill). An accessor gets an accessor entry (odd
+// Epoch).
 func (r *Realm) fillGetIC(e *ICEntry, o *Object, key PropertyKey) {
 	// typedArrayKey covers the indices and the numeric strings: a typed
 	// array answers those without its shape, and shares its root shapes with
 	// ordinary objects of the same prototype.
-	if o.flags&flagDict != 0 || typedArrayKey(key) || o.shape.noFill {
+	if o.flags&flagDict != 0 || typedArrayKey(key) {
+		return
+	}
+	if o.shape.noFill != 0 && r.refuseFill(o.shape, key) {
 		return
 	}
 	depth := 0
@@ -154,7 +158,9 @@ func (r *Realm) setNamedSlow(o *Object, key PropertyKey, v Value, e *ICEntry) er
 
 // fillSetIC records where a successful [[Set]] of key on o wrote, if the
 // location is cacheable: an own writable data property of a shape-mode
-// object, or a setter, own or inherited.
+// object, or a setter, own or inherited. A setter is filled by fillGetIC,
+// with its refusals; the shape %RegExp% shares while its statics are
+// pending has no writable data property.
 func (r *Realm) fillSetIC(e *ICEntry, o *Object, key PropertyKey) {
 	if o.flags&(flagDict|flagShared) != 0 || key.IsIndex() || o.flags&flagHasLazy != 0 && o.lazyPending(key) {
 		return

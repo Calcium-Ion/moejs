@@ -94,7 +94,7 @@ type regexpGuard struct {
 
 func (g *regexpGuard) rearm(p *Object) bool {
 	g.shape = nil
-	if p.flags&(flagDict|flagHasLazy) != 0 && !p.onlyCompilePending() {
+	if p.flags&(flagDict|flagHasLazy) != 0 && !p.onlyLegacyPending() {
 		return false // compile, which no path watches, may be pending
 	}
 	g.missing = 0
@@ -579,6 +579,7 @@ func regexpSymSearch(r *Realm, rx *Object, str Value) (Value, error) {
 		if m == nil {
 			return IntValue(-1), nil
 		}
+		r.noteMatch(d, s, d.c, 0)
 		return IntValue(m[0]), nil
 	}
 	previous, err := rx.GetProp(r, lastIndexKey)

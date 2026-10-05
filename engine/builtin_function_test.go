@@ -208,6 +208,26 @@ func TestFunctionToString(t *testing.T) {
 	assert.Equal(t, "function () { [native code] }", jsString(t, jsCall(t, r, bound, "toString")))
 	getter := ObjectValue(r.errorStackAccessor.Get)
 	assert.Equal(t, "function get stack() { [native code] }", jsString(t, jsCall(t, r, getter, "toString")))
+	// A native name no PropertyName matches prints as a computed one, after
+	// a "get " or "set " (nativeName).
+	for name, want := range map[string]string{
+		"get [Symbol.species]": "get [Symbol.species]",
+		"set $_":               "set $_",
+		"get ä1":               "get ä1",
+		"get ":                 "get ",
+		"get $&":               `get ["$&"]`,
+		"set $'":               `set ["$'"]`,
+		"$+":                   `["$+"]`,
+		"get  x":               `get [" x"]`,
+		"getter x":             `["getter x"]`,
+		"a\"b\\\n\u2028":       `["a\"b\\\n` + "\u2028\"]",
+		"1":                    `["1"]`,
+	} {
+		fn := ObjectValue(r.NewNativeFunction(FromGoString(name), 0, nil))
+		assert.Equal(t, "function "+want+"() { [native code] }", jsString(t, jsCall(t, r, fn, "toString")), name)
+	}
+	lone := ObjectValue(r.NewNativeFunction(FromUTF16([]uint16{'g', 'e', 't', ' ', 0xD800}), 0, nil))
+	assert.Equal(t, `function get ["\ud800"]() { [native code] }`, jsString(t, jsCall(t, r, lone, "toString")))
 	// Bytecode functions print their source slice when the compiler recorded one.
 	src := "const f = function f(a) { return a; };"
 	withSource := bytecode.Function{Name: "f", Length: 1, Kind: bytecode.KindNormal, Source: &bytecode.SourceInfo{Name: "m.js", Src: src, Start: 10, End: 37}}

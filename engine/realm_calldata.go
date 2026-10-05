@@ -5,13 +5,15 @@ package engine
 // (*Realm).run (propGetMono moves by about 8 %). This file's name links
 // ReleaseCallData after interp_run.go and object.go, so run, enterFrame,
 // CallObject, callValue and lookupNamed keep dev's phase whatever its size.
-// Its size, 895 bytes padded to 896 (the order of the RegExp reset's two
-// statements), was tuned so that the functions linked after it, the RegExp
-// backtracker, (*String).flatten and the moejs package's (*Runtime).Call
-// among them, keep dev's phase too: at 901 bytes they moved by 32. After
-// changing this function, or the size of anything linked before run, build
-// the bench test binary (go test -c in bench) on both sides and compare
-// these functions' addresses in go tool nm -size -sort address, mod 64.
+// Its size, 997 bytes padded to 1024 (895 padded to 896, tuned by the
+// order of the RegExp reset's two statements, before the reset of the last
+// match), keeps the functions linked after it, the RegExp backtracker,
+// (*String).flatten and the moejs package's (*Runtime).Call among them, in
+// dev's phase too: its padded size may only change by a multiple of 64 (at
+// 901 bytes they moved by 32). After changing this function, or the size
+// of anything linked before run, build the bench test binary (go test -c
+// in bench) on both sides and compare these functions' addresses in go
+// tool nm -size -sort address, mod 64.
 
 // Past these sizes ReleaseCallData lets a deep recursion's register stack
 // and frame table go instead of clearing them; the next call allocates the
@@ -25,9 +27,11 @@ const (
 // finished calls, so a pooled realm does not keep the last request alive:
 // the host conversion's chunks, whose placeholders hold the Go maps, slices
 // and strings of the arguments (hostHeap); the registers and frame records
-// the finished calls left above the live ones; and the RegExp working
-// copies of their subjects. Values already returned stay valid: their nodes
-// keep their own storage.
+// the finished calls left above the live ones; the RegExp working copies
+// of their subjects; and the last match, which the legacy RegExp statics
+// (RegExp.$1, RegExp.input and the rest) describe: they read "" again, as
+// in a new realm. Values already returned stay valid: their nodes keep
+// their own storage.
 //
 // It ends the host conversion's period, which otherwise ends at the next
 // top-level FromGo, so a host calls it where a request ends, after the
@@ -61,5 +65,9 @@ func (r *Realm) ReleaseCallData() {
 	if rs := r.regexps; rs != nil {
 		rs.subjNext = 0
 		clear(rs.subjects[:])
+		rs.lastS, rs.lastC = nil, nil
+	}
+	if lz := r.lazy; lz != nil {
+		lz.statics = nil
 	}
 }

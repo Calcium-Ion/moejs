@@ -22,13 +22,26 @@ func installJSON(r *Realm) {
 	r.installBuiltins(r.JSON, jsonMethods)
 }
 
-// jsonMaxDepth bounds nesting in parse and stringify.
-const jsonMaxDepth = 512
+// jsonMaxDepth bounds nesting in parse, stringify and the reviver walk, as
+// deep as ToGo exports: past it each is a RangeError. The parser runs no
+// user code, so its recursion, a few hundred bytes of Go stack a level, is
+// held by one parse at a time. Stringify and the reviver walk run user code
+// that can start another walk, so each jsonCallLevels levels of theirs also
+// count as one call against MaxCallDepth, which bounds the Go stack all the
+// walks hold together. Stringify counts only past jsonScanDepth, so that a
+// shallow value pays nothing: the walks that fit in MaxCallDepth when a
+// toJSON at each one's last uncounted level starts the next hold under 8 MB.
+const jsonMaxDepth = MaxToGoDepth
+
+// jsonCallLevels is how many levels of a stringify or reviver walk count as
+// one call.
+const jsonCallLevels = 32
 
 // --- parse -------------------------------------------------------------------------------
 
 // JSONParse parses text with the JSON grammar and no reviver (Go-callable
-// entry point). Errors are JavaScript SyntaxErrors.
+// entry point). Errors are JavaScript SyntaxErrors, except that nesting
+// deeper than MaxToGoDepth arrays and objects is a RangeError.
 func (r *Realm) JSONParse(text *String) (Value, error) {
 	p := jsonParser{r: r}
 	return p.parse(text)
@@ -60,6 +73,12 @@ func jsonParse(r *Realm, this Value, args []Value) (Value, error) {
 func (r *Realm) internalizeJSONProperty(holder *Object, name PropertyKey, reviver Value, depth int) (Value, error) {
 	if depth > jsonMaxDepth {
 		return Undefined(), r.RangeError("Maximum call stack size exceeded")
+	}
+	if depth > 0 && depth%jsonCallLevels == 0 {
+		if err := r.EnterCall(); err != nil {
+			return Undefined(), err
+		}
+		defer r.ExitCall()
 	}
 	val, err := holder.Get(r, name, ObjectValue(holder))
 	if err != nil {
@@ -118,9 +137,11 @@ func (r *Realm) reviveJSONElement(o *Object, k PropertyKey, reviver Value, depth
 }
 
 type jsonParser struct {
-	r     *Realm
-	src   string // ASCII text or WTF-8 working copy
-	ascii bool
+	r   *Realm
+	src string // ASCII text or WTF-8 working copy
+	// short holds recent short plain literals by content (strSlot): a
+	// repeated value (a role, a type, a status) is one String.
+	short [hostStrSlots]*String
 	pos   int
 	depth int
 	work  int
@@ -128,25 +149,67 @@ type jsonParser struct {
 	keys  []PropertyKey
 }
 
+// jsonStack is the stack a parse builds containers on: the values and keys
+// of the containers still open. A parse runs no JavaScript (a reviver runs
+// once it has returned), so the realm keeps one (realmLazy) that every
+// parse reuses and leaves cleared, so that what it keeps pins nothing. A Go
+// panic out of a parse skips the clearing; DropJobs does it at the host's
+// boundary.
+type jsonStack struct {
+	vals []Value
+	keys []PropertyKey
+}
+
+// jsonStackMax bounds the entries a kept stack has room for (4 KiB each);
+// a parse that needed more grows its own from nil.
+const jsonStackMax = 256
+
 func (p *jsonParser) parse(text *String) (Value, error) {
 	if text.kind == strRope {
 		text.flatten()
 	}
 	if text.kind == strASCII {
-		p.src, p.ascii = text.s, true
-	} else {
-		p.src = wtf8FromUTF16(text.u)
+		return p.parseText(text.s)
 	}
+	return p.parseText(wtf8FromUTF16(text.u))
+}
+
+// parseText parses src, ASCII or WTF-8; the strings of the result may alias
+// it.
+func (p *jsonParser) parseText(src string) (Value, error) {
+	p.src = src
+	l := p.r.lazyState()
+	if l.json == nil {
+		l.json = &jsonStack{}
+	}
+	p.stack, p.keys = l.json.vals, l.json.keys
 	p.skipWS()
 	v, err := p.value()
+	if err == nil {
+		p.skipWS()
+		if p.pos < len(p.src) {
+			err = p.unexpected()
+		}
+	}
+	l.json.keep(p.stack, p.keys)
 	if err != nil {
 		return Undefined(), err
 	}
-	p.skipWS()
-	if p.pos < len(p.src) {
-		return Undefined(), p.unexpected()
-	}
 	return v, nil
+}
+
+// keep takes back the stack a parse grew, clearing the entries a failed
+// parse left (those of the containers it was in).
+func (s *jsonStack) keep(vals []Value, keys []PropertyKey) {
+	clear(vals)
+	clear(keys)
+	if cap(vals) > jsonStackMax {
+		vals = nil
+	}
+	if cap(keys) > jsonStackMax {
+		keys = nil
+	}
+	s.vals, s.keys = vals[:0], keys[:0]
 }
 
 // wtf8FromUTF16 encodes code units as UTF-8, with lone surrogates encoded as
@@ -319,33 +382,27 @@ func (p *jsonParser) requireDigits() error {
 	return nil
 }
 
-// str parses a string literal (p.pos at the opening quote).
+// str parses a string literal (p.pos at the opening quote). jsonScan stops
+// at bytes >= 0x80 until it meets the first.
 func (p *jsonParser) str() (*String, error) {
 	start := p.pos + 1
-	i := start
 	src := p.src
-	nonASCII := false
-	for i < len(src) {
-		c := src[i]
-		if c == '"' {
-			if !nonASCII {
-				p.pos = i + 1
-				return asciiString(src[start:i]), nil
-			}
+	high := uint64(swarMSB)
+	for i := jsonScan(src, start, high); i < len(src); i = jsonScan(src, i+1, high) {
+		switch c := src[i]; {
+		case c == '"':
 			p.pos = i + 1
+			if high != 0 {
+				return p.plain(src[start:i]), nil
+			}
 			return FromUTF16(appendWTF8Units(nil, src[start:i])), nil
-		}
-		if c == '\\' {
+		case c == '\\':
 			return p.strSlow(start, i)
-		}
-		if c < 0x20 {
+		case c < 0x20:
 			p.pos = i
 			return nil, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
 		}
-		if c >= 0x80 {
-			nonASCII = true
-		}
-		i++
+		high = 0 // not ASCII
 	}
 	p.pos = len(src)
 	return nil, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
@@ -355,72 +412,79 @@ func (p *jsonParser) str() (*String, error) {
 func (p *jsonParser) strSlow(start, i int) (*String, error) {
 	src := p.src
 	var sb StringBuilder
+	var units []uint16 // scratch for the runs that are not ASCII
 	sb.Grow(i - start + 16)
-	units := appendWTF8Units(nil, src[start:i])
-	sb.WriteUTF16(units)
-	runStart := i
+	run := start
 	for i < len(src) {
 		c := src[i]
-		switch {
-		case c == '"':
-			sb.WriteUTF16(appendWTF8Units(nil, src[runStart:i]))
-			p.pos = i + 1
-			return sb.String(), nil
-		case c == '\\':
-			sb.WriteUTF16(appendWTF8Units(nil, src[runStart:i]))
-			i++
-			if i >= len(src) {
-				p.pos = i
-				return nil, p.unexpected()
-			}
-			switch src[i] {
-			case '"':
-				sb.WriteASCII('"')
-			case '\\':
-				sb.WriteASCII('\\')
-			case '/':
-				sb.WriteASCII('/')
-			case 'b':
-				sb.WriteASCII('\b')
-			case 'f':
-				sb.WriteASCII('\f')
-			case 'n':
-				sb.WriteASCII('\n')
-			case 'r':
-				sb.WriteASCII('\r')
-			case 't':
-				sb.WriteASCII('\t')
-			case 'u':
-				if i+4 >= len(src) {
-					p.pos = len(src)
-					return nil, p.unexpected()
-				}
-				var v uint16
-				for k := 1; k <= 4; k++ {
-					d := digitValue(src[i+k])
-					if d < 0 || d >= 16 {
-						p.pos = i + k
-						return nil, p.r.SyntaxError("Bad Unicode escape in JSON at position %d", p.pos)
-					}
-					v = v<<4 | uint16(d)
-				}
-				sb.WriteUnit(v)
-				i += 4
-			default:
-				p.pos = i
-				return nil, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
-			}
-			i++
-			runStart = i
-		case c < 0x20:
+		if c < 0x20 {
 			p.pos = i
 			return nil, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
-		default:
-			i++
 		}
+		units = writeWTF8Run(&sb, src[run:i], units)
+		if c == '"' {
+			p.pos = i + 1
+			return sb.String(), nil
+		}
+		i++ // the backslash
+		if i >= len(src) {
+			p.pos = i
+			return nil, p.unexpected()
+		}
+		switch src[i] {
+		case '"':
+			sb.WriteASCII('"')
+		case '\\':
+			sb.WriteASCII('\\')
+		case '/':
+			sb.WriteASCII('/')
+		case 'b':
+			sb.WriteASCII('\b')
+		case 'f':
+			sb.WriteASCII('\f')
+		case 'n':
+			sb.WriteASCII('\n')
+		case 'r':
+			sb.WriteASCII('\r')
+		case 't':
+			sb.WriteASCII('\t')
+		case 'u':
+			if i+4 >= len(src) {
+				p.pos = len(src)
+				return nil, p.unexpected()
+			}
+			var v uint16
+			for k := 1; k <= 4; k++ {
+				d := digitValue(src[i+k])
+				if d < 0 || d >= 16 {
+					p.pos = i + k
+					return nil, p.r.SyntaxError("Bad Unicode escape in JSON at position %d", p.pos)
+				}
+				v = v<<4 | uint16(d)
+			}
+			sb.WriteUnit(v)
+			i += 4
+		default:
+			p.pos = i
+			return nil, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
+		}
+		run = i + 1
+		i = jsonScan(src, run, 0)
 	}
 	p.pos = len(src)
 	return nil, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
+}
+
+// writeWTF8Run appends the WTF-8 run s to sb, decoding it through scratch
+// when it is not ASCII; it returns scratch for the next run.
+func writeWTF8Run(sb *StringBuilder, s string, scratch []uint16) []uint16 {
+	if isASCII(s) {
+		sb.writeASCIIBytes(s)
+		return scratch
+	}
+	scratch = appendWTF8Units(scratch[:0], s)
+	sb.WriteUTF16(scratch)
+	return scratch
 }
 
 // appendWTF8Units decodes a WTF-8 byte run into UTF-16 code units.
@@ -483,7 +547,7 @@ const jsonKeyScanLimit = 64
 func (p *jsonParser) enter() error {
 	p.depth++
 	if p.depth > jsonMaxDepth {
-		return p.r.SyntaxError("JSON nesting too deep")
+		return p.r.RangeError("Maximum call stack size exceeded")
 	}
 	return nil
 }
@@ -566,6 +630,7 @@ func (p *jsonParser) object() (Value, error) {
 	keys, vals := p.keys[kbase:], p.stack[base:]
 	o := r.buildJSONObject(keys, vals)
 	clear(p.stack[base:])
+	clear(p.keys[kbase:])
 	p.stack = p.stack[:base]
 	p.keys = p.keys[:kbase]
 	p.depth--
@@ -593,11 +658,113 @@ func (r *Realm) buildJSONObject(keys []PropertyKey, vals []Value) *Object {
 	for _, k := range keys {
 		shape = shape.addProperty(r, k, attrDefault)
 	}
-	o := r.newObject(ClassObject, shape)
-	slots := make([]Value, len(vals))
+	var o *Object
+	var slots []Value
+	switch len(vals) {
+	case 1:
+		x := &object1{}
+		o, slots = &x.Object, x.buf[:]
+	case 2:
+		x := &object2{}
+		o, slots = &x.Object, x.buf[:]
+	case 3:
+		x := &object3{}
+		o, slots = &x.Object, x.buf[:]
+	case 4:
+		x := &object4{}
+		o, slots = &x.Object, x.buf[:]
+	case 5:
+		x := &object5{}
+		o, slots = &x.Object, x.buf[:]
+	case 6:
+		x := &object6{}
+		o, slots = &x.Object, x.buf[:]
+	case 7:
+		x := &object7{}
+		o, slots = &x.Object, x.buf[:]
+	case 8:
+		x := &object8{}
+		o, slots = &x.Object, x.buf[:]
+	default:
+		o, slots = new(Object), make([]Value, len(vals))
+	}
 	copy(slots, vals)
 	o.slots = slots
-	return o
+	return initObject(o, ClassObject, shape)
+}
+
+// A parsed object or array of up to eight entries is one allocation of the
+// bytes its two used to be: the even sizes are the literals' buckets
+// (object.go, array.go), the odd ones these.
+type (
+	object1 struct {
+		Object
+		buf [1]Value
+	}
+	object3 struct {
+		Object
+		buf [3]Value
+	}
+	object5 struct {
+		Object
+		buf [5]Value
+	}
+	object7 struct {
+		Object
+		buf [7]Value
+	}
+	arrayObject1 struct {
+		arrayObject
+		buf [1]Value
+	}
+	arrayObject3 struct {
+		arrayObject
+		buf [3]Value
+	}
+	arrayObject5 struct {
+		arrayObject
+		buf [5]Value
+	}
+	arrayObject7 struct {
+		arrayObject
+		buf [7]Value
+	}
+)
+
+// newJSONArray creates a dense array holding a copy of vals.
+func (r *Realm) newJSONArray(vals []Value) *Object {
+	var ao *arrayObject
+	var items []Value
+	switch len(vals) {
+	case 1:
+		x := &arrayObject1{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 2:
+		x := &arrayObject2{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 3:
+		x := &arrayObject3{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 4:
+		x := &arrayObject4{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 5:
+		x := &arrayObject5{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 6:
+		x := &arrayObject6{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 7:
+		x := &arrayObject7{}
+		ao, items = &x.arrayObject, x.buf[:]
+	case 8:
+		x := &arrayObject8{}
+		ao, items = &x.arrayObject, x.buf[:]
+	default:
+		ao, items = &arrayObject{}, make([]Value, len(vals))
+	}
+	copy(items, vals)
+	return r.initArray(ao, items, uint32(len(vals)))
 }
 
 func (p *jsonParser) array() (Value, error) {
@@ -632,29 +799,24 @@ func (p *jsonParser) array() (Value, error) {
 		}
 		return Undefined(), p.unexpected()
 	}
-	items := make([]Value, len(p.stack)-base)
-	copy(items, p.stack[base:])
+	a := p.r.newJSONArray(p.stack[base:])
 	clear(p.stack[base:])
 	p.stack = p.stack[:base]
 	p.depth--
-	return ObjectValue(p.r.NewArrayFromSlice(items)), nil
+	return ObjectValue(a), nil
 }
 
 // --- stringify --------------------------------------------------------------------------------
 
 // JSONStringify serializes v with no replacer and no indentation
 // (Go-callable entry point). The result is nil when v is not serializable
-// (undefined, functions, symbols).
+// (undefined, functions, symbols). Nesting deeper than MaxToGoDepth arrays
+// and objects is a RangeError, as is running out of call depth: each 32
+// levels count as a call, since a toJSON method can start another stringify.
 func (r *Realm) JSONStringify(v Value) (*String, error) {
 	js := jsonStringifier{r: r}
-	js.stack = js.stackBuf[:0]
 	js.sb.Grow(max(256, int(r.jsonSizeHint)+int(r.jsonSizeHint)/8))
-	rv, err := js.resolve(v, StringKey(AtomEmpty), nil)
-	if err != nil {
-		return nil, err
-	}
-	ok, err := js.write(rv)
-	if err != nil || !ok {
+	if ok, err := js.serialize(v); !ok {
 		return nil, err
 	}
 	r.jsonSizeHint = int32(js.sb.Len())
@@ -711,8 +873,10 @@ func jsonStringify(r *Realm, this Value, args []Value) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
+	depth := r.callDepth
 	ok, err := js.write(rv)
 	if err != nil {
+		r.callDepth = depth // the levels an error leaves entered (push)
 		return Undefined(), err
 	}
 	if !ok {
@@ -731,10 +895,13 @@ type jsonStringifier struct {
 	replacerFn   Value // callable, or the zero Value
 	propertyList []PropertyKey
 	hasList      bool
+	raw          bool    // AppendJSON: sb.b holds UTF-8 (quoteUTF8) and never upgrades
+	inDst        bool    // AppendJSON: sb.b is still dst's spare capacity (own)
+	plainEpoch   uint32  // protosLackToJSON's answer: protoEpoch+1 when positive
 	gap          *String // nil for no indentation
-	indent       *String
 	stack        []*Object
 	stackBuf     [16]*Object
+	deep         map[*Object]struct{} // stack[jsonScanDepth:], for the cycle check
 	work         int
 }
 
@@ -808,7 +975,10 @@ func (js *jsonStringifier) addListKey(set map[PropertyKey]struct{}, k PropertyKe
 // toJSON, the replacer function and unwrapping of boxed primitives.
 func (js *jsonStringifier) resolve(v Value, key PropertyKey, holder *Object) (Value, error) {
 	r := js.r
-	if v.IsObject() || v.IsBigInt() {
+	if v.IsObject() && r.lacksToJSON(v.AsObject(), &js.plainEpoch) {
+		// No toJSON to call.
+	} else if v.IsObject() || v.IsBigInt() {
+		js.own() // the lookup (a getter, a proxy's trap) and toJSON run code
 		toJSON, err := r.GetV(v, StringKey(AtomToJSON))
 		if err != nil {
 			return Undefined(), err
@@ -900,10 +1070,7 @@ func (js *jsonStringifier) tick() error {
 	return nil
 }
 
-// checkpoint checks the interrupt and the length of the output, which an
-// array hole's "null" and its indentation add to unchecked: each hole is a
-// unit of work, so a few thousand at most (tens of megabytes at the depth
-// limit) are written past the limit before the RangeError.
+// checkpoint checks the interrupt and the length of the output.
 func (js *jsonStringifier) checkpoint() error {
 	if err := js.sb.checkLength(js.r); err != nil {
 		return err
@@ -932,122 +1099,100 @@ const lowerHex = "0123456789abcdef"
 // quote implements QuoteJSONString (well-formed: lone surrogates as \uXXXX);
 // the interrupt flag is checked every interruptStride units of a long string.
 func (js *jsonStringifier) quote(s *String) error {
-	sb := &js.sb
 	if s.kind == strRope {
 		s.flatten()
 	}
-	sb.WriteASCII('"')
-	if s.kind == strASCII {
-		str := s.s
-		run := 0
-		for base := 0; base < len(str); base += interruptStride {
-			if base > 0 {
-				if err := js.r.CheckInterrupt(); err != nil {
-					return err
-				}
-			}
-			for i := base; i < min(base+interruptStride, len(str)); i++ {
-				c := str[i]
-				if c >= 0x20 && c != '"' && c != '\\' {
-					continue
-				}
-				writeASCIIString(sb, str[run:i])
-				run = i + 1
-				js.escapeByte(c)
-			}
-		}
-		writeASCIIString(sb, str[run:])
-		sb.WriteASCII('"')
-		return nil
+	js.sb.WriteASCII('"')
+	var err error
+	switch {
+	case s.jsonPlain:
+		writeASCIIString(&js.sb, s.s)
+	case s.kind == strASCII:
+		err = js.quoteASCII(s.s)
+	case js.raw:
+		err = js.quoteUTF8(s.u)
+	default:
+		err = js.quoteUTF16(s.u)
 	}
-	u := s.u
-	for i := 0; i < len(u); i++ {
-		if err := interruptEvery(js.r, int64(i)); err != nil {
-			return err
-		}
-		c := u[i]
-		switch {
-		case c < 0x20 || c == '"' || c == '\\':
-			js.escapeByte(byte(c))
-		case c >= 0xD800 && c < 0xE000:
-			if c < 0xDC00 && i+1 < len(u) && u[i+1] >= 0xDC00 && u[i+1] < 0xE000 {
-				sb.WriteUnit(c)
-				sb.WriteUnit(u[i+1])
-				i++
-				continue
-			}
-			sb.WriteGoString(`\u`)
-			sb.WriteASCII(lowerHex[c>>12])
-			sb.WriteASCII(lowerHex[c>>8&15])
-			sb.WriteASCII(lowerHex[c>>4&15])
-			sb.WriteASCII(lowerHex[c&15])
-		default:
-			sb.WriteUnit(c)
-		}
+	if err != nil {
+		return err
 	}
-	sb.WriteASCII('"')
+	js.sb.WriteASCII('"')
 	return nil
 }
 
-func (js *jsonStringifier) escapeByte(c byte) {
-	sb := &js.sb
-	switch c {
-	case '"':
-		sb.WriteGoString(`\"`)
-	case '\\':
-		sb.WriteGoString(`\\`)
-	case '\b':
-		sb.WriteGoString(`\b`)
-	case '\f':
-		sb.WriteGoString(`\f`)
-	case '\n':
-		sb.WriteGoString(`\n`)
-	case '\r':
-		sb.WriteGoString(`\r`)
-	case '\t':
-		sb.WriteGoString(`\t`)
-	default:
-		sb.WriteGoString(`\u00`)
-		sb.WriteASCII(lowerHex[c>>4])
-		sb.WriteASCII(lowerHex[c&15])
-	}
-}
+// jsonScanDepth is the nesting up to which the cycle check scans the stack;
+// the containers below it are kept in a set (jsonStringifier.deep).
+const jsonScanDepth = 64
 
+// push enters o, a container being serialized, or reports the cycle it
+// closes. Past jsonScanDepth every jsonCallLevels-th level counts as a call
+// (jsonMaxDepth): pop releases it, and on an error the entry point restores
+// the depth. A value shallower than jsonScanDepth, the common case, pays
+// one compare for the bookkeeping.
 func (js *jsonStringifier) push(o *Object) error {
-	for _, e := range js.stack {
+	n := len(js.stack)
+	scan := js.stack
+	if n > jsonScanDepth {
+		scan = scan[:jsonScanDepth]
+	}
+	for _, e := range scan {
 		if e == o {
 			return js.r.TypeError("Converting circular structure to JSON")
 		}
 	}
-	if len(js.stack) >= jsonMaxDepth {
-		return js.r.RangeError("Maximum call stack size exceeded")
+	if n >= jsonScanDepth {
+		if _, ok := js.deep[o]; ok {
+			return js.r.TypeError("Converting circular structure to JSON")
+		}
+		if n >= jsonMaxDepth {
+			return js.r.RangeError("Maximum call stack size exceeded")
+		}
+		if n%jsonCallLevels == 0 {
+			if err := js.r.EnterCall(); err != nil {
+				return err
+			}
+		}
+		if js.deep == nil {
+			js.deep = make(map[*Object]struct{})
+		}
+		js.deep[o] = struct{}{}
 	}
 	js.stack = append(js.stack, o)
 	return nil
 }
 
-func (js *jsonStringifier) pop() { js.stack = js.stack[:len(js.stack)-1] }
+func (js *jsonStringifier) pop() {
+	n := len(js.stack) - 1
+	if n >= jsonScanDepth {
+		delete(js.deep, js.stack[n])
+		if n%jsonCallLevels == 0 {
+			js.r.ExitCall()
+		}
+	}
+	js.stack = js.stack[:n]
+}
 
-func (js *jsonStringifier) newline(indent *String) {
+// newline starts a line indented by level gaps.
+func (js *jsonStringifier) newline(level int) {
 	js.sb.WriteASCII('\n')
-	if indent != nil {
-		js.sb.WriteString(indent)
+	for range level {
+		js.sb.WriteString(js.gap)
 	}
 }
 
 // object implements SerializeJSONObject.
 func (js *jsonStringifier) object(o *Object) error {
 	r := js.r
-	if err := js.push(o); err != nil {
-		return err
-	}
-	stepback := js.indent
-	if js.gap != nil {
-		var err error
-		if js.indent, err = r.Concat(orEmpty(js.indent), js.gap); err != nil {
+	if o.flags&flagHasLazy != 0 {
+		if ok, err := js.hostNode(o); ok || err != nil {
 			return err
 		}
 	}
+	if err := js.push(o); err != nil {
+		return err
+	}
+	level := len(js.stack) // the members' indentation
 	js.sb.WriteASCII('{')
 	first := true
 	if o.flags&flagHasLazy != 0 {
@@ -1071,6 +1216,7 @@ func (js *jsonStringifier) object(o *Object) error {
 			if o.shape == shape && p.attrs&attrAccessor == 0 {
 				v = o.slots[i]
 			} else {
+				js.own() // a getter
 				var err error
 				if v, err = o.Get(r, p.key, ObjectValue(o)); err != nil {
 					return err
@@ -1091,7 +1237,7 @@ func (js *jsonStringifier) object(o *Object) error {
 			}
 			first = false
 			if js.gap != nil {
-				js.newline(js.indent)
+				js.newline(level)
 			}
 			if err := js.quote(p.key.String()); err != nil {
 				return err
@@ -1117,6 +1263,7 @@ func (js *jsonStringifier) object(o *Object) error {
 			if c, ok := o.getOwnCell(k); ok && c.attrs&attrAccessor == 0 {
 				v = c.value
 			} else {
+				js.own() // a getter, a proxy's trap
 				var err error
 				if v, err = o.Get(r, k, ObjectValue(o)); err != nil {
 					return err
@@ -1137,7 +1284,7 @@ func (js *jsonStringifier) object(o *Object) error {
 			}
 			first = false
 			if js.gap != nil {
-				js.newline(js.indent)
+				js.newline(level)
 			}
 			if k.IsString() {
 				err = js.quote(k.String())
@@ -1157,16 +1304,18 @@ func (js *jsonStringifier) object(o *Object) error {
 		}
 	}
 	if !first && js.gap != nil {
-		js.newline(stepback)
+		js.newline(level - 1)
 	}
 	js.sb.WriteASCII('}')
 	js.pop()
-	js.indent = stepback
 	return js.sb.checkLength(r)
 }
 
 // proxy serializes a proxy: nothing for a callable one, otherwise an array
-// or an object as IsArray decides, through its traps.
+// or an object as IsArray decides, through its traps. It is placed between
+// object and array for layout: its 224 bytes, padded, make up for what
+// resolve, object and array shrank by with own out of line, so write,
+// quote, push, object, array and escapeByte keep their 64-byte phase.
 func (js *jsonStringifier) proxy(o *Object) (bool, error) {
 	if o.IsCallable() {
 		return false, nil
@@ -1184,16 +1333,16 @@ func (js *jsonStringifier) proxy(o *Object) (bool, error) {
 // array implements SerializeJSONArray.
 func (js *jsonStringifier) array(o *Object) error {
 	r := js.r
+	if o.flags&flagHasLazy != 0 {
+		if ok, err := js.hostNode(o); ok || err != nil {
+			return err
+		}
+		o.materializeHost() // its elements, read below
+	}
 	if err := js.push(o); err != nil {
 		return err
 	}
-	stepback := js.indent
-	if js.gap != nil {
-		var err error
-		if js.indent, err = r.Concat(orEmpty(js.indent), js.gap); err != nil {
-			return err
-		}
-	}
+	level := len(js.stack) // the elements' indentation
 	n, err := r.LengthOfArrayLike(o)
 	if err != nil {
 		return err
@@ -1204,11 +1353,16 @@ func (js *jsonStringifier) array(o *Object) error {
 			js.sb.WriteASCII(',')
 		}
 		if js.gap != nil {
-			js.newline(js.indent)
+			js.newline(level)
 		}
-		v, err := o.GetIndex(r, uint32(i))
-		if err != nil {
-			return err
+		var v Value
+		if i < int64(len(o.elements)) && !o.elements[i].IsHole() {
+			v = o.elements[i]
+		} else {
+			js.own() // a getter, of the element or a prototype's, a proxy's trap
+			if v, err = o.Get(r, IndexKey(uint32(i)), ObjectValue(o)); err != nil {
+				return err
+			}
 		}
 		v, err = js.resolve(v, IndexKey(uint32(i)), o)
 		if err != nil {
@@ -1219,23 +1373,45 @@ func (js *jsonStringifier) array(o *Object) error {
 			return err
 		}
 		if !ok {
-			// Checked at the next checkpoint.
 			js.sb.WriteGoString("null")
+			if err := js.sb.checkLength(r); err != nil { // the indentation
+				return err
+			}
 		}
 	}
 	if n > 0 && js.gap != nil {
-		js.newline(stepback)
+		js.newline(level - 1)
 	}
 	js.sb.WriteASCII(']')
 	js.pop()
-	js.indent = stepback
 	// Repeated references to one object repeat its output: check it.
 	return js.sb.checkLength(r)
 }
 
-func orEmpty(s *String) *String {
-	if s == nil {
-		return emptyString
+// escapeByte writes the escape of the byte c. It is last in the file for
+// layout (see realm_calldata.go): there it keeps push, object and array on
+// dev's 64-byte phase, which root BenchmarkCall's AppendJSON shows (about
+// 25 of its 1,550 cycles when they moved by 32).
+func (js *jsonStringifier) escapeByte(c byte) {
+	sb := &js.sb
+	switch c {
+	case '"':
+		sb.WriteGoString(`\"`)
+	case '\\':
+		sb.WriteGoString(`\\`)
+	case '\b':
+		sb.WriteGoString(`\b`)
+	case '\f':
+		sb.WriteGoString(`\f`)
+	case '\n':
+		sb.WriteGoString(`\n`)
+	case '\r':
+		sb.WriteGoString(`\r`)
+	case '\t':
+		sb.WriteGoString(`\t`)
+	default:
+		sb.WriteGoString(`\u00`)
+		sb.WriteASCII(lowerHex[c>>4])
+		sb.WriteASCII(lowerHex[c&15])
 	}
-	return s
 }

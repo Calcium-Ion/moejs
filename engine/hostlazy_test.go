@@ -784,8 +784,8 @@ export function json(x) { try { return JSON.stringify(x); } catch (e) { return e
 	assert.Equal(t, "leaf,true,true,true,leaf", f.callValues("walk", x, IntValue(maxHostVerifyDepth-2)))
 	assertSameGo(t, m, f.r.ToGo(x))
 	assert.Equal(t, "RangeError", f.callValues("json", x))
-	// JSON.stringify went 512 levels down x.list before it threw; x.self is
-	// as deep as the walk left it.
+	// JSON.stringify went jsonMaxDepth levels down x.list before it threw;
+	// x.self is as deep as the walk left it.
 	out := f.r.ToGo(x).(map[string]any)
 	assert.Equal(t, "leaf", out["a"])
 	assertSameGo(t, m, out["self"])

@@ -34,7 +34,8 @@ const (
 // from the goroutine that uses the runtime: called outside a Call, they run
 // the jobs they queue before returning, as the end of a Call does, and
 // return what a Call would for those (an *InterruptedError, or the first
-// exception a queueMicrotask callback threw).
+// exception a queueMicrotask callback threw). A function or generator of
+// another runtime is ErrForeign and settles nothing.
 func (rt *Runtime) NewPromise() (p Value, resolve, reject func(v Value) error) {
 	o, res, rej := rt.realm.NewPromiseWithResolvers()
 	return engine.ObjectValue(o), rt.settler(res), rt.settler(rej)
@@ -44,6 +45,9 @@ func (rt *Runtime) NewPromise() (p Value, resolve, reject func(v Value) error) {
 func (rt *Runtime) settler(fn *Object) func(v Value) error {
 	return func(v Value) (err error) {
 		r := rt.realm
+		if r.IsForeign(v) {
+			return ErrForeign
+		}
 		base := len(rt.argStack)
 		defer rt.guard(&err, r.CallState(), base)
 		rt.argStack = append(rt.argStack, v)

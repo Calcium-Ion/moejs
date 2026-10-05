@@ -90,7 +90,7 @@ const (
 	flagSealed
 	flagIsPrototype
 	flagDict    // named properties live in dict (shape is the dictionary sentinel)
-	flagHasLazy // internal is *lazyProps with unresolved entries, *lazyKeys, *pendingCompile, or the *Realm of a global object with pending coldGlobalKeys
+	flagHasLazy // internal is *lazyProps with unresolved entries, *lazyKeys, *pendingCompile, the *Realm of a global object with pending coldGlobalKeys, or the *FunctionData of a %RegExp% with its statics pending
 	// flagShared marks a frozen intrinsic shared by every realm of the
 	// process. Every mutating path checks it first: [[Set]] and the other
 	// boolean methods return false (strict callers throw sharedWriteError,
@@ -223,12 +223,13 @@ func (r *Realm) sharedWriteError(o *Object, key PropertyKey) error {
 }
 
 // readOnlyError is the TypeError of a strict [[Set]] of key that returned
-// false with o as the receiver: sharedWriteError for a shared intrinsic.
+// false with o as the receiver: sharedWriteError for a shared intrinsic, the
+// falsish-trap error for a proxy.
 func (r *Realm) readOnlyError(o *Object, key PropertyKey) error {
 	if o.flags&flagShared != 0 {
 		return r.sharedWriteError(o, key)
 	}
-	return r.TypeError("Cannot assign to read only property '%s' of object", key.GoString())
+	return r.falsishError(o, AtomSet, key, "Cannot assign to read only property '%s' of object", key.GoString())
 }
 
 // IsDictionaryMode reports whether named properties live in the dictionary
@@ -273,6 +274,9 @@ func (o *Object) debugString() string {
 			return "function " + fd.name.GoString() + "() { [native code] }"
 		}
 		return "function () { [native code] }"
+	}
+	if ta, ok := o.internal.(*typedArray); ok { // its tag, as Object.prototype.toString shows it
+		return "[object " + typedArrayCtorNames[ta.kind].GoString() + "]"
 	}
 	return "[object " + o.class.String() + "]"
 }
@@ -855,10 +859,7 @@ func (o *Object) SetProp(r *Realm, key PropertyKey, v Value) error {
 		return err
 	}
 	if !ok {
-		if o.flags&flagShared != 0 {
-			return r.sharedWriteError(o, key)
-		}
-		return r.falsishError(o, AtomSet, key, "Cannot assign to read only property '%s' of object", key.GoString())
+		return r.readOnlyError(o, key)
 	}
 	return nil
 }
@@ -1304,6 +1305,8 @@ func (o *Object) lazyPending(key PropertyKey) bool {
 		return lp.coldGlobalIndex(key) >= 0
 	case *pendingCompile:
 		return key == compileKey
+	case *FunctionData:
+		return isStaticsKey(key)
 	}
 	return true // a host placeholder, which is never shape-mode, materializes on any lookup
 }
@@ -1317,7 +1320,7 @@ func (o *Object) deferInstall(r *Realm, install func(*Realm, *Object)) {
 	o.internal = &lazyProps{r: r, install: install}
 	o.flags |= flagHasLazy
 	if o.flags&flagDict == 0 && !o.shape.shared {
-		o.shape.noFill = true
+		o.shape.noFill = noFillAll
 	}
 }
 
@@ -1332,7 +1335,9 @@ func (o *Object) runInstall(lp *lazyProps) {
 // resolveLazy prepares o, which has flagHasLazy, for a lookup of the named
 // key: it runs a deferred installer or a pending lazy definition of key,
 // defines key on a lazyKeys object, a global object with pending cold
-// globals or %RegExp.prototype% (pendingCompile), or materializes a host placeholder (resolveHost). It reports false
+// globals or %RegExp.prototype% (pendingCompile), the statics of %RegExp%
+// on a lookup of one of them, or materializes a host placeholder
+// (resolveHost). It reports false
 // when the lookup must not reach o's storage because key is certainly absent
 // (an unmaterialized placeholder has none).
 func (o *Object) resolveLazy(key PropertyKey) bool {
@@ -1348,6 +1353,11 @@ func (o *Object) resolveLazy(key PropertyKey) bool {
 		case *pendingCompile:
 			if key == compileKey {
 				in.define(o)
+			}
+			return true
+		case *FunctionData:
+			if isStaticsKey(key) {
+				definePendingStatics(o, in)
 			}
 			return true
 		}
@@ -1370,11 +1380,12 @@ func (o *Object) resolveLazy(key PropertyKey) bool {
 }
 
 // resolveLazyWrite prepares o for a write, redefinition or deletion of
-// key: a lazyKeys object or %RegExp.prototype% with compile pending
-// defines all its properties first. It reports false like resolveLazy.
+// key: a lazyKeys object, %RegExp.prototype% with compile pending or
+// %RegExp% with its statics pending defines all its properties first. It
+// reports false like resolveLazy.
 func (o *Object) resolveLazyWrite(key PropertyKey) bool {
 	switch o.internal.(type) {
-	case *lazyKeys, *pendingCompile:
+	case *lazyKeys, *pendingCompile, *FunctionData:
 		o.resolveAllLazy()
 		return true
 	}
@@ -1391,6 +1402,8 @@ func (o *Object) resolveAllLazy() {
 			in.resolveColdGlobals()
 		case *pendingCompile:
 			in.define(o)
+		case *FunctionData:
+			definePendingStatics(o, in)
 		default:
 			o.materializeHost()
 		}

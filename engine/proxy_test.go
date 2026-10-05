@@ -420,7 +420,7 @@ func TestProxyJSON(t *testing.T) {
 		// A reviver that grows the structure as it is walked.
 		{"parse reviver growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = new Proxy([5, 6], {}); return v })`, "!RangeError: Maximum call stack size exceeded"},
 		{"parse reviver growing plain", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: Maximum call stack size exceeded"},
-		{"parse reviver deepest", `const s = '['.repeat(512) + ']'.repeat(512); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "512SyntaxError"},
+		{"parse reviver deepest", `const s = '['.repeat(10000) + ']'.repeat(10000); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "10000RangeError"},
 	})
 }
 

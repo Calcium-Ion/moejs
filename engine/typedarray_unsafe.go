@@ -9,9 +9,11 @@ import "unsafe"
 // for any other object. Like BufferData, the slice is the buffer's memory,
 // not a copy, and is nil when the array is out of bounds. The elements are
 // in little-endian byte order, which the slice reads correctly on a
-// little-endian host only. The buffer's data must be aligned for the element
-// type: one the engine allocates always is (newBytes), and one over host
-// bytes (NewArrayBuffer) is when those bytes start at a word boundary.
+// little-endian host only. ok is also false when the elements are not
+// aligned for their type, which only a buffer over host bytes
+// (NewArrayBuffer) that do not start at a word boundary can give: the data
+// the engine allocates always is aligned (newBytes), and a view's offset is
+// a multiple of its element size.
 func (o *Object) TypedArrayElements() (elems any, ok bool) {
 	ta, ok := o.internal.(*typedArray)
 	if !ok {
@@ -20,6 +22,9 @@ func (o *Object) TypedArrayElements() (elems any, ok bool) {
 	b := ta.viewed()
 	n := len(b) >> elemShift[ta.kind]
 	p := unsafe.Pointer(unsafe.SliceData(b)) // nil when out of bounds
+	if uintptr(p)&uintptr(elemSize[ta.kind]-1) != 0 {
+		return nil, false
+	}
 	switch ta.kind {
 	case elemInt8:
 		return unsafe.Slice((*int8)(p), n), true

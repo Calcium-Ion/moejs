@@ -12,7 +12,8 @@ package engine
 // properties, so the walk stops there. Nor has a host placeholder
 // (hostlazy.go), which materializes to string keys only. A proxy answers
 // through its get trap, so it is always "unknown". A pending compile
-// method of %RegExp.prototype% is not such a key (onlyCompilePending).
+// method of %RegExp.prototype% or static of %RegExp% is not such a key
+// (onlyLegacyPending).
 func (r *Realm) lacksWellKnown(o *Object, key PropertyKey) bool {
 	for p := o; p != nil; p = p.proto {
 		if p == r.ObjectPrototype && r.sharedIntrinsics {
@@ -21,7 +22,7 @@ func (r *Realm) lacksWellKnown(o *Object, key PropertyKey) bool {
 		if p.class == ClassProxy {
 			return false
 		}
-		if p.flags&(flagDict|flagHasLazy) != 0 && (p.shape.key != hostSentinelKey || !key.IsSymbol()) && !p.onlyCompilePending() {
+		if p.flags&(flagDict|flagHasLazy) != 0 && (p.shape.key != hostSentinelKey || !key.IsSymbol()) && !p.onlyLegacyPending() {
 			return false
 		}
 		if _, _, ok := p.shape.Lookup(key); ok {
@@ -38,7 +39,7 @@ func (r *Realm) lacksWellKnown(o *Object, key PropertyKey) bool {
 // and that has no own @@hasInstance always inherits the original.
 func (r *Realm) hasInstanceMethod(c *Object) (*Object, error) {
 	key := SymbolKey(SymHasInstance)
-	if c.proto == r.FunctionPrototype && c.flags&(flagDict|flagHasLazy) == 0 {
+	if c.proto == r.FunctionPrototype && (c.flags&(flagDict|flagHasLazy) == 0 || c.onlyLegacyPending()) {
 		if _, _, ok := c.shape.Lookup(key); !ok {
 			return nil, nil
 		}
@@ -83,12 +84,13 @@ func (r *Realm) guardHolds(g *protoGuard) bool {
 
 // rearm re-resolves g after its object changed shape or the slot changed.
 // A dictionary-mode or lazily materialized object is never cached: the
-// probe falls back to a lookup every time.
+// probe falls back to a lookup every time. %RegExp% with only its statics
+// pending is cached: the watched key is @@species.
 func (g *protoGuard) rearm() bool {
 	o := g.obj
 	g.shape = nil
 	accessor := g.want.isAccessor()
-	if o.flags&(flagDict|flagHasLazy) != 0 {
+	if o.flags&(flagDict|flagHasLazy) != 0 && !o.onlyLegacyPending() {
 		c, ok := o.getOwnCell(g.key)
 		return ok && (c.attrs&attrAccessor != 0) == accessor && c.value == g.want
 	}

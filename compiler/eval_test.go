@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
+	"github.com/Calcium-Ion/moejs/syntax"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,4 +203,42 @@ func TestHookStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCallEvalLimit: a direct eval needs the pc after its call site in the
+// range a generator's suspension point needs, since the frame reruns from
+// there with the pc saved the same way (frameOp), past the op and its extra
+// word. Each elision of the pattern is one instruction word.
+func TestCallEvalLimit(t *testing.T) {
+	if raceEnabled {
+		t.Skip("compiles 64 MB of code")
+	}
+	compile := func(words int) (*bytecode.Function, error) {
+		src := "function f(a) { var [" + strings.Repeat(",", words) + "] = a; eval(''); }"
+		s, err := syntax.ParseScript("s.js", src, syntax.Options{})
+		require.NoError(t, err)
+		return CompileScript(s)
+	}
+	site := func(words int) int {
+		fn, err := compile(words)
+		require.NoError(t, err)
+		f := child(t, fn, "f")
+		for pc := 0; pc < len(f.Code); {
+			op := bytecode.DecodeOp(f.Code[pc])
+			if op == bytecode.CallEval {
+				return pc - words
+			}
+			pc += 1 + op.ExtraWords()
+		}
+		t.Fatal("no CallEval")
+		return 0
+	}
+	off := site(1000)
+	require.Equal(t, off, site(1001))
+	// The last site whose rerun pc fits, then the first that does not.
+	_, err := compile(genMaxCode - 2 - off)
+	require.NoError(t, err)
+	_, err = compile(genMaxCode - 1 - off)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SyntaxError: function too large for a direct eval is not supported yet")
 }

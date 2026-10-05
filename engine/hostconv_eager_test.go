@@ -406,7 +406,7 @@ func eagerBuildMap[V any, C eagerValueConv[V]](st *eagerState, entries []hostPai
 			o.addNamed(r, StringKey(r.InternGoString(named[i].k)), propCell{value: ev, attrs: attrDefault})
 		}
 	} else {
-		shape := hostShapeFor(r, h, named).shape
+		shape := hostShapeFor(r.hostHeap(), h, named).shape
 		o = initObject(st.arena.object(), ClassObject, shape)
 		slots := st.arena.valueSlice(len(named))
 		for i := range named {

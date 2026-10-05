@@ -883,6 +883,22 @@ func (f *funcState) setGlobal(name string, src int) {
 	f.emitExtra(bytecode.ExtraArg(f.nameConst(name), f.newIC()))
 }
 
+// resolveGlobal emits the strict ResolveBinding of the undeclared name into
+// a fresh register, which it returns with the cache setGlobalRef shares.
+func (f *funcState) resolveGlobal(name string) (ref int, ic uint16) {
+	ref, ic = f.alloc(), f.newIC()
+	f.emitA(bytecode.ResolveGlobal, ref)
+	f.emitExtra(bytecode.ExtraArg(f.nameConst(name), ic))
+	return ref, ic
+}
+
+// setGlobalRef emits PutValue of src to the reference to name that
+// resolveGlobal resolved into ref with cache ic.
+func (f *funcState) setGlobalRef(name string, src, ref int, ic uint16) {
+	f.emitAB(bytecode.SetGlobalRef, src, ref)
+	f.emitExtra(bytecode.ExtraArg(f.nameConst(name), ic))
+}
+
 // regOf returns the register of an un-captured binding that needs no TDZ
 // check, or -1.
 func (f *funcState) regOf(b *syntax.Binding) int {

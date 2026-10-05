@@ -78,6 +78,42 @@ annexB/built-ins/RegExp/RegExp-trailing-escape.js
 annexB/built-ins/RegExp/RegExp-trailing-escape.js [sloppy]
 annexB/built-ins/RegExp/incomplete_hex_unicode_escape.js
 annexB/built-ins/RegExp/incomplete_hex_unicode_escape.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/index/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/index/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/index/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/index/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/index/this-subclass-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/input/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/input/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/input/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/input/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/input/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/input/this-subclass-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/lastMatch/this-subclass-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastParen/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/lastParen/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastParen/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/lastParen/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/lastParen/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/lastParen/this-subclass-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/leftContext/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/leftContext/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/leftContext/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/leftContext/this-subclass-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/rightContext/prop-desc.js
+annexB/built-ins/RegExp/legacy-accessors/rightContext/prop-desc.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/rightContext/this-not-regexp-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/rightContext/this-not-regexp-constructor.js [sloppy]
+annexB/built-ins/RegExp/legacy-accessors/rightContext/this-subclass-constructor.js
+annexB/built-ins/RegExp/legacy-accessors/rightContext/this-subclass-constructor.js [sloppy]
 annexB/built-ins/RegExp/named-groups/non-unicode-malformed-lookbehind.js
 annexB/built-ins/RegExp/named-groups/non-unicode-malformed-lookbehind.js [sloppy]
 annexB/built-ins/RegExp/named-groups/non-unicode-malformed.js
@@ -128,6 +164,8 @@ annexB/built-ins/RegExp/prototype/compile/this-not-object.js
 annexB/built-ins/RegExp/prototype/compile/this-not-object.js [sloppy]
 annexB/built-ins/RegExp/prototype/compile/this-obj-not-regexp.js
 annexB/built-ins/RegExp/prototype/compile/this-obj-not-regexp.js [sloppy]
+annexB/built-ins/RegExp/prototype/compile/this-subclass-instance.js
+annexB/built-ins/RegExp/prototype/compile/this-subclass-instance.js [sloppy]
 annexB/built-ins/RegExp/prototype/flags/order-after-compile.js
 annexB/built-ins/RegExp/prototype/flags/order-after-compile.js [sloppy]
 annexB/built-ins/String/prototype/anchor/B.2.3.2.js
@@ -50794,66 +50832,88 @@ language/expressions/compound-assignment/S11.13.2_A7.10_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.10_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.10_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.10_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.10_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.10_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.11_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.11_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.11_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.11_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.11_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.11_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.11_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.11_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.1_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.1_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.1_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.1_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.1_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.1_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.1_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.1_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.2_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.2_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.2_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.2_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.2_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.2_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.2_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.2_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.3_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.3_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.3_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.3_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.3_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.3_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.3_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.3_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.4_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.4_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.4_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.4_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.4_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.4_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.4_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.4_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.5_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.5_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.5_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.5_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.5_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.5_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.5_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.5_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.6_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.6_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.6_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.6_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.6_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.6_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.6_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.6_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.7_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.7_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.7_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.7_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.7_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.7_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.7_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.7_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.8_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.8_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.8_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.8_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.8_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.8_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.8_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.8_T4.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.9_T1.js
 language/expressions/compound-assignment/S11.13.2_A7.9_T1.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.9_T2.js
 language/expressions/compound-assignment/S11.13.2_A7.9_T2.js [sloppy]
 language/expressions/compound-assignment/S11.13.2_A7.9_T3.js
 language/expressions/compound-assignment/S11.13.2_A7.9_T3.js [sloppy]
+language/expressions/compound-assignment/S11.13.2_A7.9_T4.js
+language/expressions/compound-assignment/S11.13.2_A7.9_T4.js [sloppy]
 language/expressions/compound-assignment/add-arguments-strict.js
 language/expressions/compound-assignment/add-eval-strict.js
 language/expressions/compound-assignment/add-non-simple.js
@@ -57160,6 +57220,8 @@ language/expressions/postfix-decrement/S11.3.2_A6_T1.js
 language/expressions/postfix-decrement/S11.3.2_A6_T1.js [sloppy]
 language/expressions/postfix-decrement/S11.3.2_A6_T2.js
 language/expressions/postfix-decrement/S11.3.2_A6_T2.js [sloppy]
+language/expressions/postfix-decrement/S11.3.2_A6_T3.js
+language/expressions/postfix-decrement/S11.3.2_A6_T3.js [sloppy]
 language/expressions/postfix-decrement/arguments-nostrict.js
 language/expressions/postfix-decrement/arguments.js
 language/expressions/postfix-decrement/bigint.js
@@ -57224,6 +57286,8 @@ language/expressions/postfix-increment/S11.3.1_A6_T1.js
 language/expressions/postfix-increment/S11.3.1_A6_T1.js [sloppy]
 language/expressions/postfix-increment/S11.3.1_A6_T2.js
 language/expressions/postfix-increment/S11.3.1_A6_T2.js [sloppy]
+language/expressions/postfix-increment/S11.3.1_A6_T3.js
+language/expressions/postfix-increment/S11.3.1_A6_T3.js [sloppy]
 language/expressions/postfix-increment/arguments-nostrict.js
 language/expressions/postfix-increment/arguments.js
 language/expressions/postfix-increment/bigint.js
@@ -57288,6 +57352,8 @@ language/expressions/prefix-decrement/S11.4.5_A6_T1.js
 language/expressions/prefix-decrement/S11.4.5_A6_T1.js [sloppy]
 language/expressions/prefix-decrement/S11.4.5_A6_T2.js
 language/expressions/prefix-decrement/S11.4.5_A6_T2.js [sloppy]
+language/expressions/prefix-decrement/S11.4.5_A6_T3.js
+language/expressions/prefix-decrement/S11.4.5_A6_T3.js [sloppy]
 language/expressions/prefix-decrement/arguments-nostrict.js
 language/expressions/prefix-decrement/arguments.js
 language/expressions/prefix-decrement/bigint.js
@@ -57343,6 +57409,8 @@ language/expressions/prefix-increment/S11.4.4_A6_T1.js
 language/expressions/prefix-increment/S11.4.4_A6_T1.js [sloppy]
 language/expressions/prefix-increment/S11.4.4_A6_T2.js
 language/expressions/prefix-increment/S11.4.4_A6_T2.js [sloppy]
+language/expressions/prefix-increment/S11.4.4_A6_T3.js
+language/expressions/prefix-increment/S11.4.4_A6_T3.js [sloppy]
 language/expressions/prefix-increment/arguments-nostrict.js
 language/expressions/prefix-increment/arguments.js
 language/expressions/prefix-increment/bigint.js
@@ -58806,6 +58874,7 @@ language/identifier-resolution/S11.1.2_A1_T1.js
 language/identifier-resolution/S11.1.2_A1_T1.js [sloppy]
 language/identifier-resolution/S11.1.2_A1_T2.js
 language/identifier-resolution/S11.1.2_A1_T2.js [sloppy]
+language/identifier-resolution/assign-to-global-undefined.js
 language/identifier-resolution/static-init-invalid-await.js
 language/identifier-resolution/static-init-invalid-await.js [sloppy]
 language/identifier-resolution/unscopables.js

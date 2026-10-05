@@ -127,9 +127,10 @@ type Realm struct {
 	// Shapes. A realm over the shared intrinsics builds its objects on the
 	// process-wide shared tree whose roots are the template's (shape.go:
 	// publish), so its plain objects, literals, functions and host objects
-	// reuse the shapes (and lookup tables) of every other such realm; the
-	// roots of its own prototypes, and the continuation of the shared tree
-	// past its bounds (localize), live in rootShapes.
+	// reuse the shapes (and lookup tables) of every other such realm. The
+	// roots of its own prototypes live in the prototypes (localRoot); those
+	// of the continuation of the shared tree past its bounds (localize), and
+	// of a mutable realm's intrinsics, in rootShapes.
 	plainRoot     *Shape // root for objects whose prototype is Object.prototype
 	nullProtoRoot *Shape
 	arrayRoot     *Shape // created on first array
@@ -148,8 +149,8 @@ type Realm struct {
 	internCacheUTF16  map[string]*String
 	smallIndexStrings *[smallIndexCached]*String
 
-	// Host conversion: the shape cache and the reusable
-	// FromGo scratch (hostconv.go), both created on first use.
+	// Host conversion: the shape cache (bounded: hostShapesMax) and the
+	// reusable FromGo scratch (hostconv.go), both created on first use.
 	hostShapes map[uint64]*hostShapeEntry
 	fromGo     fromGoState
 
@@ -247,15 +248,17 @@ var dictShape = &Shape{isDict: true, key: rootKey, shared: true}
 
 // realmLazy is the rarely used per-realm state behind Realm.lazy.
 type realmLazy struct {
-	rng            *rand.Rand // Math.random
-	jobs           *jobState  // the job queue and WeakRef's [[KeptAlive]] (jobs.go)
-	argumentsShape *Shape     // unmapped arguments objects (arguments.go)
-	mappedShape    *Shape     // mapped arguments objects (arguments.go)
-	lex            *globalLex // the global declarative environment (sloppy.go)
-	dyn            *dynState  // code compiled from strings (dynamic.go)
-	templates      []*Object  // tagged-template objects by site (template.go)
-	joins          []*Object  // the arrays being joined, innermost last (builtin_array.go)
-	modules        *moduleMap // the module map (module_eval.go)
+	rng            *rand.Rand     // Math.random
+	jobs           *jobState      // the job queue and WeakRef's [[KeptAlive]] (jobs.go)
+	argumentsShape *Shape         // unmapped arguments objects (arguments.go)
+	mappedShape    *Shape         // mapped arguments objects (arguments.go)
+	lex            *globalLex     // the global declarative environment (sloppy.go)
+	dyn            *dynState      // code compiled from strings (dynamic.go)
+	templates      []*Object      // tagged-template objects by site (template.go)
+	joins          []*Object      // the arrays being joined, innermost last (builtin_array.go)
+	modules        *moduleMap     // the module map (module_eval.go)
+	json           *jsonStack     // JSON.parse's reused stack (builtin_json.go)
+	statics        *regexpStatics // the RegExp statics' match (regexp_legacy.go)
 }
 
 // lazyState returns the realm's rarely used state, creating it on first use.

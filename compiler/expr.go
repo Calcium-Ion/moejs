@@ -833,7 +833,7 @@ func (f *funcState) assign(e *syntax.AssignExpr, dst int, want bool) {
 			cur = f.alloc()
 		}
 		if key >= 0 {
-			f.emitGetKey(cur, obj, key, target)
+			key = f.emitGetRef(cur, obj, key, mark, target)
 		} else {
 			name, _ := f.propName(target)
 			f.emitGetNamed(cur, obj, name)
@@ -929,6 +929,14 @@ func (f *funcState) assignIdent(e *syntax.AssignExpr, target *syntax.Ident, dst 
 		v := dst
 		if !want {
 			v = f.alloc()
+		}
+		if f.out.Strict && b == nil && r.ref < 0 && !f.runsNoCode(e.Value) {
+			// A value that creates the undeclared global leaves the
+			// strict reference unresolvable: PutValue throws.
+			ref, ic := f.resolveGlobal(target.Name)
+			f.exprNamed(e.Value, v, name)
+			f.setGlobalRef(target.Name, v, ref, ic)
+			return
 		}
 		f.exprNamed(e.Value, v, name)
 		f.put(r, v, bindAssign)
@@ -1037,7 +1045,7 @@ func (f *funcState) update(e *syntax.UpdateExpr, dst int, want bool) {
 		}
 		cur := f.alloc()
 		if key >= 0 {
-			f.emitGetKey(cur, obj, key, t)
+			key = f.emitGetRef(cur, obj, key, mark, t)
 		} else {
 			name, _ := f.propName(t)
 			f.emitGetNamed(cur, obj, name)
@@ -1140,6 +1148,12 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 		n, c := len(e.Args), 0
 		if spread {
 			n, c = 0, 1
+		}
+		// The frame reruns from the next instruction after an eval that
+		// grew the register stack, with the pc saved as at a suspension:
+		// past the op and its extra word.
+		if f.envDepth > genMaxDepth || f.pc()+1 >= genMaxCode {
+			f.c.fail(f.curPos, "SyntaxError: function too large for a direct eval"+unsupportedSuffix)
 		}
 		f.emitABC(bytecode.CallEval, base, n, c)
 		f.emitExtra(f.evalSite(e.Pos))
@@ -1417,6 +1431,15 @@ func (f *funcState) objectLit(e *syntax.ObjectLit, dst int) {
 		}
 		f.free(mark)
 	}
+}
+
+// runsNoCode reports whether evaluating e runs no code: an inert value or
+// a variable in a register.
+func (f *funcState) runsNoCode(e syntax.Expr) bool {
+	if id, ok := e.(*syntax.Ident); ok {
+		return f.regOf(id.Binding) >= 0
+	}
+	return isInertValue(e)
 }
 
 // isInertValue reports whether evaluating e runs no code and so cannot

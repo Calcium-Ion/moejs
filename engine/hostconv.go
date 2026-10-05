@@ -24,12 +24,36 @@ const MaxToGoDepth = 10000
 // errors.Is checks against it still compile.
 var ErrFromGoDepth = errors.New("engine: FromGo value nesting exceeds depth limit")
 
+// ErrForeign is FromGo's error for a function or generator of another realm
+// (IsForeign), a Value or an *Object, which runs only in its own realm; the
+// root package returns it as moejs.ErrForeign.
+var ErrForeign = errors.New("moejs: function or generator of another runtime")
+
 // hostShapeEntry caches the shape for one sorted set of non-index keys.
 type hostShapeEntry struct {
 	keys  []string
 	shape *Shape
 	next  *hostShapeEntry // hash-collision chain
 }
+
+// hostShapesMax bounds the key sets in a realm's host shape cache
+// (Realm.hostShapes): a runtime fed maps keyed by ids builds a new key set
+// per request, and the cache would keep every one with its shapes and names.
+// A cache that reaches it is emptied on the next miss; the key sets in use
+// come back on their next conversion, and the predictions of the conversion
+// in progress (hostHeap.shapes) hold their own entries.
+//
+// hostShapeKeysMax bounds the keys of those key sets as well
+// (hostHeap.shapeKeys): an entry keeps a shape per key, and the lookup
+// tables and props of the shapes the conversions touched, about 64 KB for
+// 40 keys, so 1,024 entries of wide key sets would hold 64 MiB until the
+// cache starts over. 8,192 keys are 1,024 entries of eight keys or 204 of
+// forty; hostShapesMax keeps the narrow key sets, whose entries cost more
+// than their shapes, to 1,024.
+const (
+	hostShapesMax    = 1024
+	hostShapeKeysMax = 8192
+)
 
 // FromGo converts a Go value to a JavaScript value. Scalars
 // convert at once; a *big.Int becomes a bigint (a copy; nil is null). The
@@ -42,7 +66,10 @@ type hostShapeEntry struct {
 // read later, node by node, and must not change while the result is in use.
 // A []byte becomes an ArrayBuffer over its bytes (NewArrayBuffer: not a copy,
 // so the bytes must not change while JavaScript may read them), and any
-// other type is an error.
+// other type is an error. A Value or *Object that is a function or generator
+// of another realm is ErrForeign, and so is one inside a container: there the
+// read of its member throws a TypeError with ErrForeign's text, as for a
+// member of a type FromGo does not convert.
 func (r *Realm) FromGo(v any) (Value, error) {
 	if res, ok := r.hostRoot(v); ok {
 		return res, nil
@@ -59,6 +86,9 @@ type fromGoState struct {
 // scalar, an engine value, a native function, a *big.Int or a []byte.
 func (r *Realm) fromGoOther(v any) (Value, error) {
 	if res, ok, err := scalarFromGo(v); ok {
+		if res.IsObject() && res.AsObject().HoldsCode() && r.IsForeign(res) {
+			return Undefined(), ErrForeign
+		}
 		return res, err
 	}
 	switch x := v.(type) {
@@ -178,18 +208,47 @@ func trimScratch[T any](s []T) []T {
 // hostShapeKey interns the host's key k for a new cache entry and returns
 // the atom and the key the entry keeps: the atom's content, or a copy of k
 // for a non-ASCII name, never k itself, which may share the memory of a
-// request body (a zero-copy JSON decoder).
-func (r *Realm) hostShapeKey(k string) (*String, string) {
+// request body (a zero-copy JSON decoder). It sets *nonASCII for a non-ASCII
+// name.
+func (r *Realm) hostShapeKey(k string, nonASCII *bool) (*String, string) {
 	a := r.InternGoString(k)
 	if a.kind != strASCII {
+		*nonASCII = true
 		return a, bytesToString([]byte(k))
 	}
 	return a, a.s
 }
 
+// hostShadowNames key the Go map entries another entry shadows (shadowHostKeys):
+// private names no code holds, which no operation on the object reaches.
+var hostShadowNames = func() (names [maxShapeProps - 1]PrivateName) {
+	desc := asciiString("#shadowed")
+	for i := range names {
+		names[i].desc = desc
+	}
+	return
+}()
+
+// shadowHostKeys replaces each key of the sorted host key list that a later
+// key equals by one of hostShadowNames and reports whether it replaced any.
+// Two Go keys that are not valid UTF-8 can decode to the same atom (each
+// invalid byte becomes U+FFFD): the later entry wins, as in JSON.parse, and
+// the shape still has a slot for each entry of the map.
+func shadowHostKeys(pks []PropertyKey) bool {
+	n := 0
+	for i, k := range pks {
+		if k.IsString() && k.String().kind != strASCII && slices.Contains(pks[i+1:], k) {
+			pks[i] = PrivateKey(&hostShadowNames[n])
+			n++
+		}
+	}
+	return n > 0
+}
+
 // hostShapeFor returns the cache entry for a sorted named-key list, building
 // the transition chain on first use.
-func hostShapeFor[V any](r *Realm, h uint64, named []hostPair[V]) *hostShapeEntry {
+func hostShapeFor[V any](hh *hostHeap, h uint64, named []hostPair[V]) *hostShapeEntry {
+	r := hh.r
 	var chains [2]*hostShapeEntry
 	if r.plainRoot.shared {
 		chains[0] = sharedHostShapeChain(h)
@@ -215,12 +274,27 @@ func hostShapeFor[V any](r *Realm, h uint64, named []hostPair[V]) *hostShapeEntr
 	if len(named) > len(pkBuf) {
 		pks = make([]PropertyKey, 0, len(named))
 	}
+	nonASCII := false
 	for i := range named {
-		a, k := r.hostShapeKey(named[i].k)
+		a, k := r.hostShapeKey(named[i].k, &nonASCII)
 		keys[i] = k
 		pks = append(pks, StringKey(a))
 	}
-	shape := r.plainRoot.addChain(r, pks, attrDefault)
+	var shape *Shape
+	if nonASCII && shadowHostKeys(pks) {
+		// The shadowed entries are hidden, and private names are never
+		// published, so the chain leaves the shared tree at the first.
+		shape = r.plainRoot
+		for _, k := range pks {
+			attrs := uint8(attrDefault)
+			if k.IsPrivate() {
+				attrs = 0
+			}
+			shape = shape.addProperty(r, k, attrs)
+		}
+	} else {
+		shape = r.plainRoot.addChain(r, pks, attrDefault)
+	}
 	if shape.shared {
 		if e := publishHostShape(h, keys, shape); e != nil {
 			return e
@@ -228,7 +302,11 @@ func hostShapeFor[V any](r *Realm, h uint64, named []hostPair[V]) *hostShapeEntr
 	}
 	if r.hostShapes == nil {
 		r.hostShapes = make(map[uint64]*hostShapeEntry)
+	} else if len(r.hostShapes) >= hostShapesMax || hh.shapeKeys+len(keys) > hostShapeKeysMax {
+		clear(r.hostShapes)
+		hh.shapeKeys = 0
 	}
+	hh.shapeKeys += len(keys)
 	e := &hostShapeEntry{keys: keys, shape: shape, next: r.hostShapes[h]}
 	r.hostShapes[h] = e
 	return e

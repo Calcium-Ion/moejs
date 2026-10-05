@@ -1,6 +1,9 @@
 package engine
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // Single-class regular expressions.
 //
@@ -14,7 +17,9 @@ import "slices"
 // does not understand returns nil and the translated RE2 program is used,
 // so the accepted subset is the only thing that has to be exact.
 //
-// Accepted: `\d \D \s \S \w \W`, or a bracket class of literal code units,
+// Accepted: one literal character (not a syntax character or a surrogate)
+// or an identity escape of a syntax character or '/', `\d \D \s \S \w \W`,
+// or a bracket class of literal code units,
 // ranges between literals, the class escapes above, `\t \n \v \f \r \0 \b`
 // (backspace), `\xHH`, `\uHHHH` and identity escapes of syntax characters;
 // followed by nothing, `+`, `{n}`, `{n,}` or `{n,m}` with n >= 1. Rejected:
@@ -127,6 +132,7 @@ func (s *unitSet) hasRange(c uint16) bool {
 type simpleClass struct {
 	set      unitSet
 	min, max int
+	one      int32 // the unit of a one-character pattern, else -1
 }
 
 // compileSimpleClass recognizes pattern (code units) with flags, or returns
@@ -136,12 +142,12 @@ func compileSimpleClass(pattern []uint16, flags regexpFlags) *simpleClass {
 	if flags.ignoreCase || flags.unicodeSets || len(pattern) == 0 {
 		return nil
 	}
-	p := simpleParser{src: pattern, unicode: flags.unicode}
+	p := simpleParser{src: pattern, unicode: flags.unicode, one: -1}
 	set, ok := p.class()
 	if !ok {
 		return nil
 	}
-	c := &simpleClass{set: set, min: 1, max: 1}
+	c := &simpleClass{set: set, min: 1, max: 1, one: p.one}
 	if p.pos < len(p.src) {
 		if !p.quantifier(c) {
 			return nil
@@ -161,6 +167,7 @@ type simpleParser struct {
 	src     []uint16
 	pos     int
 	unicode bool
+	one     int32 // the unit when the class is one literal character
 }
 
 func (p *simpleParser) peek() (uint16, bool) {
@@ -173,6 +180,11 @@ func (p *simpleParser) peek() (uint16, bool) {
 // class parses the leading class atom.
 func (p *simpleParser) class() (unitSet, bool) {
 	var set unitSet
+	if c, ok := p.literal(); ok {
+		set.addUnit(c)
+		p.one = int32(c)
+		return set, true
+	}
 	c, _ := p.peek()
 	if c == '\\' {
 		if p.pos+1 >= len(p.src) {
@@ -237,6 +249,36 @@ func (p *simpleParser) class() (unitSet, bool) {
 		}
 		set.addUnit(lo)
 	}
+}
+
+// literal consumes one literal character (a set of one unit): a character
+// that is not a syntax character or a surrogate, or an identity escape of a
+// syntax character or '/'.
+func (p *simpleParser) literal() (uint16, bool) {
+	c, ok := p.peek()
+	if !ok {
+		return 0, false
+	}
+	n := 1
+	switch c {
+	case '\\':
+		if p.pos+1 >= len(p.src) {
+			return 0, false
+		}
+		switch c = p.src[p.pos+1]; c {
+		case '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/':
+			n = 2
+		default:
+			return 0, false
+		}
+	case '^', '$', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+		return 0, false
+	}
+	if c >= 0xD800 && c < 0xE000 {
+		return 0, false
+	}
+	p.pos += n
+	return c, true
 }
 
 // classAtom parses one class atom. A class escape (\d \s \w) is added to
@@ -364,8 +406,18 @@ func (c *simpleClass) find(s *String, from int) (start, end int, ok bool) {
 	n := int(s.n)
 	i := from
 	for i < n {
-		// Skip to the first unit in the set.
-		if s.kind == strASCII {
+		// Skip to the first unit in the set: one character's with
+		// IndexByte, as RE2 skips to a literal.
+		if s.kind == strASCII && c.one >= 0 {
+			k := -1
+			if c.one < 0x80 {
+				k = strings.IndexByte(s.s[i:], byte(c.one))
+			}
+			if k < 0 {
+				return 0, 0, false
+			}
+			i += k
+		} else if s.kind == strASCII {
 			for i < n && !c.set.has(uint16(s.s[i])) {
 				i++
 			}

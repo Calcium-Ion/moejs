@@ -487,9 +487,7 @@ func TestDynamicCodeRetained(t *testing.T) {
 		{"65 Function sources round robin", `for (var i = 0; i < N; i++) Function("o", "return o.a + o.b + " + i % 65)({a: 1, b: 2});`},
 		{"one Function source", `eval(""); for (var i = 0; i < N; i++) Function("o", "return o.a + o.b")({a: 1, b: 2});`},
 		{"tagged template Function in a loop", "function tag(t) { return t; } for (var i = 0; i < N; i++) Function('return tag`x`.length')();"},
-		// Not a generator function: the realm keeps a root shape for every
-		// prototype that made an object, the fresh prototype of each
-		// generator function too (Realm.rootShapes, dynamic or not).
+		{"distinct GeneratorFunction sources", `var G = Object.getPrototypeOf(function* () {}).constructor; for (var i = 0; i < N; i++) G("o", "yield o.a + " + i)({a: 1}).next();`},
 		{"distinct async function sources", `var A = Object.getPrototypeOf(async function () {}).constructor; for (var i = 0; i < N; i++) A("o", "return await o.a + " + i)({a: 1});`},
 		{"distinct EvalScript sources", `for (var i = 0; i < N; i++) evalScript("({a:1}).a + " + i);`},
 		{"closures of running eval code", `eval("for (var i = 0; i < N; i++) (function (o) { return o.a; })({a: 1});");`},

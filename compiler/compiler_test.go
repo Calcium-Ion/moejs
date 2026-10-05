@@ -1,6 +1,8 @@
 package compiler
 
 import (
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
@@ -603,10 +605,17 @@ func TestCompileAtNestingLimit(t *testing.T) {
 // down, and before foldChain remembered the unfoldable spine this was
 // quadratic (a 100,000-term `a+a+...` took 55 s, 20,000 terms of `&&` 2 s).
 // One chain of 16n terms must cost about as much as sixteen chains of n
-// terms (deep recursion and stack growth allow up to 6x); a quadratic
-// compiler is 16x slower. The minimum of three trials keeps the ratio robust
-// on a loaded machine and under -race.
+// terms (deep recursion allows up to 6x); a quadratic compiler is 16x
+// slower. The trials count CPU time (cpuTime): with more threads running
+// than CPUs, the long chain's wall time grew up to 7x the short chains'.
+// No collection runs during them (but at a memory limit, which only a
+// regression's quadratic garbage reaches), so the stack the first trial
+// grows for the long chain (32 MB for "mixed") is not shrunk before the
+// next two: growing it was most of the long logical chains' cost. The
+// minimum of three trials keeps the ratio robust under -race too.
 func TestFoldChainLinear(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(1 << 30)) // what a quadratic regression allocates
 	chain := func(prefix, term, op, suffix string) func(n int) string {
 		return func(n int) string {
 			return "const a = 1; " + prefix + strings.TrimSuffix(strings.Repeat(term+op, n), op) + suffix
@@ -631,18 +640,23 @@ func TestFoldChainLinear(t *testing.T) {
 		{"if-and", 500, chain("if (", "a", "&&", ") {}")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			runtime.GC() // the garbage of the cases before
 			parse := func(n int) *syntax.Module {
 				m, err := syntax.ParseModule("chain.js", c.src(n), syntax.Options{})
 				require.NoError(t, err)
 				return m
 			}
 			compile := func(ms ...*syntax.Module) time.Duration {
-				start := time.Now()
-				for _, m := range ms {
-					_, err := CompileModule(m)
-					require.NoError(t, err)
-				}
-				return time.Since(start)
+				var err error
+				d := cpuTime(func() {
+					for _, m := range ms {
+						if _, err = CompileModule(m); err != nil {
+							return
+						}
+					}
+				})
+				require.NoError(t, err)
+				return d
 			}
 			const k = 16
 			one, many := time.Duration(1<<62), time.Duration(1<<62)
@@ -676,4 +690,85 @@ export function simple(g) { var a = 1; try { a = 2; a = g; a = function () {}; }
 		ops(child(t, fn, "inTry")), "the result is moved to the variable once the call returns")
 	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.LoadInt, bytecode.Move, bytecode.Closure, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
 		ops(child(t, fn, "simple")))
+}
+
+// TestGetElemRefEmission checks that only a compound assignment or update
+// of a computed member whose key may be an object reads it with
+// GetElemRef, which converts the key into a temporary when the key is a
+// variable.
+func TestGetElemRefEmission(t *testing.T) {
+	fn := compileModule(t, `export function conv(o, k) { o[k] += 1; o[k]++; o[k] ??= 1; o[k.x] -= 1; }
+export function prim(o, k) { o[0] += 1; o["x"] += 1; o[k + 1]++; o[-k] *= 2; o[`+"`${k}`"+`] |= 1; o.x++; }
+export function plain(o, k) { o[k] = 1; o[k]; delete o[k]; }
+class C { #x = 0; m(k) { this.#x += 1; this.#x++; } }`)
+	count := func(name string) int {
+		n := 0
+		for _, op := range ops(child(t, fn, name)) {
+			if op == bytecode.GetElemRef {
+				n++
+			}
+		}
+		return n
+	}
+	assert.Equal(t, 4, count("conv"))
+	assert.Equal(t, 0, count("prim"))
+	assert.Equal(t, 0, count("plain"))
+	// The write uses the converted key, in a temporary for the variable k
+	// and in place for the temporary k.x.
+	code := child(t, fn, "conv").Code
+	var keys []uint8
+	for pc := 0; pc < len(code); pc += 1 + bytecode.DecodeOp(code[pc]).ExtraWords() {
+		switch w := code[pc]; bytecode.DecodeOp(w) {
+		case bytecode.GetElemRef:
+			c, x := bytecode.DecodeC(w), uint8(code[pc+1])
+			if x == 1 {
+				assert.NotEqual(t, uint8(1), c, "a variable key must keep its value")
+			} else {
+				assert.Equal(t, x, c, "a temporary key is converted in place")
+			}
+			keys = append(keys, c)
+		case bytecode.SetElem:
+			require.NotEmpty(t, keys)
+			assert.Equal(t, keys[len(keys)-1], bytecode.DecodeB(w), "the write reuses the converted key")
+		}
+	}
+	assert.Len(t, keys, 4)
+	assert.Equal(t, 0, count("m"), "a private name is never converted")
+}
+
+// TestResolveGlobalEmission checks that only a strict assignment of an
+// undeclared name from a value that may run code resolves the name first.
+func TestResolveGlobalEmission(t *testing.T) {
+	for src, want := range map[string][]bytecode.Op{
+		`"use strict"; x = f();`:                  {bytecode.ResolveGlobal, bytecode.SetGlobalRef},
+		`"use strict"; x = y;`:                    {bytecode.ResolveGlobal, bytecode.SetGlobalRef},
+		`"use strict"; x = 1; x = "s"; x = null;`: {bytecode.SetGlobal},
+		`(function (v) { "use strict"; x = v; })`: {bytecode.SetGlobal},
+		`"use strict"; var x; x = f();`:           {bytecode.SetGlobal},
+		`"use strict"; x += f(); x++; x ??= f();`: {bytecode.SetGlobal},
+		`x = f();`: {bytecode.SetGlobalSloppy},
+		`(function () { "use strict"; x = f(); })`: {bytecode.ResolveGlobal, bytecode.SetGlobalRef},
+	} {
+		s, err := syntax.ParseScript("s.js", src, syntax.Options{})
+		require.NoError(t, err)
+		fn, err := CompileScript(s)
+		require.NoError(t, err)
+		var got []bytecode.Op
+		var walk func(*bytecode.Function)
+		walk = func(fn *bytecode.Function) {
+			for _, op := range ops(fn) {
+				switch op {
+				case bytecode.ResolveGlobal, bytecode.SetGlobalRef, bytecode.SetGlobal, bytecode.SetGlobalSloppy:
+					if !slices.Contains(got, op) {
+						got = append(got, op)
+					}
+				}
+			}
+			for _, c := range fn.Children {
+				walk(c)
+			}
+		}
+		walk(fn)
+		assert.Equal(t, want, got, src)
+	}
 }

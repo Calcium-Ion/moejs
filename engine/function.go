@@ -100,6 +100,83 @@ func (fd *FunctionData) HomeObject() *Object {
 // intrinsics (natives must use the realm passed to them instead).
 func (fd *FunctionData) Realm() *Realm { return fd.realm }
 
+// IsForeign reports whether v is a function, generator or async generator
+// whose code runs in another realm than r: a bytecode function another
+// realm created, or the generator of a call to one, reached directly or
+// through bound functions and proxy targets, or a callable proxy another
+// realm created, whose traps are that realm's code whatever its target.
+// That code's inline caches are bound in its own realm's table and its
+// prototype checks follow that realm's epoch, so calling or resuming it from
+// r gives wrong results or a Go panic; a host keeps the objects of a realm
+// inside it (engine-api.md, "One realm per value"). Dynamic code (eval, the
+// Function constructors) binds its caches in the calling realm and is not
+// foreign. A revoked proxy of r has no target and runs no code (using it is
+// a TypeError), so it is not foreign. IsForeign does not see a foreign
+// function reached through an object of another realm, the traps of a proxy
+// that is not callable among them.
+func (r *Realm) IsForeign(v Value) bool {
+	if !v.IsObject() {
+		return false
+	}
+	// No call, so that a host checking its arguments pays little for the
+	// objects that are no code (comma-ok assertions do not call). The
+	// targets of bound functions and proxies are fixed at creation, so the
+	// walk ends.
+	o := v.AsObject()
+	for {
+		var fd *FunctionData
+		switch o.class {
+		case ClassFunction:
+			fd, _ = o.internal.(*FunctionData)
+			if fd != nil && fd.kind == FuncBound {
+				b, _ := fd.data.(*boundFunc)
+				if b == nil {
+					return false
+				}
+				o = b.target
+				continue
+			}
+		case ClassProxy:
+			// A callable proxy's state hangs off its function payload; a
+			// module namespace has none.
+			var pd *proxyData
+			if pf, ok := o.internal.(*FunctionData); ok {
+				// A callable proxy of another realm runs that realm's
+				// traps, whatever its target: foreign.
+				if pf.realm != nil && pf.realm != r {
+					return true
+				}
+				pd, _ = pf.data.(*proxyData)
+			} else {
+				pd, _ = o.internal.(*proxyData)
+			}
+			if pd == nil || pd.target == nil {
+				return false
+			}
+			o = pd.target
+			continue
+		case ClassGenerator:
+			if g, _ := o.internal.(*genFrame); g != nil {
+				fd = g.fd
+			}
+		case ClassAsyncGenerator:
+			if g, _ := o.internal.(*asyncGenerator); g != nil {
+				fd = g.g.fd
+			}
+		default:
+			return false
+		}
+		return fd != nil && fd.kind == FuncBytecode && fd.realm != r && fd.realm != nil && fd.meta.dyn == 0
+	}
+}
+
+// HoldsCode reports whether o is a function, generator, async generator or
+// proxy: the objects IsForeign can report, so that a host checks its
+// arguments without a call for the rest.
+func (o *Object) HoldsCode() bool {
+	return o.class == ClassFunction || o.class == ClassGenerator || o.class == ClassAsyncGenerator || o.class == ClassProxy
+}
+
 // Name returns the function's initial name (may be nil).
 func (fd *FunctionData) Name() *String { return fd.name }
 
@@ -179,6 +256,14 @@ func NewEnv(parent *Env, n int) *Env {
 
 // Parent returns the enclosing environment.
 func (e *Env) Parent() *Env { return e.parent }
+
+// up returns the environment d levels out from e.
+func (e *Env) up(d uint8) *Env {
+	for ; d > 0; d-- {
+		e = e.parent
+	}
+	return e
+}
 
 // Len returns the slot count.
 func (e *Env) Len() int { return len(e.slots) }
@@ -275,7 +360,8 @@ func (r *Realm) CallState() CallState {
 }
 
 // RestoreCallState resets the call bookkeeping to a snapshot taken at the
-// same host boundary.
+// same host boundary. At the outermost boundary, DropJobs then discards the
+// jobs the call left queued.
 func (r *Realm) RestoreCallState(cs CallState) {
 	r.callDepth, r.interp.sp, r.interp.nframes = int32(cs.depth), cs.sp, cs.nframes
 }

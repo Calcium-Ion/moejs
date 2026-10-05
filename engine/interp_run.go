@@ -74,16 +74,10 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 
 		// --- closure environments ---
 		case bytecode.GetEnv:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			regs[a] = e.slots[uint8(w>>24)]
 		case bytecode.GetEnvChk:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			v := e.slots[uint8(w>>24)]
 			x := insns[pc]
 			pc++
@@ -93,23 +87,14 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			regs[a] = v
 		case bytecode.SetEnv:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			e.slots[uint8(w>>24)] = regs[a]
 		case bytecode.GetEnvW:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			regs[a] = e.slots[insns[pc]]
 			pc++
 		case bytecode.GetEnvChkW:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			v := e.slots[insns[pc]]
 			x := insns[pc+1]
 			pc += 2
@@ -119,10 +104,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			regs[a] = v
 		case bytecode.GetImport:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			v := *e.slots[uint8(w>>24)].importTarget()
 			x := insns[pc]
 			pc++
@@ -132,10 +114,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			regs[a] = v
 		case bytecode.GetImportW:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			v := *e.slots[insns[pc]].importTarget()
 			x := insns[pc+1]
 			pc += 2
@@ -145,10 +124,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			regs[a] = v
 		case bytecode.SetEnvW:
-			e := env
-			for d := uint8(w >> 16); d > 0; d-- {
-				e = e.parent
-			}
+			e := env.up(uint8(w >> 16))
 			e.slots[insns[pc]] = regs[a]
 			pc++
 		case bytecode.PushEnv:
@@ -818,6 +794,26 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				break
 			}
 			regs[a+3] = k
+		case bytecode.GetElemRef:
+			// GetElem whose key stays in R[C] for the SetElem of a compound
+			// assignment or update. A dense element read needs no
+			// conversion; classOp reads any other. The read continues the
+			// loop (err is nil): a break to the code after the switch
+			// changes the register allocation of every case's back-edge.
+			k := regs[uint8(insns[pc])]
+			if o := regs[uint8(w>>16)]; o.IsObject() && k.IsNumber() {
+				obj := o.AsObject()
+				f := k.AsNumber()
+				if i := int(f); float64(i) == f && i >= 0 && i < len(obj.elements) && obj.class != ClassString {
+					if v := obj.elements[i]; !v.IsHole() {
+						regs[uint8(w>>24)] = k
+						regs[a] = v
+						pc++
+						continue
+					}
+				}
+			}
+			fallthrough
 		default:
 			pc, err = r.classOp(fd, base, w, pc) // class ops, off the jump table (class.go)
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
@@ -883,6 +879,22 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		pc = int(h.Handler)
 		err = nil
 	}
+}
+
+// getElemRef is GetElemRef off run's dense element read. GetValue
+// converts an object key once, after ToObject of the base, so a nullish
+// base keeps it and getElemSlow throws the TypeError. It returns the key
+// for PutValue.
+func (r *Realm) getElemRef(o, k Value) (Value, Value, error) {
+	if k.IsObject() && !o.IsNullish() {
+		key, err := r.ToPropertyKey(k)
+		if err != nil {
+			return k, Undefined(), err
+		}
+		k = key.Value()
+	}
+	res, err := r.getElemSlow(o, k)
+	return k, res, err
 }
 
 // findHandler returns the innermost handler row covering pc, or nil.

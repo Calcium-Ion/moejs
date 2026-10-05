@@ -11,7 +11,8 @@ import (
 // Interning has three levels:
 //
 //  1. the static atom table (atoms.go), built at package init and immutable;
-//  2. a per-realm cache (plain maps, single goroutine);
+//  2. a per-realm cache (plain maps, single goroutine, bounded:
+//     internCacheMax);
 //  3. the process-wide table (internTable): lock-free reads, amortized O(1)
 //     inserts, weak entries.
 //
@@ -186,6 +187,8 @@ func (r *Realm) internASCII(key string) *String {
 			return a
 		}
 		r.internCacheASCII = make(map[string]*String)
+	} else if len(r.internCacheASCII) >= internCacheMax {
+		clear(r.internCacheASCII)
 	}
 	// Keyed by the atom's own content, never by key, which may be a slice
 	// of a JSON text or of a large string (builtin_json.go, Substring).
@@ -249,6 +252,14 @@ func InternKey(g string) PropertyKey {
 // that runs code gets them within its first lookups.
 const internCacheAfter = 8
 
+// internCacheMax bounds each of a realm's intern caches. They only front the
+// process-wide tables, which keep atom identity on their own, so a cache that
+// reaches it is emptied and refills with the names in use: a pooled runtime
+// that interns the ids and user values of every request (host map keys,
+// obj[key], JSON.parse) holds at most this many, and the names it no longer
+// uses can be collected. The bound is checked on the miss path only.
+const internCacheMax = 4096
+
 // cacheInterning reports whether the realm, which has no cache for the kind
 // of name at hand, should create it now.
 func (r *Realm) cacheInterning() bool {
@@ -270,6 +281,8 @@ func (r *Realm) internUTF16(s *String) *String {
 			return a
 		}
 		r.internCacheUTF16 = make(map[string]*String, 8)
+	} else if len(r.internCacheUTF16) >= internCacheMax {
+		clear(r.internCacheUTF16)
 	}
 	r.internCacheUTF16[key] = a
 	return a

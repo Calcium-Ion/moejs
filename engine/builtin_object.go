@@ -147,7 +147,7 @@ func hasOnlyShapeProps(o *Object) bool {
 	if o.flags&flagHasLazy != 0 {
 		o.materializeHost()
 	}
-	return o.class == ClassObject && o.flags&(flagDict|flagHasLazy) == 0 && len(o.elements) == 0 && o.dict == nil
+	return o.class == ClassObject && o.flags&(flagDict|flagHasLazy) == 0 && len(o.elements) == 0 && (o.dict == nil || o.dict.sparse == nil)
 }
 
 // objectKeys implements Object.keys.

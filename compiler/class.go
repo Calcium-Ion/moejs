@@ -617,6 +617,41 @@ func (f *funcState) emitGetKey(dst, obj, key int, m *syntax.MemberExpr) {
 	f.emitABC(bytecode.GetElem, dst, obj, key)
 }
 
+// emitGetRef emits the read R[dst] = R[obj][R[key]] of member m that a
+// compound assignment or update then writes. GetValue converts the key
+// once, after ToObject of the base, and PutValue reuses it (ES2025
+// 6.2.5.5, 6.2.5.6), so an object key's toString runs once and not for a
+// nullish base: GetElemRef leaves the converted key in a register. It
+// returns the register of the key to write: key itself when it is a
+// temporary (at or above mark), a new one when it is a variable's, which
+// must keep its value. A private name, or a key primitive by its syntax,
+// needs no conversion.
+func (f *funcState) emitGetRef(dst, obj, key, mark int, m *syntax.MemberExpr) int {
+	if _, ok := m.Prop.(*syntax.PrivateName); isPrimitiveExpr(m.Prop) || ok {
+		f.emitGetKey(dst, obj, key, m)
+		return key
+	}
+	k := key
+	if key < mark {
+		k = f.alloc()
+	}
+	f.emitABC(bytecode.GetElemRef, dst, obj, k)
+	f.emitExtra(uint32(key))
+	return k
+}
+
+// isPrimitiveExpr reports whether the value of e is primitive by its
+// syntax: a literal other than a regular expression, a template, or an
+// operator that yields a primitive.
+func isPrimitiveExpr(e syntax.Expr) bool {
+	switch e.(type) {
+	case *syntax.NumberLit, *syntax.StringLit, *syntax.BoolLit, *syntax.NullLit, *syntax.BigIntLit,
+		*syntax.TemplateLit, *syntax.UnaryExpr, *syntax.BinaryExpr, *syntax.UpdateExpr:
+		return true
+	}
+	return false
+}
+
 // privateIn compiles `#x in o`.
 func (f *funcState) privateIn(pn *syntax.PrivateName, o syntax.Expr, dst int) {
 	p := f.bindingReg(pn.Binding)

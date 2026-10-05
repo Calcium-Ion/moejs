@@ -306,6 +306,9 @@ func (rt *MoejsRuntime) RunScript(name, source string) (any, error) {
 // the exception's data properties (no user code runs, so a thrown object
 // without a data message has an empty Message where Sobek runs toString).
 func wrapMoejsError(err error) error {
+	if err == nil {
+		return nil // errors.As would allocate exc on every call
+	}
 	if errors.Is(err, moejs.ErrHookNotFound) || errors.Is(err, moejs.ErrNotCallable) {
 		return ErrNotFound
 	}

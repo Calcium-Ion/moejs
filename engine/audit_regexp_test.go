@@ -369,7 +369,7 @@ var auditConformanceCases = []auditJSCase{
 	{js: "typeof \"a\".search", want: "\"function\""},
 	{js: "{ try { return \"a\".matchAll(/a/g); } catch (e) { return e.name + \": \" + e.message; } }", want: "{}"},
 	{js: "typeof RegExp.prototype.compile", want: "\"function\""},
-	{js: "typeof RegExp.$1", want: "\"string\"", actual: "\"undefined\""},
+	{js: "typeof RegExp.$1", want: "\"string\""},
 	{js: "{ try { return typeof Symbol.replace; } catch (e) { return e.name; } }", want: "\"symbol\""},
 	{js: "{ try { new RegExp(\"a\", \"v\"); } catch (e) { return e.name; } }", want: "undefined"},
 

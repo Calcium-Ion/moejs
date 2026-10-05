@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/engine"
 )
@@ -38,6 +39,19 @@ type Options struct {
 // Runtime is one JavaScript global environment with at most one loaded
 // module. It must be used from one goroutine at a time; only Interrupt and
 // ClearInterrupt may be called concurrently.
+//
+// The objects its JavaScript creates are its own. Any object of another
+// runtime can run that runtime's code when it is used, not only a function
+// or generator but also through a method, an accessor, a proxy, a promise
+// or a thenable, and that code reads the caches of the runtime running it:
+// wrong results or an *InternalError. Only Go values (ToGo, FromGo) and
+// JSON are safe to pass between runtimes. Call, SetGlobal, FromGo and the
+// settlers of NewPromise return ErrForeign for a function or generator of
+// another runtime (or a bound function or proxy of one), FromGo also for one
+// inside the Go containers it converts (reading that member throws); they do
+// not look inside other objects, and do not check a proxy of another runtime
+// that is not callable, even inside a Go map: its traps run in the runtime
+// that reads it.
 type Runtime struct {
 	realm *engine.Realm
 	mod   *Module
@@ -73,7 +87,7 @@ func (rt *Runtime) Realm() *Realm { return rt.realm }
 func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
-	val, err := r.FromGo(v)
+	val, err := rt.FromGo(v)
 	if err != nil {
 		return err
 	}
@@ -82,9 +96,10 @@ func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 }
 
 // Function creates a host function with a name and a length, the values of
-// its `name` and `length` properties.
+// its `name` and `length` properties; a negative length is 0, as no
+// function's length is negative.
 func (rt *Runtime) Function(name string, length int, fn NativeFunc) Value {
-	return engine.ObjectValue(rt.realm.NewNativeFunction(engine.FromGoString(name), length, fn))
+	return engine.ObjectValue(rt.realm.NewNativeFunction(engine.FromGoString(name), max(length, 0), fn))
 }
 
 // Load evaluates m's top level in this runtime. A runtime loads one module
@@ -245,7 +260,8 @@ func (rt *Runtime) Has(h Hook) (ok bool, err error) {
 // does not lead to a value is ErrHookNotFound, one that leads to a value
 // that is not a function ErrNotCallable; a throw is an *Exception, an
 // interrupt an *InterruptedError. The hooks of a module whose top level
-// failed return Load's error.
+// failed return Load's error. An argument that is a function or generator
+// of another runtime is ErrForeign.
 func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 	r := rt.realm
 	base := len(rt.argStack)
@@ -255,12 +271,16 @@ func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 		return engine.Undefined(), err
 	}
 	// Bytecode checks for an interrupt when it is entered, natives do not.
-	// The release drops the jobs a Go panic left queued (out of a call body
-	// before any drain, or out of a job), as the return of an interrupted
-	// call does.
+	// The release drops any jobs left queued, as the return of an
+	// interrupted call does.
 	if err := r.CheckInterrupt(); err != nil {
 		r.HoldJobs()
 		return engine.Undefined(), r.ReleaseJobs(err)
+	}
+	for _, a := range args {
+		if a.IsObject() && a.AsObject().HoldsCode() && r.IsForeign(a) {
+			return engine.Undefined(), ErrForeign
+		}
 	}
 	rt.argStack = append(rt.argStack, args...)
 	top := len(rt.argStack)
@@ -397,12 +417,17 @@ func (rt *Runtime) ClearInterrupt() { rt.realm.ClearInterrupt() }
 // an ArrayBuffer over the same bytes, not a copy: JavaScript writes reach
 // them, and the host must not modify them while JavaScript may read them.
 // Other types (structs, named map types) are an error: marshal them and use
-// ParseJSON.
-func (rt *Runtime) FromGo(v any) (Value, error) { return rt.realm.FromGo(v) }
+// ParseJSON. A Value or *Object that is a function or generator of another
+// runtime is ErrForeign; inside a container, reading its member throws a
+// TypeError with ErrForeign's text.
+func (rt *Runtime) FromGo(v any) (Value, error) {
+	return rt.realm.FromGo(v)
+}
 
-// ParseJSON is JSON.parse of b.
+// ParseJSON is JSON.parse of b. Nesting deeper than 10,000 arrays and
+// objects (engine.MaxToGoDepth) is a RangeError.
 func (rt *Runtime) ParseJSON(b []byte) (Value, error) {
-	return rt.realm.JSONParse(engine.FromGoString(string(b)))
+	return rt.realm.JSONParseGoString(string(b))
 }
 
 // Get reads property key of v, running a getter and walking the prototype
@@ -430,8 +455,14 @@ func (rt *Runtime) Get(v Value, key string) (res Value, err error) {
 // zero-length buffer or view a non-nil empty one.
 // A proxy exports through its traps (see engine.Realm.ToGo): []any when its
 // target is an array, the map of its enumerable keys otherwise, the *Object
-// when it is callable. A getter or trap that throws, or a revoked proxy, is
-// returned as the error.
+// when it is callable. An array or object FromGo converted from a non-empty
+// Go map or slice exports as that Go value while JavaScript has not
+// modified it (engine.Object.HostValue); an empty one converted to a plain
+// array or object, and a nil map to null. A getter or trap that throws, a
+// revoked proxy, or nesting deeper than 10,000 containers
+// (engine.MaxToGoDepth) is returned as the error. The Go string of an ASCII
+// string is the one v holds: for a value ParseJSON produced it may share the
+// parsed text and keep it alive; strings.Clone what is kept.
 func (rt *Runtime) ToGo(v Value) (out any, err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
@@ -442,22 +473,55 @@ func (rt *Runtime) ToGo(v Value) (out any, err error) {
 
 // AppendJSON appends JSON.stringify(v) to dst as UTF-8. A value with no
 // JSON form (undefined, a function, a symbol) appends null. A proxy is
-// serialized as JSON.stringify does it: its traps run.
+// serialized as JSON.stringify does it: its traps run. Nesting deeper than
+// 10,000 arrays and objects (engine.MaxToGoDepth) is a RangeError, and so is
+// an output of more than 2^30-24 bytes: the string length limit counted in
+// bytes of UTF-8, JSON.stringify's limit for ASCII text and reached first
+// for other text.
+//
+// The output is written into dst's spare capacity, after reserving the last
+// output's length plus an eighth: a host that passes its previous output
+// back (buf, err = rt.AppendJSON(buf[:0], v)) allocates only when buf has
+// less room than that, and after one very large output a call with a small
+// dst allocates that much again. Before any JavaScript runs (a toJSON, a
+// Date's included, a getter, a proxy's trap) the output moves to a buffer
+// of its own, which holds twice what is written so far and grows as the
+// rest is written, and is appended to dst when AppendJSON returns, so a
+// host function that JavaScript calls meanwhile may append to dst or pass
+// it to another AppendJSON; what it appended to dst's spare capacity is
+// overwritten then, as append(dst, text...) would overwrite it. The same
+// holds for a job (a promise reaction, queueMicrotask) that code queued,
+// when AppendJSON is called outside any Call: the job runs before the
+// output is appended to dst. Inside a host function the jobs run when the
+// outermost Call returns, after AppendJSON has returned, and one that
+// appends to the same dst overwrites what AppendJSON appended, as any later
+// append would: a host function should use a buffer of its own.
 func (rt *Runtime) AppendJSON(dst []byte, v Value) (out []byte, err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
 	r.HoldJobs()
-	s, err := r.JSONStringify(v)
+	// What a panic returns (guard), the output being suspect: a host
+	// function's inside the call, or a job's at the release.
+	out = dst
+	res, ok, err := r.AppendJSON(dst, v)
+	// The jobs a toJSON or getter queued run at the release, after the
+	// output landed in dst's spare capacity; a host function they call may
+	// use dst (above), so when any are pending the output first moves out.
+	// A value that runs no code queues none and is not copied.
+	if ok && err == nil && r.JobsPending() && len(dst) < len(res) && unsafe.SliceData(res) == unsafe.SliceData(dst) {
+		text := append([]byte(nil), res[len(dst):]...)
+		if err = r.ReleaseJobs(nil); err != nil {
+			return dst, err
+		}
+		return append(dst, text...), nil
+	}
 	if err = r.ReleaseJobs(err); err != nil {
 		return dst, err
 	}
-	if s == nil {
+	if !ok {
 		return append(dst, "null"...), nil
 	}
-	if a, ok := s.ASCII(); ok {
-		return append(dst, a...), nil
-	}
-	return append(dst, s.GoString()...), nil
+	return res, nil
 }
 
 // StackTrace returns the `stack` of an Error thrown in this runtime:
@@ -474,16 +538,24 @@ func (rt *Runtime) StackTrace(exc *Exception) string {
 // guard is deferred by every method that can run JavaScript. A Go panic
 // that unwound through the engine (an engine bug or a panicking host
 // function) skipped the interpreter's frame exits, so the call bookkeeping
-// is reset to its value at entry and the panic becomes an *InternalError.
+// is reset to its value at entry and the panic becomes an *InternalError;
+// at the outermost call the jobs it left queued are dropped, so that they
+// do not run in the next call.
 func (rt *Runtime) guard(err *error, saved engine.CallState, argBase int) {
 	x := recover()
 	if x == nil {
 		return
 	}
+	rt.recovered(err, x, saved, argBase)
+}
+
+// recovered restores the runtime after the panic x and sets *err to it.
+func (rt *Runtime) recovered(err *error, x any, saved engine.CallState, argBase int) {
 	rt.realm.RestoreCallState(saved)
 	clear(rt.argStack[argBase:])
 	rt.argStack = rt.argStack[:argBase]
 	*err = &InternalError{Value: x, Stack: debug.Stack()}
+	rt.realm.DropJobs(*err)
 }
 
 // guardLoad is guard for Load: a panic that stopped the evaluation before
@@ -505,10 +577,7 @@ func (rt *Runtime) guardGraph(err *error, g *engine.ModuleGraph, saved engine.Ca
 // loadPanicked handles the panic x of a Load, through the graph g if not
 // nil.
 func (rt *Runtime) loadPanicked(err *error, x any, g *engine.ModuleGraph, saved engine.CallState, argBase int) {
-	rt.realm.RestoreCallState(saved)
-	clear(rt.argStack[argBase:])
-	rt.argStack = rt.argStack[:argBase]
-	*err = &InternalError{Value: x, Stack: debug.Stack()}
+	rt.recovered(err, x, saved, argBase)
 	ran := rt.env != nil && rt.failed == nil
 	if g != nil {
 		ran = rt.realm.GraphRan(g)

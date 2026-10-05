@@ -727,18 +727,81 @@ export function g() { queueMicrotask(() => { count++; }); boom("x"); }`)
 	require.NoError(t, err)
 	assert.Equal(t, "2", res.String())
 
-	// The panic leaves the job g queued, which an interrupted Call drops.
+	// The panic drops the job g queued before it: it does not run at the
+	// end of the next call.
 	_, err = rt.Call(mustHook(t, mod, "g"))
 	require.ErrorAs(t, err, &ie)
-	rt.Interrupt("stop")
-	_, err = rt.Call(f, moejs.Int(1))
-	var interrupted *moejs.InterruptedError
-	require.ErrorAs(t, err, &interrupted)
-	rt.ClearInterrupt()
 	_, err = rt.Call(f, moejs.Int(1))
 	require.NoError(t, err)
 	count, _ := rt.Export("count")
 	assert.Equal(t, "0", count.String(), "no stale job ran")
+}
+
+// TestPanicDropsJobs checks the jobs left by a Go panic out of a job: the
+// jobs after it are dropped, not run in the next call, while a panic
+// recovered by a nested Call leaves the outer call's jobs to its end, and a
+// module top level that a dropped job would have resumed does not resume.
+func TestPanicDropsJobs(t *testing.T) {
+	mod, err := moejs.Compile("p.js", `export let log = "";
+export function arm() { queueMicrotask(() => { log += "1"; boom(); }); queueMicrotask(() => { log += "2"; }); queueMicrotask(() => { log += "3"; }); }
+export function next() { log += "n"; }
+export function outer() { queueMicrotask(() => { log += "o"; }); nested(); log += "a"; }`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	require.NoError(t, rt.SetGlobal("boom", moejs.NativeFunc(func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {
+		panic("job bug")
+	})))
+	var nestedErr error
+	require.NoError(t, rt.SetGlobal("nested", moejs.NativeFunc(func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {
+		_, nestedErr = rt.Call(mustHook(t, mod, "arm"))
+		return moejs.Undefined(), nil
+	})))
+	require.NoError(t, rt.Load(mod))
+	log := func() string { v, _ := rt.Export("log"); return v.String() }
+
+	_, err = rt.Call(mustHook(t, mod, "arm"))
+	var ie *moejs.InternalError
+	require.ErrorAs(t, err, &ie)
+	assert.Equal(t, "1", log())
+	_, err = rt.Call(mustHook(t, mod, "next"))
+	require.NoError(t, err)
+	assert.Equal(t, "1n", log(), "the jobs after the panic do not run in the next call")
+
+	// The nested Call queues its jobs in the outer call, whose end runs
+	// them: the panic is the outer call's error, the jobs after it still
+	// queued are dropped.
+	_, err = rt.Call(mustHook(t, mod, "outer"))
+	require.NoError(t, nestedErr)
+	require.ErrorAs(t, err, &ie)
+	assert.Equal(t, "1nao1", log())
+	_, err = rt.Call(mustHook(t, mod, "next"))
+	require.NoError(t, err)
+	assert.Equal(t, "1nao1n", log())
+
+	// A top level awaiting past a job that panics does not resume in a
+	// later call, alone or through its graph (import.meta).
+	for _, src := range []string{"", "import.meta;\n"} {
+		tla, err := moejs.Compile("tla.js", src+`export let n = 0;
+export function get() { return n; }
+queueMicrotask(() => boom());
+await null;
+n = 1;`)
+		require.NoError(t, err)
+		rt := moejs.NewRuntime(moejs.Options{})
+		require.NoError(t, rt.SetGlobal("boom", moejs.NativeFunc(func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) {
+			panic("tla bug")
+		})))
+		err = rt.Load(tla)
+		require.ErrorAs(t, err, &ie, src)
+		assert.Equal(t, "tla bug", ie.Value, src)
+		for range 2 {
+			res, err := rt.Call(mustHook(t, tla, "get"))
+			require.NoError(t, err, src)
+			assert.Equal(t, "0", res.String(), src)
+		}
+		v, _ := rt.Export("n")
+		assert.Equal(t, "0", v.String(), "%sthe top level does not resume in a later call", src)
+	}
 }
 
 // nilMapWrite is a host function with a Go bug: it writes to a nil map.
@@ -864,6 +927,24 @@ export const h = hostH;`)
 	res, err := rt.Call(mustHook(t, mod, "h"), moejs.String("x"), moejs.String("y"))
 	require.NoError(t, err)
 	assert.Equal(t, "xy", res.String())
+}
+
+// TestFunctionNameLength checks the name and length a host function shows
+// JavaScript, a negative length being 0.
+func TestFunctionNameLength(t *testing.T) {
+	mod, err := moejs.Compile("fn.js", `export function show(f) { return f.name + "/" + f.length; }`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	require.NoError(t, rt.Load(mod))
+	noop := func(*moejs.Realm, moejs.Value, []moejs.Value) (moejs.Value, error) { return moejs.Undefined(), nil }
+	for _, c := range []struct {
+		length int
+		want   string
+	}{{2, "sign/2"}, {0, "sign/0"}, {-3, "sign/0"}} {
+		res, err := rt.Call(mustHook(t, mod, "show"), rt.Function("sign", c.length, noop))
+		require.NoError(t, err)
+		assert.Equal(t, c.want, res.String(), "length %d", c.length)
+	}
 }
 
 // TestCompileIgnoresSourceMappingURL checks that a sourceMappingURL comment
@@ -1039,5 +1120,114 @@ func BenchmarkCall(b *testing.B) {
 		if buf, err = rt.AppendJSON(buf[:0], res); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// TestAppendJSONDstDuringCode checks that a host function JavaScript calls
+// during AppendJSON (from a toJSON here) may append to the slice passed as
+// dst, or run another AppendJSON with it: the output moves out of dst's
+// spare capacity before any code runs, and is appended to dst at the end.
+func TestAppendJSONDstDuringCode(t *testing.T) {
+	mod, err := moejs.Compile("a.js", `
+export function logs() { return {x: 1, y: {toJSON() { host.log("hello"); return "Y"; }}, z: [1, 2, 3]}; }
+export function nests() { return {x: 1, y: {toJSON() { host.nested({q: "nested"}); return "Y"; }}, z: [1, 2, 3]}; }`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	var dst []byte
+	var logged string
+	require.NoError(t, rt.SetGlobal("host", map[string]any{
+		"log": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			logged = string(append(append(dst, "LOG:"...), args[0].String()...))
+			return moejs.Undefined(), nil
+		}),
+		"nested": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			out, err := rt.AppendJSON(dst, args[0])
+			logged = string(out)
+			return moejs.Undefined(), err
+		}),
+	}))
+	require.NoError(t, rt.Load(mod))
+	for hook, want := range map[string]string{"logs": "LOG:hello", "nests": `{"q":"nested"}`} {
+		res, err := rt.Call(mustHook(t, mod, hook))
+		require.NoError(t, err)
+		for _, pre := range []string{"", "pre:"} {
+			dst = append(make([]byte, 0, 4096), pre...)
+			out, err := rt.AppendJSON(dst, res)
+			require.NoError(t, err)
+			require.Equal(t, pre+`{"x":1,"y":"Y","z":[1,2,3]}`, string(out), hook)
+			require.Equal(t, pre+want, logged, hook)
+		}
+	}
+}
+
+// TestAppendJSONPanicReturnsDst checks a host function that panics during
+// AppendJSON, called by a toJSON inside the engine's call or by a job at
+// the release: the error is the InternalError and the slice returned is
+// dst, not nil or the output the job could have overwritten; the runtime
+// then serializes the next value.
+func TestAppendJSONPanicReturnsDst(t *testing.T) {
+	mod, err := moejs.Compile("p.js", `
+export function inCall() { return {s: {toJSON() { return host.boom(); }}, n: 2}; }
+export function inJob() { return {s: {toJSON() { queueMicrotask(() => host.boom()); return "S"; }}, n: 2}; }
+export function plain() { return {n: 2}; }`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	require.NoError(t, rt.SetGlobal("host", map[string]any{
+		"boom": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) { panic("host panic") }),
+	}))
+	require.NoError(t, rt.Load(mod))
+	for _, hook := range []string{"inCall", "inJob"} {
+		res, err := rt.Call(mustHook(t, mod, hook))
+		require.NoError(t, err)
+		dst := append(make([]byte, 0, 4096), "data: "...)
+		out, err := rt.AppendJSON(dst, res)
+		var ie *moejs.InternalError
+		require.ErrorAs(t, err, &ie, hook)
+		require.Equal(t, "data: ", string(out), hook)
+		res, err = rt.Call(mustHook(t, mod, "plain"))
+		require.NoError(t, err, hook)
+		out, err = rt.AppendJSON(dst, res)
+		require.NoError(t, err, hook)
+		require.Equal(t, `data: {"n":2}`, string(out), hook)
+	}
+}
+
+// TestAppendJSONJobsUseDst checks the jobs JavaScript queues during
+// AppendJSON: they run before AppendJSON returns, after the output was
+// written, and one that appends to dst (a host's event stream buffer, its
+// prefix kept) leaves the output intact. A toJSON and a getter queue it.
+func TestAppendJSONJobsUseDst(t *testing.T) {
+	mod, err := moejs.Compile("j.js", `
+export function viaToJSON() {
+  return {s: {toJSON() { Promise.resolve().then(() => host.late()); return "S"; }}, n: 2, tail: "end"};
+}
+export function viaGetter() {
+  return {get s() { Promise.resolve().then(() => host.late()); return "S"; }, n: 2, tail: "end"};
+}`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	var dst []byte
+	var wrote string
+	require.NoError(t, rt.SetGlobal("host", map[string]any{
+		"late": moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
+			ev, err := rt.FromGo(map[string]any{"event": "late"})
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			out, err := rt.AppendJSON(dst, ev)
+			wrote = string(out)
+			return moejs.Undefined(), err
+		}),
+	}))
+	require.NoError(t, rt.Load(mod))
+	for _, hook := range []string{"viaToJSON", "viaGetter"} {
+		res, err := rt.Call(mustHook(t, mod, hook))
+		require.NoError(t, err)
+		wrote = ""
+		dst = append(make([]byte, 0, 4096), "data: "...)
+		out, err := rt.AppendJSON(dst, res)
+		require.NoError(t, err)
+		require.Equal(t, `data: {"s":"S","n":2,"tail":"end"}`, string(out), hook)
+		require.Equal(t, `data: {"event":"late"}`, wrote, hook)
 	}
 }

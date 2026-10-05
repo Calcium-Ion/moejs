@@ -24,14 +24,16 @@ type dictEntry struct {
 }
 
 // dictProps backs objects in dictionary mode (named properties) and/or with
-// sparse indexed properties, and holds the weak-collection entries of an
-// object used as a WeakMap/WeakSet key.
+// sparse indexed properties, holds the weak-collection entries of an object
+// used as a WeakMap/WeakSet key, and the root shape of the objects whose
+// prototype the object is.
 type dictProps struct {
 	index   map[PropertyKey]int32 // named key -> position in entries
 	entries []dictEntry           // insertion order with tombstones
 	dead    int
 	sparse  map[uint32]propCell // indexed properties outside dense storage
 	weak    *weakSide           // entries of the weak collections keyed by the object (builtin_weak.go)
+	root    *Shape              // root shape of the realm-local objects inheriting from it (Realm.localRoot)
 }
 
 func (d *dictProps) lookup(key PropertyKey) (*propCell, bool) {
@@ -62,6 +64,18 @@ func (d *dictProps) remove(key PropertyKey) bool {
 		d.compact()
 	}
 	return true
+}
+
+// dropShadowed removes the entries added under a key that a later entry
+// was added under too (add keeps the index of the last).
+func (d *dictProps) dropShadowed() {
+	for i := range d.entries {
+		if e := &d.entries[i]; e.live && d.index[e.key] != int32(i) {
+			*e = dictEntry{}
+			d.dead++
+		}
+	}
+	d.compact()
 }
 
 func (d *dictProps) compact() {

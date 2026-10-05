@@ -518,7 +518,8 @@ func TestSharedRealmRetainedHeap(t *testing.T) {
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&after)
-	perRealm := float64(after.HeapInuse-before.HeapInuse) / n
+	// Signed: other tests' garbage collected in between can make it negative.
+	perRealm := (float64(after.HeapInuse) - float64(before.HeapInuse)) / n
 	t.Logf("retained per shared realm: %.0f bytes (HeapInuse delta / %d)", perRealm, n)
 	assert.Less(t, perRealm, 32*1024.0)
 	runtime.KeepAlive(realms)

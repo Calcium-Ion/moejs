@@ -118,8 +118,7 @@ func TestLoadTopLevelAwaitJobs(t *testing.T) {
 // TestLoadTopLevelAwaitPanic checks a Go panic in a job that Load's drain
 // runs after the top level awaited: Load returns it as an *InternalError,
 // not the top level's rejection, which the tracker is still told once; the
-// call bookkeeping is restored and the jobs the panic left run with the next
-// call.
+// call bookkeeping is restored and the jobs the panic left are dropped.
 func TestLoadTopLevelAwaitPanic(t *testing.T) {
 	mod, err := moejs.Compile("tla.js", `export let n = 0;
 export function get() { return n; }
@@ -152,5 +151,5 @@ throw new Error("tla");`)
 	require.NoError(t, err)
 	assert.Equal(t, "1", res.String())
 	v, _ = rt.Export("n")
-	assert.Equal(t, "2", v.String(), "the job after the panic runs after the next call")
+	assert.Equal(t, "1", v.String(), "the job after the panic does not run in the next call")
 }

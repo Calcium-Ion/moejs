@@ -54,7 +54,7 @@ type callableProxyObject struct {
 // proxyShape is the shape of every proxy: empty, process-wide and never
 // cached by an inline cache (noFill). Nothing adds a property to a proxy:
 // [[DefineOwnProperty]] goes to the defineProperty trap.
-var proxyShape = &Shape{key: rootKey, shared: true, noFill: true}
+var proxyShape = &Shape{key: rootKey, shared: true, noFill: noFillAll}
 
 // newProxy implements ProxyCreate for object operands.
 func (r *Realm) newProxy(target, handler *Object) *Object {
@@ -667,7 +667,9 @@ func (r *Realm) proxyOwnKeys(o *Object) ([]PropertyKey, error) {
 
 // proxyKeyList is CreateListFromArrayLike(v, « String, Symbol ») for the
 // ownKeys trap result, as property keys. The list grows as it is read, so
-// a huge length on an object with few elements fails without allocating it.
+// a huge length on an object with few elements fails at its first missing
+// element (a TypeError, as in the spec) without allocating it; a list that
+// reaches 2^24 keys is a RangeError.
 func (r *Realm) proxyKeyList(v Value) ([]PropertyKey, error) {
 	if !v.IsObject() {
 		return nil, r.TypeError("CreateListFromArrayLike called on non-object")
@@ -677,11 +679,11 @@ func (r *Realm) proxyKeyList(v Value) ([]PropertyKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if n > 1<<24 {
-		return nil, r.RangeError("Too many properties in the ownKeys trap result (only %d allowed)", 1<<24)
-	}
 	keys := make([]PropertyKey, 0, min(n, 16))
 	for i := range n {
+		if i == 1<<24 {
+			return nil, r.RangeError("Too many properties in the ownKeys trap result (only %d allowed)", 1<<24)
+		}
 		ev, err := o.GetIndex(r, uint32(i))
 		if err != nil {
 			return nil, err

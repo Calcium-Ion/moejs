@@ -46,6 +46,10 @@ type String struct {
 	// an array index ("-0", "1.5", "NaN"): the keys a typed array answers
 	// itself (typedArrayKey). It is set before the atom is published.
 	numeric bool
+	// jsonPlain marks an ASCII string known to have no byte JSON quoting
+	// escapes, found by the scan that made it (a JSON.parse literal, a long
+	// FromGo string): quote copies it without scanning it again.
+	jsonPlain bool
 }
 
 // emptyString is the shared "" value.

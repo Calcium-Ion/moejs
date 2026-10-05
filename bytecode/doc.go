@@ -99,6 +99,10 @@
 //	GetLen     A B +X      R[A] = R[B].length (array and string fast paths; X = ic in the high half)
 //	SetProp    A B +X      R[A].name = R[B] (strict PutValue)
 //	GetElem    A B C       R[A] = R[B][R[C]] (dense array and string index fast paths)
+//	GetElemRef A B C +X    R[C] = the key R[X], converted by ToPropertyKey when it is an object and
+//	                       the base R[B] is neither undefined nor null; then GetElem A B C: the read of a
+//	                       compound assignment or update, whose key GetValue converts once, after ToObject
+//	                       of the base, and PutValue reuses (X is a register, C or another)
 //	SetElem    A B C       R[A][R[B]] = R[C]
 //	DelProp    A B +X      R[A] = delete R[B].name (strict: TypeError when not configurable)
 //	DelElem    A B C       R[A] = delete R[B][R[C]]
@@ -235,12 +239,18 @@
 //	ThrowError    A Bx     throw a new TypeError (A=ThrowTypeError) or ReferenceError (A=ThrowReferenceError) with message K[Bx]
 //
 // Sloppy mode, script globals and with (off the interpreter's jump table,
-// after the async ops: only sloppy code, script top levels and with
-// statements use them)
+// after the async ops: only sloppy code, script top levels, with statements
+// and strict assignments of an undeclared name from a value that may run
+// code use them)
 //
 //	SetGlobalSloppy A +X   PutValue of an identifier resolved against the global environment in sloppy code:
 //	                       an unresolvable name becomes a global object property; a rejected write is
 //	                       ignored (X = name:16 | ic:16, the SetGlobal cache)
+//	ResolveGlobal A +X     R[A] = HasBinding(K[X.lo]) of the global environment: ResolveBinding of an
+//	                       undeclared name in strict code, before the value assigned to it (X = name:16 | ic:16)
+//	SetGlobalRef  A B +X   PutValue of R[A] to the reference ResolveGlobal resolved: ReferenceError unless
+//	                       R[B] (its result) is true, else SetMutableBinding(K[X.lo], R[A], strict), whose
+//	                       HasProperty throws a ReferenceError for a binding gone since (X = ResolveGlobal's)
 //	InitGlobal    A +X     initialize the script's global lexical binding K[X.lo] to R[A] (X.hi = 1: const)
 //	SetGlobalVar  A +X     evaluation of a sloppy block function declaration at script level (Annex B.3.2.2):
 //	                       globalThis[K[X]] = R[A] as SetGlobalSloppy, skipped when a global lexical binding K[X] exists

@@ -58,6 +58,7 @@ var implemented = setOf(
 	"__proto__",
 
 	// Regular expressions.
+	"legacy-regexp",
 	"regexp-dotall",
 	"regexp-duplicate-named-groups",
 	"regexp-lookbehind",

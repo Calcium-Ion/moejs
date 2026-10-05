@@ -101,6 +101,14 @@ func (r *Realm) classOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 			return pc, err
 		}
 		st.stack[base+a] = key.Value()
+	case bytecode.GetElemRef:
+		k, v, err := r.getElemRef(regs[b], regs[uint8(code.Code[pc])])
+		if err != nil {
+			return pc + 1, err
+		}
+		st.stack[base+c] = k
+		st.stack[base+a] = v
+		return pc + 1, nil
 	case bytecode.GetProtoOf:
 		p := Null()
 		if v := regs[b]; v.IsObject() && v.AsObject().proto != nil {

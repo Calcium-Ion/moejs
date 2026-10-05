@@ -76,6 +76,9 @@ type compiledRegExp struct {
 	// simple is the single-class matcher when the pattern is one character
 	// class with a greedy quantifier (regexp_simple.go), else nil.
 	simple *simpleClass
+	// run matches an anchored run pattern on ASCII subjects
+	// (string_regexp.go), else nil.
+	run *runPattern
 	// Lazily compiled variants. A compiledRegExp is shared by every realm of
 	// the process (regexpPrograms), so the variants are published atomically;
 	// two realms racing on the first use compile equal programs and either
@@ -205,13 +208,16 @@ var (
 
 // regexpState is the per-realm RegExp machinery (Realm.regexps).
 type regexpState struct {
-	cache            map[regexpCacheKey]*compiledRegExp
-	shape            *Shape // RegExp instance shape: lastIndex
-	execShape        *Shape // exec result: index, input, groups
-	execShapeIndices *Shape // exec result with the d flag: + indices
-	indicesShape     *Shape // indices array: groups
-	subjects         [2]reSubject
-	subjNext         int
+	cache     map[regexpCacheKey]*compiledRegExp
+	shape     *Shape // RegExp instance shape: lastIndex
+	execShape *Shape // exec result: index, input, groups
+	subjects  [2]reSubject
+	subjNext  int32
+	// The last successful match, for the legacy statics (noteMatch,
+	// regexp_legacy.go): subject, program and where to match again.
+	lastAt int32
+	lastS  *String
+	lastC  *compiledRegExp
 }
 
 func (r *Realm) regexpState() *regexpState {
@@ -275,7 +281,7 @@ func compilePattern(key regexpCacheKey, units []uint16, flags regexpFlags) (*com
 		// (Substring). A wide key is a copy already (regexpKey).
 		key.pattern = strings.Clone(key.pattern)
 	}
-	c := &compiledRegExp{flags: flags, key: key, simple: compileSimpleClass(units, flags)}
+	c := &compiledRegExp{flags: flags, key: key, simple: compileSimpleClass(units, flags), run: compileRunPattern(ast, flags)}
 	if reExact(ast.Root) {
 		if tr, re := compileRE2(ast, flags, len(units)); re != nil {
 			c.tr, c.re = tr, re
@@ -447,7 +453,7 @@ func (r *Realm) initRegExpSubject(sub *reSubject, s *String, c *compiledRegExp) 
 	b2u[len(text)] = int32(len(u))
 	*sub = reSubject{s: s, text: text, unicode: unicode, crLS: crLS, foldWord: foldWord, private: private, b2u: b2u, u2b: u2b}
 	st.subjects[st.subjNext] = *sub
-	st.subjNext = (st.subjNext + 1) % len(st.subjects)
+	st.subjNext = (st.subjNext + 1) % int32(len(st.subjects))
 }
 
 // --- matching ------------------------------------------------------------------
@@ -460,6 +466,11 @@ func (r *Realm) initRegExpSubject(sub *reSubject, s *String, c *compiledRegExp) 
 // context character on text[prev:], so `^`, `\b` and `\B` see the real
 // neighbours (Go's regexp has no start-offset API).
 func (c *compiledRegExp) matchAt(r *Realm, sub *reSubject, bytePos int, sticky bool) ([]int, error) {
+	if c.run != nil {
+		if m, handled, err := c.run.match(r, sub, bytePos, sticky); handled {
+			return m, err
+		}
+	}
 	if c.useBT(sub) {
 		return c.matchBT(r, sub, bytePos, sticky)
 	}
@@ -701,6 +712,7 @@ func (r *Realm) regexpBuiltinExec(rx *Object, d *RegExpData, s *String, sub *reS
 			return nil, err
 		}
 	}
+	r.noteMatch(d, s, d.c, int32(lastIndex))
 	return m, nil
 }
 
@@ -760,13 +772,13 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 	if d.c.tr.hasNames {
 		groups = ObjectValue(r.regexpGroups(d.c, items))
 	}
+	if st.execShape == nil {
+		st.execShape = r.arrayShape().
+			addProperty(r, StringKey(AtomIndex), attrDefault).
+			addProperty(r, StringKey(AtomInput), attrDefault).
+			addProperty(r, StringKey(AtomGroups), attrDefault)
+	}
 	if !d.c.flags.hasIndices {
-		if st.execShape == nil {
-			st.execShape = r.arrayShape().
-				addProperty(r, StringKey(AtomIndex), attrDefault).
-				addProperty(r, StringKey(AtomInput), attrDefault).
-				addProperty(r, StringKey(AtomGroups), attrDefault)
-		}
 		eo := &execResultObject{}
 		arr := &eo.obj
 		arr.shape = st.execShape
@@ -790,23 +802,13 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 		pairs[i] = ObjectValue(r.NewArray(IntValue(m[2*i]), IntValue(m[2*i+1])))
 	}
 	indices := r.NewArrayFromSlice(pairs)
-	if st.indicesShape == nil {
-		st.indicesShape = r.arrayShape().addProperty(r, StringKey(AtomGroups), attrDefault)
-	}
-	indices.shape = st.indicesShape
+	indices.shape = r.arrayShape().addProperty(r, StringKey(AtomGroups), attrDefault)
 	indexGroups := Undefined()
 	if d.c.tr.hasNames {
 		indexGroups = ObjectValue(r.regexpGroups(d.c, pairs))
 	}
 	indices.slots = []Value{indexGroups}
-	if st.execShapeIndices == nil {
-		st.execShapeIndices = r.arrayShape().
-			addProperty(r, StringKey(AtomIndex), attrDefault).
-			addProperty(r, StringKey(AtomInput), attrDefault).
-			addProperty(r, StringKey(AtomGroups), attrDefault).
-			addProperty(r, StringKey(AtomIndices), attrDefault)
-	}
-	arr.shape = st.execShapeIndices
+	arr.shape = st.execShape.addProperty(r, StringKey(AtomIndices), attrDefault)
 	arr.slots = []Value{IntValue(m[0]), StringValue(s), groups, ObjectValue(indices)}
 	return arr
 }
@@ -1015,7 +1017,11 @@ func installRegExp(r *Realm) {
 	fd := r.RegExpCtor.FunctionData()
 	fd.SetNative(regexpCall)
 	fd.SetConstructor(regexpConstruct)
-	r.RegExpCtor.ReserveSlots(r, 1) // @@species (installSpecies)
+	if r.buildingShared {
+		r.RegExpCtor.ReserveSlots(r, 1+len(regexpStaticDefs)) // @@species (installSpecies), the statics
+	} else {
+		r.RegExpCtor.ReserveSlots(r, 1) // @@species (installSpecies)
+	}
 	n := len(regexpProtoMethods) + len(regexpProtoGetters) + len(regexpSymbolMethods)
 	if r.buildingShared {
 		n++ // compile
@@ -1087,17 +1093,30 @@ func regexpProtoTest(r *Realm, this Value, args []Value) (Value, error) {
 		// lastIndex is neither written nor used, and coercing a number is
 		// unobservable (any other value, whose valueOf may throw or even
 		// recompile rx, takes RegExpBuiltinExec); a plain match suffices.
+		var ok bool
 		if d.c.simple != nil {
-			_, _, ok := d.c.simple.find(s, 0)
-			return Bool(ok), nil
+			_, _, ok = d.c.simple.find(s, 0)
+		} else {
+			var sub reSubject
+			r.initRegExpSubject(&sub, s, d.c)
+			if d.c.run != nil && sub.ascii {
+				if ok, err = d.c.run.test(r, sub.text); err != nil {
+					return Undefined(), err
+				}
+			} else if !d.c.useBT(&sub) {
+				ok = d.c.re.Match(sub.text)
+			} else {
+				m, err := d.c.matchBT(r, &sub, 0, false)
+				if err != nil {
+					return Undefined(), err
+				}
+				ok = m != nil
+			}
 		}
-		var sub reSubject
-		r.initRegExpSubject(&sub, s, d.c)
-		if !d.c.useBT(&sub) {
-			return Bool(d.c.re.Match(sub.text)), nil
+		if ok {
+			r.noteMatch(d, s, d.c, 0)
 		}
-		m, err := d.c.matchBT(r, &sub, 0, false)
-		return Bool(m != nil), err
+		return Bool(ok), nil
 	}
 	var sub reSubject
 	r.initRegExpSubject(&sub, s, d.c)
@@ -1284,13 +1303,14 @@ func regexpMatch(r *Realm, rx *Object, d *RegExpData, s *String) (Value, error) 
 			return Undefined(), err
 		}
 		var items []Value
+		last := 0
 		for pos := 0; ; {
 			start, end, ok := d.c.simple.find(s, pos)
 			if !ok {
 				break
 			}
 			items = append(items, StringValue(s.Substring(start, end)))
-			pos = end
+			last, pos = start, end
 			if len(items)&1023 == 0 {
 				if err := r.CheckInterrupt(); err != nil {
 					return Undefined(), err
@@ -1300,6 +1320,7 @@ func regexpMatch(r *Realm, rx *Object, d *RegExpData, s *String) (Value, error) 
 		if items == nil {
 			return Null(), nil
 		}
+		r.noteMatch(d, s, d.c, matchedAt(last))
 		return ObjectValue(r.NewArrayFromSlice(items)), nil
 	}
 	var sub reSubject
@@ -1324,6 +1345,7 @@ func regexpMatch(r *Realm, rx *Object, d *RegExpData, s *String) (Value, error) 
 	if len(matches) == 0 {
 		return Null(), nil
 	}
+	r.noteMatch(d, s, d.c, matchedAt(sub.toUnit(matches[len(matches)-1][0])))
 	items := make([]Value, len(matches))
 	for i, m := range matches {
 		items[i] = StringValue(s.Substring(sub.toUnit(m[0]), sub.toUnit(m[1])))
@@ -1341,6 +1363,10 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 	}
 	var sub reSubject
 	r.initRegExpSubject(&sub, s, d.c)
+	// The spec's splitter is a RegExp of this realm's %RegExp% (the
+	// species guard holds), so each of its matches updates the statics,
+	// whatever rx's realm or class.
+	st := r.regexps
 	size := s.Len()
 	if size == 0 {
 		m, err := d.c.matchAt(r, &sub, 0, true)
@@ -1348,6 +1374,7 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 			return Undefined(), err
 		}
 		if m != nil {
+			st.lastS, st.lastC, st.lastAt = s, d.c, matchedAt(0)
 			return ObjectValue(r.NewArrayLen(0)), nil
 		}
 		return ObjectValue(r.NewArray(StringValue(s))), nil
@@ -1366,10 +1393,12 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 			break
 		}
 		if m[1] == pb {
+			st.lastS, st.lastC, st.lastAt = s, d.c, matchedAt(sub.toUnit(m[0]))
 			q = sub.advance(m[0])
 			continue
 		}
 		sub.toUnits(m)
+		st.lastS, st.lastC, st.lastAt = s, d.c, matchedAt(m[0])
 		items = append(items, StringValue(s.Substring(p, m[0])))
 		if uint32(len(items)) == lim {
 			return ObjectValue(r.NewArrayFromSlice(items)), nil
@@ -1424,12 +1453,18 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 				return Undefined(), err
 			}
 			if res, ok := regexpReplaceFast(d.c, &sub, tmpl); ok {
+				if res != s {
+					r.noteMatch(d, s, d.c, matchedLast)
+				}
 				return StringValue(res), nil
 			}
 		}
 		var err error
 		if matches, err = d.c.findAll(r, &sub); err != nil {
 			return Undefined(), err
+		}
+		if len(matches) != 0 {
+			r.noteMatch(d, s, d.c, matchedAt(sub.toUnit(matches[len(matches)-1][0])))
 		}
 	} else {
 		m, err := r.regexpBuiltinExec(rx, d, s, &sub)
@@ -1539,6 +1574,11 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 	start, end, ok := simple.find(s, 0)
 	if !ok {
 		return StringValue(s), nil
+	}
+	if global {
+		r.noteMatch(d, s, d.c, matchedLast)
+	} else {
+		r.noteMatch(d, s, d.c, 0)
 	}
 	var sb StringBuilder
 	sb.growFor(s, s.Len()+16)

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"weak"
 )
 
 // Property attribute bits stored in Shape nodes and dictionary entries.
@@ -44,6 +45,14 @@ const (
 	// shapeSmallTransitions is the transition count kept in a slice before a
 	// Shape switches to a map.
 	shapeSmallTransitions = 4
+	// shapeStrongTransitions is the transition count a shape of a realm's own
+	// tree holds strongly; past it a child is held weakly (strongChild), so the
+	// shapes of objects keyed by data (ids, user values, host map keys) die
+	// with the objects instead of growing a pooled realm's tree request after
+	// request. shapeWeakSweep is the slack of the weak children before their
+	// dead entries are swept.
+	shapeStrongTransitions = 8
+	shapeWeakSweep         = 64
 	// maxSharedTransitions bounds the process-wide transition cache of one
 	// shared shape and maxSharedShapes the shapes published in all of them;
 	// past either bound a transition from a shared shape continues in the
@@ -90,11 +99,11 @@ func addCodeKeys(keys []PropertyKey) {
 func isStaticAtom(s *String) bool { return s.atom != 0 && s.atom <= staticAtomCount }
 
 // codeKey reports whether key is bounded by code (sharedTransMu held): the
-// well-known symbols are process-wide and fixed; other symbols are
-// realm-local and never published.
+// well-known symbols are process-wide and fixed; other symbols and private
+// names are realm-local and never published.
 func codeKey(key PropertyKey) bool {
-	if key.IsSymbol() {
-		return key.Symbol().wellKnown
+	if !key.IsString() {
+		return key.IsSymbol() && key.Symbol().wellKnown
 	}
 	if isStaticAtom(key.String()) {
 		return true
@@ -102,6 +111,12 @@ func codeKey(key PropertyKey) bool {
 	_, ok := codeKeys[key.String()]
 	return ok
 }
+
+// The bits of Shape.noFill, which fillGetIC tests in refuseFill.
+const (
+	noFillAll     uint8 = 1 << iota // no entry is filled on the shape
+	noFillStatics                   // none for a static while %RegExp% has the shape with them pending
+)
 
 // Shape is an immutable node of a realm's transition tree. A shape encodes
 // the object's [[Prototype]] (through its root) and the ordered list of named
@@ -119,10 +134,11 @@ type Shape struct {
 	// shape's props in place (publish); guarded by sharedTransMu.
 	propsLent bool
 	count     uint32 // named properties in the chain
-	// noFill marks the shape of an object with deferred properties
-	// (deferInstall): an inline cache filled on another object of this
-	// shape would hit it with the properties still pending.
-	noFill bool
+	// noFill marks the shape of an object with properties pending, which
+	// an inline cache filled on another object of this shape would hit:
+	// noFillAll for a deferred install (deferInstall), noFillStatics for
+	// %RegExp% with its statics pending (installRegExpStatics).
+	noFill uint8
 
 	transSmall []transition
 	transMap   map[transitionKey]*Shape
@@ -131,6 +147,8 @@ type Shape struct {
 	// objects and globals from the same shared roots, so the children (with
 	// their lookup tables) are built once and are themselves shared. The
 	// snapshot is immutable and replaced copy-on-write under sharedTransMu.
+	// A shape of a realm's own tree keeps there the children it holds weakly
+	// (sharedTransitions.weak), written by the realm's goroutine only.
 	sharedTrans atomic.Pointer[sharedTransitions]
 
 	table map[PropertyKey]uint32 // key -> slot; built lazily when count > shapeTableThreshold
@@ -152,11 +170,17 @@ type transition struct {
 // a slice scanned like transSmall while small, a map beyond; data counts the
 // children whose key is not code-bound. table is the lookup table of a shape
 // published without one, built on its first lookup (Shape.lookupTable).
+//
+// For a shape of a realm's own tree it holds instead the children past
+// shapeStrongTransitions (weak), swept of the collected ones once they reach
+// sweep entries.
 type sharedTransitions struct {
 	small []transition
 	m     map[transitionKey]*Shape
 	data  int
 	table map[PropertyKey]uint32
+	weak  map[transitionKey]weak.Pointer[Shape]
+	sweep int
 }
 
 func (t *sharedTransitions) lookup(key PropertyKey, attrs uint8) *Shape {
@@ -284,7 +308,9 @@ func (s *Shape) lookupTable() map[PropertyKey]uint32 {
 	return table
 }
 
-// transition returns the cached child shape for key/attrs, or nil.
+// transition returns the child shape for key/attrs cached strongly, or nil.
+// Past the strong children (strongChild) it may be in the weak tier instead
+// (weakTransition).
 func (s *Shape) transition(key PropertyKey, attrs uint8) *Shape {
 	if s.transMap != nil {
 		return s.transMap[transitionKey{key, attrs}]
@@ -311,6 +337,9 @@ func (s *Shape) addProperty(r *Realm, key PropertyKey, attrs uint8) *Shape {
 	if child := s.transition(key, attrs); child != nil {
 		return child
 	}
+	if !r.strongChild(s) {
+		return s.addWeakProperty(key, attrs)
+	}
 	child := r.allocShape()
 	*child = Shape{
 		parent: s,
@@ -324,6 +353,25 @@ func (s *Shape) addProperty(r *Realm, key PropertyKey, attrs uint8) *Shape {
 		s.transSmall = r.allocTransition()
 	}
 	s.addTransition(key, attrs, child)
+	return child
+}
+
+// addWeakProperty is addProperty past the strong children of s: the child
+// comes from, or goes to, the weak tier. s has a transMap, and the realm is
+// past its bootstrap (strongChild).
+func (s *Shape) addWeakProperty(key PropertyKey, attrs uint8) *Shape {
+	if child := s.weakTransition(key, attrs); child != nil {
+		return child
+	}
+	child := &Shape{
+		parent: s,
+		proto:  s.proto,
+		key:    key,
+		slot:   s.count,
+		attrs:  attrs,
+		count:  s.count + 1,
+	}
+	s.addWeakChild(key, attrs, child)
 	return child
 }
 
@@ -352,9 +400,9 @@ func (r *Realm) allocTransition() []transition {
 
 // publish returns the shared child of the shared shape s for key/attrs from
 // the process-wide cache, building it (props materialized, marked immutable)
-// and publishing it under the lock on first use. It returns nil past
-// maxSharedTransitions, maxSharedShapes or, for a key not bounded by code,
-// maxSharedDataTransitions.
+// and publishing it under the lock on first use. It returns nil for a
+// realm-local key (codeKey), and past maxSharedTransitions, maxSharedShapes
+// or, for a string not bounded by code, maxSharedDataTransitions.
 func (s *Shape) publish(key PropertyKey, attrs uint8) *Shape {
 	if t := s.sharedTrans.Load(); t != nil {
 		if child := t.lookup(key, attrs); child != nil {
@@ -374,7 +422,7 @@ func (s *Shape) publish(key PropertyKey, attrs uint8) *Shape {
 	n := len(next.small) + len(next.m)
 	code := codeKey(key)
 	if n >= maxSharedTransitions || sharedShapeCount >= maxSharedShapes ||
-		!code && (key.IsSymbol() || next.data >= maxSharedDataTransitions) {
+		!code && (!key.IsString() || next.data >= maxSharedDataTransitions) {
 		return nil
 	}
 	if !code {
@@ -439,7 +487,12 @@ func (s *Shape) addChain(r *Realm, keys []PropertyKey, attrs uint8) *Shape {
 	for len(keys) > 0 && !s.shared {
 		child := s.transition(keys[0], attrs)
 		if child == nil {
-			break
+			if r.strongChild(s) {
+				break
+			}
+			if child = s.weakTransition(keys[0], attrs); child == nil {
+				break
+			}
 		}
 		s, keys = child, keys[1:]
 	}
@@ -462,7 +515,11 @@ func (s *Shape) addChain(r *Realm, keys []PropertyKey, attrs uint8) *Shape {
 		n := &nodes[i]
 		*n = Shape{parent: parent, proto: parent.proto, key: k, slot: parent.count, attrs: attrs, count: parent.count + 1}
 		if i == 0 {
-			parent.addTransition(k, attrs, n)
+			if r.strongChild(parent) {
+				parent.addTransition(k, attrs, n)
+			} else {
+				parent.addWeakChild(k, attrs, n)
+			}
 		} else {
 			trans[i-1] = transition{k, attrs, n}
 			parent.transSmall = trans[i-1 : i : i]
@@ -470,6 +527,94 @@ func (s *Shape) addChain(r *Realm, keys []PropertyKey, attrs uint8) *Shape {
 		parent = n
 	}
 	return parent
+}
+
+// strongChild reports whether the next child of s, a shape of r's own tree,
+// is cached strongly (addTransition) or weakly (addWeakChild): strongly for
+// the first shapeStrongTransitions children, weakly past them. A collected
+// child is unreachable from everything that could observe it (objects,
+// inline caches, host shape caches and predictions all hold their shapes),
+// so a transition that finds it gone builds an equivalent one and no holder
+// ever sees two shapes for one transition. The intrinsics' shapes stay
+// strong: a mutable realm's bootstrap and the shared builders keep every
+// child. The callers test it inline, so that a bootstrap transition costs
+// what it did before the weak tier.
+//
+// A shape for which it holds has no weak children (the bootstrap comes
+// first, transMap never shrinks and the shared builders' realms never leave
+// it), with one exception. The deferred Date.prototype install of a mutable
+// realm (installDatePrototypeDeferred) sets r.boot after the program has
+// run, so its children stay strong too: on a shape of Date.prototype's chain
+// that already has eight children, it adds a ninth strong one without
+// looking in the weak tier, which may hold an equivalent child. Those
+// children are Date.prototype's own shapes, which it keeps anyway, so the
+// cost is at most a transMap entry and a duplicate shape for each of the
+// install's 47 transitions, once per realm, and only on shapes a program
+// reaches by defining the same keys in the same order with the builtins'
+// attributes (a class whose methods are named like Date's). Both shapes are
+// valid, each holder keeps its own, and an inline cache that sees both is
+// polymorphic. Telling the install apart here would cost a load on every
+// bootstrap transition (a flag in its slabs), a second slab test in every
+// allocator (its slabs in another field) or a larger size class (a flag in
+// the Realm, which has no free byte).
+func (r *Realm) strongChild(s *Shape) bool {
+	return r.boot != nil || len(s.transMap) < shapeStrongTransitions || r.buildingShared
+}
+
+// addWeakChild caches the transition from s to child in the weak tier of
+// s's transitions.
+func (s *Shape) addWeakChild(key PropertyKey, attrs uint8, child *Shape) {
+	t := s.sharedTrans.Load()
+	if t == nil {
+		t = &sharedTransitions{sweep: shapeWeakSweep}
+		s.sharedTrans.Store(t)
+	}
+	if len(t.weak) >= t.sweep {
+		t.sweepWeak()
+	} else if t.weak == nil {
+		t.weak = make(map[transitionKey]weak.Pointer[Shape])
+	}
+	t.weak[transitionKey{key, attrs}] = weak.Make(child)
+}
+
+// sweepWeak drops the collected children from the weak tier of a local
+// shape's transitions. It is kept out of addWeakChild, which also keeps the
+// functions linked after this file, (*String).flatten and the moejs
+// package's (*Runtime).Call among them, in dev's 64-byte phase
+// (realm_calldata.go).
+func (t *sharedTransitions) sweepWeak() {
+	live := 0
+	for _, p := range t.weak {
+		if p.Value() != nil {
+			live++
+		}
+	}
+	// A new map: a map does not shrink, and the one that held a burst of
+	// children would keep its size for the realm's lifetime.
+	m := make(map[transitionKey]weak.Pointer[Shape], live+1)
+	for k, p := range t.weak {
+		if p.Value() != nil {
+			m[k] = p
+		}
+	}
+	t.weak, t.sweep = m, 2*live+shapeWeakSweep
+}
+
+// weakTransition returns the weakly held child of s for key/attrs if it is
+// still alive, or nil. A child it finds collected sweeps the weak tier: the
+// sweep that set the tier's threshold may have counted children that a
+// collection cleared since, and their entries would keep their keys until
+// the tier grew to it. That sweep runs at most once per collection that
+// cleared a child of s.
+func (s *Shape) weakTransition(key PropertyKey, attrs uint8) *Shape {
+	if t := s.sharedTrans.Load(); t != nil {
+		p, ok := t.weak[transitionKey{key, attrs}]
+		if child := p.Value(); child != nil || !ok {
+			return child
+		}
+		t.sweepWeak()
+	}
+	return nil
 }
 
 func (s *Shape) addTransition(key PropertyKey, attrs uint8, child *Shape) {
@@ -626,15 +771,41 @@ func (r *Realm) rootShapeFor(proto *Object) *Shape {
 // localRoot returns r's own root shape for proto. For a shared prototype it
 // is the root of the realm-local continuation of the shared tree (localize),
 // never handed out by rootShapeFor.
+//
+// The root of a prototype the program created lives in the prototype itself
+// (dictProps.root), so it, its transition tree and the names in it are
+// collected with the prototype: a pooled runtime that runs `new F()` with a
+// fresh F, a class declaration or Object.create(fresh) on every request
+// keeps none of them. rootShapes holds only the roots that live as long as
+// the realm anyway: those of the null prototype, of shared prototypes, of
+// the intrinsics of a mutable realm (made while r.boot is set) and those the
+// shared template and the late groups collect (buildSharedTemplate,
+// addSharedRoots).
 func (r *Realm) localRoot(proto *Object) *Shape {
+	if proto != nil && proto.dict != nil && proto.dict.root != nil {
+		return proto.dict.root
+	}
+	return r.newLocalRoot(proto)
+}
+
+// newLocalRoot is localRoot for a prototype whose root is not in the
+// prototype itself.
+func (r *Realm) newLocalRoot(proto *Object) *Shape {
 	if s, ok := r.rootShapes[proto]; ok {
 		return s
 	}
-	if r.rootShapes == nil {
-		r.rootShapes = make(map[*Object]*Shape, 8)
-	}
 	s := newRootShape(proto)
-	r.rootShapes[proto] = s
+	if proto == nil || proto.flags&flagShared != 0 || r.buildingShared || r.boot != nil {
+		if r.rootShapes == nil {
+			r.rootShapes = make(map[*Object]*Shape, 8)
+		}
+		r.rootShapes[proto] = s
+		return s
+	}
+	if proto.dict == nil {
+		proto.dict = &dictProps{}
+	}
+	proto.dict.root = s
 	return s
 }
 

@@ -364,14 +364,14 @@ func TestAuditB_RepeatAndPadLimits(t *testing.T) {
 }
 
 func TestAuditB_JSONDepthLimits(t *testing.T) {
-	got := auditBStmt(t, `const s = "[".repeat(600) + "]".repeat(600); JSON.parse(s); return "ok";`)
-	assert.Equal(t, "throws SyntaxError: JSON nesting too deep", got)
-	got = auditBStmt(t, `const s = "[".repeat(512) + "]".repeat(512); return String(Array.isArray(JSON.parse(s)));`)
-	assert.Equal(t, "true", got)
-	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 600; i++) { const n = []; cur.push(n); cur = n; } JSON.stringify(v); return "ok";`)
+	got := auditBStmt(t, `const s = "[".repeat(10001) + "]".repeat(10001); JSON.parse(s); return "ok";`)
 	assert.Equal(t, "throws RangeError: Maximum call stack size exceeded", got)
-	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 500; i++) { const n = []; cur.push(n); cur = n; } return String(JSON.stringify(v).length);`)
-	assert.Equal(t, "1002", got)
+	got = auditBStmt(t, `const s = "[".repeat(10000) + "]".repeat(10000); return String(Array.isArray(JSON.parse(s)));`)
+	assert.Equal(t, "true", got)
+	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 10000; i++) { const n = []; cur.push(n); cur = n; } JSON.stringify(v); return "ok";`)
+	assert.Equal(t, "throws RangeError: Maximum call stack size exceeded", got)
+	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 9999; i++) { const n = []; cur.push(n); cur = n; } return String(JSON.stringify(v).length);`)
+	assert.Equal(t, "20000", got)
 }
 
 // auditBNativeInterrupt builds the input in JS, sets the interrupt, then calls

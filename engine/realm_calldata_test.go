@@ -20,11 +20,13 @@ import (
 
 // callDataSource reads its argument through a closure (whose frame record
 // the call leaves above the live frames) and matches a UTF-16 subject on
-// the RE2 path (whose working copy the realm caches).
+// the RE2 path (whose working copy the realm caches, and whose match the
+// legacy statics, read once, keep).
 const callDataSource = `
 export function hook(x, inside) {
 	const names = () => x.list.map(m => m.name + x.model);
 	const m = /(中+)文/.exec(x.text);
+	if (RegExp.$1 !== m[1]) throw new Error("RegExp.$1");
 	inside();
 	return names().join() + "|" + m[1].length + "|" + x.meta.tag;
 }
@@ -53,9 +55,9 @@ func callDataWant(i int) string {
 var callDataNoop = func(*Realm, Value, []Value) (Value, error) { return Undefined(), nil }
 
 // TestReleaseCallData: a request leaves its host conversion chunks, the
-// registers and frame records of its finished calls and the working copy of
-// its RegExp subject in the realm; ReleaseCallData drops each, and the
-// values the request returned or the module kept stay valid.
+// registers and frame records of its finished calls, the working copy of
+// its RegExp subject and its last match in the realm; ReleaseCallData drops
+// each, and the values the request returned or the module kept stay valid.
 func TestReleaseCallData(t *testing.T) {
 	for _, rc := range hostLazyRealms {
 		t.Run(rc.name, func(t *testing.T) {
@@ -73,6 +75,8 @@ func TestReleaseCallData(t *testing.T) {
 				require.True(t, slices.ContainsFunc(st.stack[st.sp:], func(v Value) bool { return v.ptr != nil }), "request %d: stale registers", i)
 				require.True(t, slices.ContainsFunc(st.frames[st.nframes:], func(fi frameInfo) bool { return fi.fn != nil }), "request %d: stale frames", i)
 				require.NotNil(t, r.regexps.subjects[0].s, "request %d: RegExp subject", i)
+				require.NotNil(t, r.regexps.lastS, "request %d: RegExp statics' subject", i)
+				require.NotNil(t, r.lazy.statics, "request %d: RegExp statics' match", i)
 
 				r.ReleaseCallData()
 				assert.Nil(t, h.maps)
@@ -90,7 +94,10 @@ func TestReleaseCallData(t *testing.T) {
 					assert.Nil(t, r.regexps.subjects[j].s, "RegExp subject %d", j)
 					assert.Nil(t, r.regexps.subjects[j].text, "RegExp working copy %d", j)
 				}
-				assert.Equal(t, 0, r.regexps.subjNext)
+				assert.Equal(t, int32(0), r.regexps.subjNext)
+				assert.Nil(t, r.regexps.lastS, "RegExp statics' subject")
+				assert.Nil(t, r.regexps.lastC, "RegExp statics' program")
+				assert.Nil(t, r.lazy.statics, "RegExp statics' match")
 
 				// The released argument keeps working, materialized parts
 				// and placeholders alike, and so does the next call.
