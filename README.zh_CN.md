@@ -13,9 +13,9 @@
 
 </div>
 
-每个插件编译一次，每个请求用一个单独的运行时。插件函数直接接收 Go 的 map、切片或 JSON，结果可以读成 Go 值、JSON，或者解码进你自己的结构体。
+moejs 支持 ES 模块、类、async/await、Proxy、BigInt 等现代 JavaScript 特性，在 test262 一致性测试集上运行的 79,385 个测试全部通过。
 
-moejs 是为 [new-api](https://github.com/QuantumNous/new-api) 的任务插件写的，测试和基准测试都跑这些插件。
+和同样是纯 Go 实现的 Sobek 跑同一批插件，moejs 的调用耗时约为它的一半，每个运行时的内存约为它的三分之一，服务可以给每个并发请求分一个运行时。
 
 ## 性能
 
@@ -34,17 +34,21 @@ Sobek 和 moejs 一样是纯 Go 引擎，QuickJS 和 V8 通过 cgo 调用。测�
 
 ## 功能
 
-- 可以用 `CGO_ENABLED=0` 编译，交叉编译不需要 C 工具链，pprof 和 race 检测器能看到引擎内部。
-- Go 的 map 和切片在插件读取时才转换，插件只为用到的部分付出开销。
-- 运行时可以放进池里复用。请求结束后调用 `ReleaseCallData`，运行时会释放这个请求的参数。
-- 支持 ES 模块图和动态 `import()`。每个导入都交给你提供的 Go 函数解析，插件只能加载这个函数返回的模块。
-- 也能运行经典脚本（严格或非严格模式）、`eval` 和 `Function` 构造函数。宿主可以限制动态代码的长度，也可以关掉动态代码。
-- 插件可以用 `async`/`await` 和顶层 `await`。宿主函数可以返回 promise，之后在 Go 里兑现或拒绝它。
-- 任意 goroutine 都可以中断正在运行的插件，用来实现超时和取消。
-- JavaScript 异常、语法错误、中断和宿主函数里的 panic 分别以 `*Exception`、`*SyntaxError`、`*InterruptedError` 和
-  `*InternalError` 返回。`StackTrace` 给出被抛出的 `Error` 的 V8 格式调用栈。
-- 内建对象是冻结的，所有运行时共用一份。插件修改 `Array.prototype` 会失败，严格模式下抛 `TypeError`。每个运行时有自己的全局变量和时区。
-  插件需要修改内建对象时，宿主可以给运行时单独建一份可修改的内建对象。
+### 纯 Go
+
+可以用 `CGO_ENABLED=0` 编译，交叉编译不需要 C 工具链。引擎就是普通的 Go 代码，pprof 和 race 检测器能看到它内部。
+
+### 和 Go 之间传值
+
+插件函数直接接收 Go 的 map、切片或 JSON。插件读到 map 的哪一层，moejs 才转换哪一层。返回值可以读成 Go 值或 JSON，也可以直接写进你自己的结构体，结果和 `json.Unmarshal` 相同。宿主函数就是普通的 Go 函数，也可以返回 promise，之后在 Go 里兑现。
+
+### 插件能接触到什么
+
+插件能用的是 JavaScript 标准库和你装进去的全局变量。每个 `import` 和 `import()` 都交给你提供的 Go 函数解析，`eval` 和 `new Function` 可以限制源码长度，也可以关掉。内建对象是冻结的，所有运行时共用一份，所以每个插件看到的 `Array.prototype` 都一样。每个运行时有自己的全局变量。
+
+### 超时和错误
+
+任意 goroutine 都可以中断正在运行的插件，死循环也能停下。JavaScript 异常、语法错误、中断和宿主函数里的 panic 各自以不同的 Go 错误类型返回，抛出的 `Error` 能取到 V8 格式的调用栈。宿主函数 panic 之后，运行时还能继续使用。
 
 ## 快速上手
 
@@ -58,115 +62,189 @@ go get github.com/Calcium-Ion/moejs
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
 )
 
 const source = `
-export function buildRequest(input) {
+export function buildRequest(task) {
   return {
     method: "POST",
     url: "https://api.example.com/v1/tasks",
     headers: { authorization: "Bearer " + utils.env("API_KEY") },
-    body: { prompt: input.prompt.trim(), n: input.n ?? 1 },
+    body: { prompt: task.prompt.trim(), n: task.n ?? 1 },
   };
 }
 export function spin() { for (;;) {} }
 `
 
-func main() {
-	// Compile once. Any number of runtimes can load the same Module.
-	mod, err := moejs.Compile("plugin.js", source)
-	if err != nil {
-		panic(err)
-	}
-	build, err := mod.Hook("buildRequest")
-	if err != nil {
-		panic(err)
-	}
+// Request is what buildRequest returns.
+type Request struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	Body    struct {
+		Prompt string `json:"prompt"`
+		N      int    `json:"n"`
+	} `json:"body"`
+}
 
-	// Each request gets its own runtime: install the host functions, then load the module.
-	env := map[string]string{"API_KEY": "test-key"}
-	rt := moejs.NewRuntime(moejs.Options{})
-	err = rt.SetGlobal("utils", map[string]any{
-		"env": moejs.NativeFunc(func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
-			name, err := r.ToString(moejs.Arg(args, 0))
-			if err != nil {
-				return moejs.Undefined(), err
-			}
-			v, ok := env[name.GoString()]
-			if !ok {
-				// A Go error becomes a JavaScript Error with this message.
-				return moejs.Undefined(), fmt.Errorf("%s is not set", name.GoString())
-			}
-			return moejs.String(v), nil
-		}),
+// Plugin is a compiled plugin and a pool of runtimes that have loaded it.
+type Plugin struct {
+	mod  *moejs.Module
+	idle chan *moejs.Runtime
+}
+
+func NewPlugin(name, source string, size int) (*Plugin, error) {
+	// Compile once. Every runtime in the pool loads the same Module.
+	mod, err := moejs.Compile(name, source)
+	if err != nil {
+		return nil, err
+	}
+	return &Plugin{mod: mod, idle: make(chan *moejs.Runtime, size)}, nil
+}
+
+// Call runs hook on a runtime from the pool and decodes the result into out.
+// Any number of goroutines can call it at once.
+func (p *Plugin) Call(ctx context.Context, hook moejs.Hook, args map[string]any, out any) error {
+	rt, err := p.get()
+	if err != nil {
+		return err
+	}
+	defer p.put(rt)
+
+	// Interrupt stops the hook when ctx ends. Any goroutine can call it.
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		rt.Interrupt(context.Cause(ctx))
+		close(interrupted)
 	})
+	defer func() {
+		if !stop() {
+			<-interrupted // Interrupt must return before rt goes back to the pool.
+		}
+	}()
+
+	// FromGo converts the map as the plugin reads it, one level at a time.
+	arg, err := rt.FromGo(args)
+	if err != nil {
+		return err
+	}
+	res, err := rt.Call(hook, arg)
+	if err != nil {
+		return err
+	}
+	// Unmarshal writes the result straight into out, with no JSON text in between.
+	return rt.Unmarshal(res, out)
+}
+
+// get takes an idle runtime or makes a new one: host functions first, then the module.
+func (p *Plugin) get() (*moejs.Runtime, error) {
+	select {
+	case rt := <-p.idle:
+		return rt, nil
+	default:
+	}
+	rt := moejs.NewRuntime(moejs.Options{})
+	if err := rt.SetGlobal("utils", map[string]any{"env": moejs.NativeFunc(env)}); err != nil {
+		return nil, err
+	}
+	if err := rt.Load(p.mod); err != nil {
+		return nil, err
+	}
+	return rt, nil
+}
+
+// put resets the runtime and returns it to the pool.
+func (p *Plugin) put(rt *moejs.Runtime) {
+	rt.ClearInterrupt()
+	rt.ReleaseCallData() // The idle runtime lets go of this call's arguments.
+	select {
+	case p.idle <- rt:
+	default: // The pool is full.
+	}
+}
+
+var secrets = map[string]string{"API_KEY": "test-key"}
+
+// env is the host function behind utils.env.
+func env(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	name, err := r.ToString(moejs.Arg(args, 0))
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	v, ok := secrets[name.GoString()]
+	if !ok {
+		// A Go error becomes a JavaScript Error with this message.
+		return moejs.Undefined(), fmt.Errorf("%s is not set", name.GoString())
+	}
+	return moejs.String(v), nil
+}
+
+func main() {
+	p, err := NewPlugin("plugin.js", source, runtime.GOMAXPROCS(0))
 	if err != nil {
 		panic(err)
 	}
-	if err := rt.Load(mod); err != nil {
+	// Look hooks up once and reuse them on every call.
+	build, err := p.mod.Hook("buildRequest")
+	if err != nil {
+		panic(err)
+	}
+	spin, err := p.mod.Hook("spin")
+	if err != nil {
 		panic(err)
 	}
 
-	// JSON in, JSON out.
-	input, err := rt.ParseJSON([]byte(`{"prompt": " a cat "}`))
-	if err != nil {
-		panic(err)
+	// Concurrent calls each get their own runtime.
+	reqs := make([]Request, 3)
+	var wg sync.WaitGroup
+	for i := range reqs {
+		wg.Go(func() {
+			task := map[string]any{"prompt": fmt.Sprintf(" cat %d ", i), "n": i + 1}
+			if err := p.Call(context.Background(), build, task, &reqs[i]); err != nil {
+				panic(err)
+			}
+		})
 	}
-	res, err := rt.Call(build, input)
-	if err != nil {
-		panic(err)
+	wg.Wait()
+	for _, req := range reqs {
+		fmt.Println(req.Method, req.URL, req.Headers["authorization"], req.Body.Prompt, req.Body.N)
 	}
-	out, err := rt.AppendJSON(nil, res)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(string(out))
-	// {"method":"POST","url":"https://api.example.com/v1/tasks","headers":{"authorization":"Bearer test-key"},"body":{"prompt":"a cat","n":1}}
-
-	// Go values in, a Go struct out.
-	input, err = rt.FromGo(map[string]any{"prompt": "a dog", "n": 2})
-	if err != nil {
-		panic(err)
-	}
-	if res, err = rt.Call(build, input); err != nil {
-		panic(err)
-	}
-	var req struct {
-		Method string         `json:"method"`
-		Body   map[string]any `json:"body"`
-	}
-	if err := rt.Unmarshal(res, &req); err != nil {
-		panic(err)
-	}
-	fmt.Println(req.Method, req.Body) // POST map[n:2 prompt:a dog]
+	// POST https://api.example.com/v1/tasks Bearer test-key cat 0 1
+	// POST https://api.example.com/v1/tasks Bearer test-key cat 1 2
+	// POST https://api.example.com/v1/tasks Bearer test-key cat 2 3
 
 	// A JavaScript throw comes back as *moejs.Exception.
-	_, err = rt.Call(build, moejs.Null())
+	err = p.Call(context.Background(), build, map[string]any{}, &Request{})
 	var exc *moejs.Exception
 	fmt.Println(errors.As(err, &exc), exc.Name(), exc.Message())
-	// true TypeError Cannot read properties of null (reading 'prompt')
+	// true TypeError Cannot read properties of undefined (reading 'trim')
 
-	// Interrupt stops a hook that runs too long. Any goroutine can call it.
-	spin, _ := mod.Hook("spin")
-	timer := time.AfterFunc(50*time.Millisecond, func() { rt.Interrupt("timeout") })
-	defer timer.Stop()
-	_, err = rt.Call(spin)
+	// A hook still running when ctx ends stops with *moejs.InterruptedError.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err = p.Call(ctx, spin, nil, nil)
 	var interrupted *moejs.InterruptedError
-	fmt.Println(errors.As(err, &interrupted), interrupted.Value) // true timeout
-	rt.ClearInterrupt()
-
-	// Before the runtime goes back to a pool, let go of this request's data.
-	rt.ReleaseCallData()
+	fmt.Println(errors.As(err, &interrupted), interrupted.Value)
+	// true context deadline exceeded
 }
 ```
 
-服务端一般为每个插件编译一次，再为它维护一个运行时池，每个并发请求占用一个运行时。运行时池、模块图、值的转换、Promise
-和错误的细节见[使用指南](docs/guide.zh_CN.md)，每个函数的说明见[包文档](https://pkg.go.dev/github.com/Calcium-Ion/moejs)。
+服务端照 `Plugin` 这样调用插件，每个请求的开销最小。从池里取一个运行时只是一次 channel 接收，新建运行时并加载最大的插件约需 71 µs。
+运行时池、模块图、值的转换、Promise 和错误的细节见[使用指南](docs/guide.zh_CN.md)，每个函数的说明见[包文档](https://pkg.go.dev/github.com/Calcium-Ion/moejs)。
+
+moejs 仓库里有一份按插件负载录制的 `default.pgo`。Go 只自动使用 main 包目录下的 profile，所以构建时要手动传入：
+
+```sh
+go build -pgo="$(go list -m -f '{{.Dir}}' github.com/Calcium-Ion/moejs)/default.pgo" .
+```
 
 ## JavaScript 支持
 
