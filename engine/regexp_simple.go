@@ -400,29 +400,31 @@ func (p *simpleParser) decimal() (int, bool) {
 // find returns the leftmost match of c in s at or after from as code-unit
 // positions, or ok == false.
 func (c *simpleClass) find(s *String, from int) (start, end int, ok bool) {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	n := int(s.n)
+	n := int(f.n)
 	i := from
 	for i < n {
 		// Skip to the first unit in the set: one character's with
 		// IndexByte, as RE2 skips to a literal.
-		if s.kind == strASCII && c.one >= 0 {
+		if f.kind == strASCII && c.one >= 0 {
 			k := -1
 			if c.one < 0x80 {
-				k = strings.IndexByte(s.s[i:], byte(c.one))
+				k = strings.IndexByte(f.s[i:], byte(c.one))
 			}
 			if k < 0 {
 				return 0, 0, false
 			}
 			i += k
-		} else if s.kind == strASCII {
-			for i < n && !c.set.has(uint16(s.s[i])) {
+		} else if f.kind == strASCII {
+			for i < n && !c.set.has(uint16(f.s[i])) {
 				i++
 			}
 		} else {
-			for i < n && !c.set.has(s.u[i]) {
+			u := f.units()
+			for i < n && !c.set.has(u[i]) {
 				i++
 			}
 		}
@@ -437,12 +439,13 @@ func (c *simpleClass) find(s *String, from int) (start, end int, ok bool) {
 			limit = i + c.max
 		}
 		j := i + 1
-		if s.kind == strASCII {
-			for j < limit && c.set.has(uint16(s.s[j])) {
+		if f.kind == strASCII {
+			for j < limit && c.set.has(uint16(f.s[j])) {
 				j++
 			}
 		} else {
-			for j < limit && c.set.has(s.u[j]) {
+			u := f.units()
+			for j < limit && c.set.has(u[j]) {
 				j++
 			}
 		}

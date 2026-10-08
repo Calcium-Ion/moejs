@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // arrayObject co-allocates an array object with its length payload so that
 // creating an array costs one allocation besides its element storage.
 type arrayObject struct {
@@ -10,7 +12,12 @@ type arrayObject struct {
 // initArray fills ao as a dense array over items with the realm's array
 // shape. The payload lives inside ao; o.internal points at it (an interior
 // pointer, which the collector handles like any other).
+//
+// It charges the array and the capacity of items (memlimit.go), which the
+// array owns from now on: element storage is charged once, here or where
+// it grows.
 func (r *Realm) initArray(ao *arrayObject, items []Value, length uint32) *Object {
+	r.chargeObject(unsafe.Sizeof(arrayObject{}) + uintptr(cap(items)*valueSize))
 	o := &ao.obj
 	o.shape = r.arrayShape()
 	o.proto = o.shape.proto

@@ -102,6 +102,16 @@ type umNumbers struct {
 	Any any
 }
 
+// umRaw holds json.RawMessage in every position the walk writes one.
+type umRaw struct {
+	Raw json.RawMessage
+	P   *json.RawMessage
+	M   map[string]json.RawMessage
+	L   []json.RawMessage
+	In  struct{ R json.RawMessage }
+	I   int `json:"i"`
+}
+
 type umStringer interface{ String() string }
 
 type umIfaces struct {
@@ -144,6 +154,18 @@ func umTargets() []struct {
 		{"bytes", func() (any, any) { var a, b []byte; return &a, &b }},
 		{"jsonnumber", func() (any, any) { var a, b json.Number; return &a, &b }},
 		{"raw", func() (any, any) { var a, b json.RawMessage; return &a, &b }},
+		{"raw-prefilled", func() (any, any) {
+			a, b := append(make(json.RawMessage, 0, 256), "old"...), append(make(json.RawMessage, 0, 256), "old"...)
+			return &a, &b
+		}},
+		{"ptr-raw", func() (any, any) { var a, b *json.RawMessage; return &a, &b }},
+		{"map-string-raw", func() (any, any) { var a, b map[string]json.RawMessage; return &a, &b }},
+		{"slice-raw", func() (any, any) { var a, b []json.RawMessage; return &a, &b }},
+		{"slice-raw-prefilled", func() (any, any) {
+			a, b := []json.RawMessage{json.RawMessage("x"), nil, json.RawMessage("y")}, []json.RawMessage{json.RawMessage("x"), nil, json.RawMessage("y")}
+			return &a, &b
+		}},
+		{"umRaw", func() (any, any) { var a, b umRaw; return &a, &b }},
 		{"umTextU", func() (any, any) { var a, b umTextU; return &a, &b }},
 		{"umJSONU", func() (any, any) { var a, b umJSONU; return &a, &b }},
 		{"ptr-int-nil", func() (any, any) { var a, b *int; return &a, &b }},
@@ -219,7 +241,13 @@ var umExprs = []string{
 	`(() => { const o = {}; for (let k = 0; k < 40; k++) o["k" + k] = k; o.i = 7; return o })()`,
 	`(() => { const o = {i: 1}; Object.defineProperty(o, Symbol.iterator, {value: 1, enumerable: true}); return o })()`,
 	`(() => { const o = {known: 1}; o.toJSON = undefined; return o })()`, `(() => { const o = {known: 1}; o.toJSON = 5; return o })()`,
-	`{Known: 1, i: Object.assign(() => 1, {toJSON() { return 5 }})}`, `[Object.assign(() => 1, {toJSON() { return 6 }}), 2]`, `{unknown: [1, {a: Object.assign(() => 1, {toJSON() { throw new Error("fn") }})}], Known: 1}`,
+	`{Known: 1, i: Object.assign(() => 1, {toJSON() { return 5 }})}`,
+	`{Raw: {s: "<>&\u2028\u2029", l: "\ud800x\udc00", u: "é😀\u0000\u001f\"\\/"}, P: [-0, 1e21, 5e-324, 1e-7, 2**53+1, 0.1], M: {a: {b: [1, {c: undefined}]}, n: null, u: undefined}, L: [1, "s", null, undefined, {x: [true]}], In: {R: {z: 1, a: 2}}, i: 3}`,
+	`{Raw: HOST.raw, P: HOST.rawlist, M: {a: HOST.raw, p: HOST.rawprim}, L: [HOST.rawlist, HOST.raw], In: {R: HOST}}`,
+	`(() => { const r = HOST.raw; r.z; return {Raw: r, P: r.z, L: [r.a]} })()`,
+	`(() => { const r = HOST.raw; r.extra = 1; return {Raw: r, M: {r}} })()`,
+	`(() => HOST.raw)()`, `(() => HOST.rawlist)()`, `(() => [HOST.rawprim, HOST.rawnull])()`, `{M: HOST.hdr, L: HOST.tags, Raw: HOST.messages}`,
+	`{Raw: {toJSON() { return {t: 1} }}, i: 1}`, `{Raw: new Date(0)}`, `{P: 1n}`, `[Object.assign(() => 1, {toJSON() { return 6 }}), 2]`, `{unknown: [1, {a: Object.assign(() => 1, {toJSON() { throw new Error("fn") }})}], Known: 1}`,
 }
 
 func TestUnmarshalDifferential(t *testing.T) {
@@ -236,7 +264,8 @@ func TestUnmarshalDifferential(t *testing.T) {
 		require.NoError(t, rt.Load(mod))
 		hook := mustHook(t, mod, "v")
 		mkHost := func() moejs.Value {
-			h, err := rt.FromGo(map[string]any{"model": "m", "n": 2, "messages": []any{map[string]any{"role": "user", "content": "hi", "x": 1.5}}, "tags": []string{"a", "b"}, "hdr": map[string]string{"k": "v"}, "big": int64(1<<53 + 1), "nan": 0.0, "f32": []any{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))}})
+			h, err := rt.FromGo(map[string]any{"model": "m", "n": 2, "messages": []any{map[string]any{"role": "user", "content": "hi", "x": 1.5}}, "tags": []string{"a", "b"}, "hdr": map[string]string{"k": "v"}, "big": int64(1<<53 + 1), "nan": 0.0, "f32": []any{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))},
+				"raw": json.RawMessage(` {"z": [1, 2.50, 1E2, -0, "<\u2028>\ud800"], "a": null, "é": {"k": "v"}} `), "rawlist": json.RawMessage(`[1, {"x": "é"}, []]`), "rawprim": json.RawMessage(` "s" `), "rawnull": json.RawMessage(nil)})
 			require.NoError(t, err)
 			return h
 		}

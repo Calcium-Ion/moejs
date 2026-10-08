@@ -127,7 +127,7 @@ func errorProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	sb.WriteASCII(':')
 	sb.WriteASCII(' ')
 	sb.WriteString(msg)
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // errorCaptureStackTrace implements Error.captureStackTrace(object,

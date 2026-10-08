@@ -178,7 +178,7 @@ func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 		}
 	case GetEnvW, SetEnvW, DefineAccessor, SetPrivateMethod:
 		sb.WriteString(strconv.Itoa(int(x)))
-	case GetElemRef:
+	case GetElemRef, JmpLt, JmpLe, JmpGt, JmpGe, JmpNLt, JmpNLe, JmpNGt, JmpNGe, JmpStrictEq, JmpStrictNe:
 		sb.WriteString("r")
 		sb.WriteString(strconv.Itoa(int(x)))
 	case CallEval:

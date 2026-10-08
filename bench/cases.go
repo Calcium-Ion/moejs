@@ -98,7 +98,7 @@ func (h *HookCase) Check(out any, err error) string {
 // FullCheck runs the complete JSON-normalized comparison against the oracle.
 // lenient drops null-valued object members on both sides for engines whose
 // results crossed a JSON.stringify boundary (undefined members vanish there):
-// quickjs-go and v8go, see JSONBoundary.
+// both quickjs-go configurations and v8go, see JSONBoundary.
 func (h *HookCase) FullCheck(out any, err error, lenient bool) string {
 	if h.Case.ExpectedError != "" {
 		return h.Check(out, err)
@@ -120,7 +120,7 @@ func (h *HookCase) FullCheck(out any, err error, lenient bool) string {
 // JSONBoundary reports whether the engine moves values as JSON text, so that
 // `undefined` object members are dropped on the way back.
 func JSONBoundary(e engines.Engine) bool {
-	return e.Name() == "quickjs-go" || e.Name() == "v8go"
+	return engines.Cgo(e)
 }
 
 // Run invokes the case on rt and returns the raw outcome.

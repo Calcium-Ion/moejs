@@ -52,25 +52,58 @@ func TestDisassembleGolden(t *testing.T) {
   if (n < lo) return lo;
   return n > hi ? hi : n;
 }`)
-	want := `function clamp (normal) params=3 regs=6 env=0 ics=0
+	want := `function clamp (normal) params=3 regs=5 env=0 ics=0
   0000 UndefRange r3 1
   0001 Plus r3 r0
   0002 TypeofIs r4 r0 "number"
   0003 Not r4 r4
   0004 JmpF r4 -> 0006
   0005 Ret r1
-  0006 Lt r4 r3 r1
-  0007 JmpF r4 -> 0009
+  0006 JmpNLt r3 -> 0009 r1
   0008 Ret r1
-  0009 Gt r5 r3 r2
-  0010 JmpF r5 -> 0013
-  0011 Move r4 r2
-  0012 Jmp -> 0014
-  0013 Move r4 r3
-  0014 Ret r4
-  0015 RetUndef
+  0009 JmpNGt r3 -> 0012 r2
+  0011 Ret r2
+  0012 Ret r3
+  0013 RetUndef
 `
 	assert.Equal(t, want, bytecode.Disassemble(child(t, fn, "clamp")))
+}
+
+// TestConditionalReturn checks that `return c ? a : b` returns from each
+// branch, and joins them where a return routes through a finally or closes
+// an iterator.
+func TestConditionalReturn(t *testing.T) {
+	m := compileModule(t, `export function plain(c, a, b) { return c ? a : b; }
+export function fin(c, a, b) { try { return c ? a : b; } finally { a = 0; } }
+export function iter(c, xs) { for (const x of xs) return c ? x : 0; }`)
+	assert.Equal(t, []bytecode.Op{bytecode.JmpF, bytecode.Ret, bytecode.Ret, bytecode.RetUndef}, ops(child(t, m, "plain")))
+	// One return completion (kind 2) stored for the finally.
+	fin := child(t, m, "fin")
+	rk := fin.Handlers[0].Reg
+	stores := 0
+	for pc := 0; pc < len(fin.Code); {
+		w := fin.Code[pc]
+		op := bytecode.DecodeOp(w)
+		if op == bytecode.LoadInt && uint16(bytecode.DecodeA(w)) == rk && bytecode.DecodeSBx(w) == 2 {
+			stores++
+		}
+		pc += 1 + op.ExtraWords()
+	}
+	assert.Equal(t, 1, stores, bytecode.Disassemble(fin))
+	// One close of the iterator, one Ret.
+	iter := ops(child(t, m, "iter"))
+	assert.Equal(t, 1, countOp(iter, bytecode.IterClose))
+	assert.Equal(t, 1, countOp(iter, bytecode.Ret))
+}
+
+func countOp(list []bytecode.Op, op bytecode.Op) int {
+	n := 0
+	for _, o := range list {
+		if o == op {
+			n++
+		}
+	}
+	return n
 }
 
 func TestDisassembleModuleAndHandlers(t *testing.T) {

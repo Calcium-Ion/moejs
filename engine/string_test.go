@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,27 +92,33 @@ func TestConcatAndRope(t *testing.T) {
 	assert.Equal(t, strASCII, c.kind, "short concat is eager")
 	assert.Equal(t, "shorter", c.GoString())
 
-	long1 := FromGoString(strings.Repeat("x", 40))
-	long2 := FromGoString(strings.Repeat("y", 30))
+	// A long result whose right piece is the longer is a rope (a prepend).
+	long1 := FromGoString(strings.Repeat("x", 30))
+	long2 := FromGoString(strings.Repeat("y", 40))
 	rope := concat(long1, long2)
 	require.Equal(t, strRope, rope.kind)
 	assert.Equal(t, 70, rope.Len())
-	// At forces flattening in place.
+	// At flattens it: the rope publishes its contents and stays a rope.
 	assert.Equal(t, uint16('y'), rope.At(45))
-	assert.Equal(t, strASCII, rope.kind)
-	assert.Nil(t, rope.left)
+	assert.Equal(t, strRope, rope.kind)
+	assert.Equal(t, strASCII, flatKind(t, rope))
+	assert.Equal(t, strings.Repeat("x", 30)+strings.Repeat("y", 40), rope.s, "an ASCII rope's s is its contents")
+	assert.Nil(t, rope.p, "the children are released")
 	assert.Nil(t, rope.right)
-	assert.Equal(t, strings.Repeat("x", 40)+strings.Repeat("y", 30), rope.GoString())
+	assert.Equal(t, strings.Repeat("x", 30)+strings.Repeat("y", 40), rope.GoString())
 	// Flatten is idempotent.
+	d := rope.s
 	rope.flatten()
-	assert.Equal(t, strASCII, rope.kind)
+	assert.Equal(t, strASCII, flatKind(t, rope))
+	assert.Equal(t, unsafe.StringData(d), unsafe.StringData(rope.s), "published once")
 	assert.Equal(t, 70, rope.Len())
 
 	// Mixed kinds flatten to utf16.
-	mixed := concat(long1, FromGoString(strings.Repeat("é", 30)))
+	mixed := concat(long1, FromGoString(strings.Repeat("é", 40)))
 	require.Equal(t, strRope, mixed.kind)
 	assert.Equal(t, uint16(0xE9), mixed.At(50))
-	assert.Equal(t, strUTF16, mixed.kind)
+	assert.Equal(t, strUTF16, flatKind(t, mixed))
+	assert.Equal(t, "", mixed.s)
 
 	// Empty operands are returned as-is.
 	assert.Same(t, a, concat(a, emptyString))
@@ -119,14 +126,24 @@ func TestConcatAndRope(t *testing.T) {
 }
 
 func TestDeepRopeFlatten(t *testing.T) {
-	// Left-deep rope like `s += "ab"` in a loop; must not recurse deeply.
+	// Left-deep rope like `s += "ab"` in a loop made before append
+	// buffers; must not recurse deeply.
 	s := FromGoString(strings.Repeat("a", 64))
 	for range 20000 {
-		s = concat(s, FromGoString("ab"))
+		s = ropeOf(s, FromGoString("ab"))
 	}
 	assert.Equal(t, 64+40000, s.Len())
 	assert.Equal(t, uint16('b'), s.At(64+1))
-	assert.Equal(t, strASCII, s.kind)
+	assert.Equal(t, strASCII, flatKind(t, s))
+}
+
+// flatKind is the kind of the contents the rope s published.
+func flatKind(t *testing.T, s *String) uint8 {
+	t.Helper()
+	require.Equal(t, strRope, s.kind)
+	f, ok := s.published()
+	require.True(t, ok, "published")
+	return f.kind
 }
 
 func TestSubstringAcrossKinds(t *testing.T) {
@@ -143,7 +160,7 @@ func TestSubstringAcrossKinds(t *testing.T) {
 	assert.Equal(t, strASCII, ascPart.kind, "ascii-only substring of utf16 normalizes")
 	assert.Equal(t, "llo", ascPart.GoString())
 
-	rope := concat(FromGoString(strings.Repeat("a", 40)), FromGoString(strings.Repeat("b", 40)))
+	rope := ropeOf(FromGoString(strings.Repeat("a", 40)), FromGoString(strings.Repeat("b", 40)))
 	assert.Equal(t, "ab", rope.Substring(39, 41).GoString())
 }
 
@@ -258,7 +275,7 @@ func TestHash(t *testing.T) {
 	assert.Equal(t, a.Hash(), b.Hash())
 	assert.NotZero(t, a.Hash())
 	assert.NotEqual(t, a.Hash(), FromGoString("propertx").Hash())
-	rope := concat(FromGoString(strings.Repeat("p", 40)), FromGoString(strings.Repeat("q", 40)))
+	rope := ropeOf(FromGoString(strings.Repeat("p", 40)), FromGoString(strings.Repeat("q", 40)))
 	flat := FromGoString(strings.Repeat("p", 40) + strings.Repeat("q", 40))
 	assert.Equal(t, flat.Hash(), rope.Hash())
 }
@@ -281,4 +298,72 @@ func TestBigInt(t *testing.T) {
 	_, ok = NewBigIntFromDecimal("12x")
 	assert.False(t, ok)
 	assert.Equal(t, "bigint", TypeOf(BigIntValue(b)).GoString())
+}
+
+// ropeOf builds a rope node directly, whatever Concat would build.
+func ropeOf(a, b *String) *String {
+	return &String{p: unsafe.Pointer(a), right: b, n: a.n + b.n, kind: strRope}
+}
+
+func TestRopeFlattenShapes(t *testing.T) {
+	leaf := func(i int) *String {
+		if i%7 == 3 {
+			return FromGoString(string(rune('α' + i%20)))
+		}
+		return FromGoString(string(rune('a' + i%26)))
+	}
+	for _, mixed := range []bool{false, true} {
+		var want strings.Builder
+		pieces := make([]*String, 3000)
+		for i := range pieces {
+			p := FromGoString(string(rune('a' + i%26)))
+			if mixed {
+				p = leaf(i)
+			}
+			pieces[i] = p
+			want.WriteString(p.GoString())
+		}
+		var balanced func(lo, hi int) *String
+		balanced = func(lo, hi int) *String {
+			if hi-lo == 1 {
+				return pieces[lo]
+			}
+			m := (lo + hi) / 2
+			return ropeOf(balanced(lo, m), balanced(m, hi))
+		}
+		left, right := pieces[0], pieces[len(pieces)-1]
+		for i := 1; i < len(pieces); i++ {
+			left = ropeOf(left, pieces[i])
+			right = ropeOf(pieces[len(pieces)-1-i], right)
+		}
+		zig := pieces[0]
+		for i := 1; i < len(pieces); i++ {
+			if i%2 == 0 {
+				zig = ropeOf(zig, pieces[i])
+			} else {
+				// A right child that is itself a rope.
+				zig = ropeOf(zig, ropeOf(pieces[i], emptyString))
+			}
+		}
+		for name, s := range map[string]*String{"left-deep": left, "right-deep": right, "balanced": balanced(0, len(pieces)), "zigzag": zig} {
+			assert.Equal(t, want.String(), s.GoString(), "%s mixed=%v", name, mixed)
+			assert.Equal(t, !mixed, flatKind(t, s) == strASCII, "%s mixed=%v", name, mixed)
+			assert.Nil(t, s.p, "the left child is released")
+			assert.Nil(t, s.right)
+		}
+	}
+	// The contents are one allocation: no growing stack, no copy into a
+	// Go string.
+	for _, tail := range []string{"bb", "é"} {
+		a := FromGoString(strings.Repeat("a", 100))
+		b := FromGoString(tail)
+		ropes := make([]*String, 21) // AllocsPerRun's warm-up run and 20
+		for i := range ropes {
+			ropes[i] = ropeOf(ropeOf(a, b), ropeOf(b, a))
+		}
+		assert.Equal(t, 1.0, testing.AllocsPerRun(20, func() {
+			ropes[0].flatten()
+			ropes = ropes[1:]
+		}), tail)
+	}
 }

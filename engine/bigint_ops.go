@@ -2,6 +2,8 @@ package engine
 
 import (
 	"math/big"
+	"math/bits"
+	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 )
@@ -17,21 +19,28 @@ func (r *Realm) bigintBinary(op bytecode.Op, x, y Value) (Value, error) {
 		return Undefined(), r.TypeError("Cannot mix BigInt and other types, use explicit conversions")
 	}
 	a, b := &x.AsBigInt().v, &y.AsBigInt().v
-	z := &BigInt{}
+	// The result of +, -, * and the bitwise operators has at most these
+	// many words; math/big writes it into the room newBigIntCap made.
+	n := max(len(a.Bits()), len(b.Bits())) + 1
+	var z *BigInt
 	switch op {
 	case bytecode.Add:
+		z = newBigIntCap(n)
 		z.v.Add(a, b)
 	case bytecode.Sub:
+		z = newBigIntCap(n)
 		z.v.Sub(a, b)
 	case bytecode.Mul:
 		if a.BitLen()+b.BitLen() > maxBigIntBits+1 {
 			return Undefined(), errBigIntTooBig(r)
 		}
+		z = newBigIntCap(len(a.Bits()) + len(b.Bits()))
 		z.v.Mul(a, b)
 	case bytecode.Div, bytecode.Mod:
 		if b.Sign() == 0 {
 			return Undefined(), r.RangeError("Division by zero")
 		}
+		z = &BigInt{}
 		if op == bytecode.Div {
 			z.v.Quo(a, b) // truncates toward zero
 		} else {
@@ -40,10 +49,13 @@ func (r *Realm) bigintBinary(op bytecode.Op, x, y Value) (Value, error) {
 	case bytecode.Exp:
 		return r.bigintExp(a, b)
 	case bytecode.BitAnd:
+		z = newBigIntCap(n)
 		z.v.And(a, b) // math/big's bitwise operators are two's complement
 	case bytecode.BitOr:
+		z = newBigIntCap(n)
 		z.v.Or(a, b)
 	case bytecode.BitXor:
+		z = newBigIntCap(n)
 		z.v.Xor(a, b)
 	case bytecode.Shl:
 		return r.bigintShift(a, b, false)
@@ -55,11 +67,13 @@ func (r *Realm) bigintBinary(op bytecode.Op, x, y Value) (Value, error) {
 	return r.bigintResult(z)
 }
 
-// bigintResult boxes z, or throws when it exceeds the size limit.
+// bigintResult boxes z, or throws when it exceeds the size limit. It
+// charges z to the memory limit.
 func (r *Realm) bigintResult(z *BigInt) (Value, error) {
 	if z.v.BitLen() > maxBigIntBits {
 		return Undefined(), errBigIntTooBig(r)
 	}
+	r.charge(int(unsafe.Sizeof(BigInt{})) + cap(z.v.Bits())*bits.UintSize/8)
 	return BigIntValue(z), nil
 }
 
@@ -114,7 +128,7 @@ func (r *Realm) bigintShift(a, b *big.Int, right bool) (Value, error) {
 		return Undefined(), errBigIntTooBig(r)
 	}
 	z.v.Lsh(a, uint(absInt64(b.Int64())))
-	return BigIntValue(z), nil
+	return r.bigintResult(z)
 }
 
 func absInt64(n int64) int64 {
@@ -127,7 +141,7 @@ func absInt64(n int64) int64 {
 // bigintUnary applies unary minus (d == 0), ++ (d == 1), -- (d == -1) or
 // ~ (not) to a bigint.
 func (r *Realm) bigintUnary(x *BigInt, d int64, not bool) (Value, error) {
-	z := &BigInt{}
+	z := newBigIntCap(len(x.v.Bits()) + 1)
 	switch {
 	case not:
 		z.v.Not(&x.v)

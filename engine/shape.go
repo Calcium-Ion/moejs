@@ -338,9 +338,10 @@ func (s *Shape) addProperty(r *Realm, key PropertyKey, attrs uint8) *Shape {
 		return child
 	}
 	if !r.strongChild(s) {
-		return s.addWeakProperty(key, attrs)
+		return s.addWeakProperty(r, key, attrs)
 	}
 	child := r.allocShape()
+	r.chargeShape()
 	*child = Shape{
 		parent: s,
 		proto:  s.proto,
@@ -359,10 +360,11 @@ func (s *Shape) addProperty(r *Realm, key PropertyKey, attrs uint8) *Shape {
 // addWeakProperty is addProperty past the strong children of s: the child
 // comes from, or goes to, the weak tier. s has a transMap, and the realm is
 // past its bootstrap (strongChild).
-func (s *Shape) addWeakProperty(key PropertyKey, attrs uint8) *Shape {
+func (s *Shape) addWeakProperty(r *Realm, key PropertyKey, attrs uint8) *Shape {
 	if child := s.weakTransition(key, attrs); child != nil {
 		return child
 	}
+	r.chargeShape()
 	child := &Shape{
 		parent: s,
 		proto:  s.proto,
@@ -795,6 +797,7 @@ func (r *Realm) newLocalRoot(proto *Object) *Shape {
 		return s
 	}
 	s := newRootShape(proto)
+	r.chargeShape()
 	if proto == nil || proto.flags&flagShared != 0 || r.buildingShared || r.boot != nil {
 		if r.rootShapes == nil {
 			r.rootShapes = make(map[*Object]*Shape, 8)

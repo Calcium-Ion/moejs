@@ -62,7 +62,7 @@ func TestDifferentialFixtures(t *testing.T) {
 	skipWithoutPlugins(t)
 	var all []mismatch
 	for _, e := range engines.All() {
-		lenient := e.Name() == "quickjs-go" || e.Name() == "v8go"
+		lenient := JSONBoundary(e)
 		t.Run(e.Name(), func(t *testing.T) {
 			runner, err := NewRunner(e)
 			require.NoError(t, err)

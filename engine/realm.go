@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 )
@@ -71,6 +72,12 @@ type RealmOptions struct {
 	// with Realm.SetDynamicCodeDisabled. Code the host compiles is not
 	// affected.
 	DisableDynamicCode bool
+
+	// MemoryLimit is the number of bytes the realm may allocate for
+	// JavaScript between resets (ReleaseCallData, ResetAllocation) before
+	// it interrupts itself with a *MemoryLimitError (memlimit.go); 0 means
+	// no limit. It can be changed later with Realm.SetMemoryLimit.
+	MemoryLimit int64
 }
 
 // Intrinsics holds the intrinsic objects of a realm. A realm points at its
@@ -259,6 +266,7 @@ type realmLazy struct {
 	modules        *moduleMap     // the module map (module_eval.go)
 	json           *jsonStack     // JSON.parse's reused stack (builtin_json.go)
 	statics        *regexpStatics // the RegExp statics' match (regexp_legacy.go)
+	mem            *memAccount    // the memory limit's account (memlimit.go)
 }
 
 // lazyState returns the realm's rarely used state, creating it on first use.
@@ -285,6 +293,7 @@ func NewRealmWith(opts RealmOptions) *Realm {
 	r.SetTimeZone(opts.TimeZone)
 	r.SetMaxDynamicSource(opts.MaxDynamicSource)
 	r.SetDynamicCodeDisabled(opts.DisableDynamicCode)
+	r.SetMemoryLimit(opts.MemoryLimit)
 	return r
 }
 
@@ -668,6 +677,7 @@ func (o *Object) ReserveSlots(r *Realm, n int) {
 		return
 	}
 	ns := r.allocSlotsCap(len(o.slots) + n)
+	r.charge(cap(ns) * valueSize)
 	ns = append(ns, o.slots...)
 	o.slots = ns
 }
@@ -675,6 +685,7 @@ func (o *Object) ReserveSlots(r *Realm, n int) {
 // newFunctionObjectCap is newFunctionObject with extra slot capacity.
 func (r *Realm) newFunctionObjectCap(name *String, length int, kind FuncKind, capacity int) (*Object, *FunctionData) {
 	fo := &funcObject{}
+	r.chargeObject(unsafe.Sizeof(funcObject{}))
 	o := &fo.obj
 	o.shape = r.functionShape()
 	o.proto = r.FunctionPrototype
@@ -688,6 +699,7 @@ func (r *Realm) newFunctionObjectCap(name *String, length int, kind FuncKind, ca
 		o.slots = fo.slots[:0]
 	} else {
 		o.slots = r.allocSlotsCap(capacity)
+		r.charge(capacity * valueSize)
 	}
 	o.slots = append(o.slots, IntValue(length), StringValue(name))
 	return o, &fo.fd

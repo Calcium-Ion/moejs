@@ -51,7 +51,7 @@ func (f *funcState) expr(e syntax.Expr, dst int) {
 	case *syntax.UpdateExpr:
 		f.update(e, dst, true)
 	case *syntax.BinaryExpr:
-		f.binary(e, dst)
+		f.binary(e, dst, nil)
 	case *syntax.LogicalExpr:
 		f.expr(e.X, dst)
 		end := f.newLabel()
@@ -161,7 +161,8 @@ func (f *funcState) markScriptOrModule() {
 }
 
 // exprReg compiles e and returns a register holding its value. Un-captured
-// locals are returned directly (no copy); callers must only read the result.
+// locals and the constants a loop hoisted (hoist.go) are returned directly
+// (no copy); callers must only read the result.
 func (f *funcState) exprReg(e syntax.Expr) int {
 	switch x := e.(type) {
 	case *syntax.Ident:
@@ -172,6 +173,9 @@ func (f *funcState) exprReg(e syntax.Expr) int {
 		if r := f.regOf(x.Binding); r >= 0 {
 			return r
 		}
+	}
+	if r := f.hoistedReg(e); r >= 0 {
+		return r
 	}
 	t := f.alloc()
 	f.expr(e, t)
@@ -195,6 +199,9 @@ func (f *funcState) operand(e syntax.Expr, after ...syntax.Expr) int {
 				return r
 			}
 		}
+	}
+	if r := f.hoistedReg(e); r >= 0 {
+		return r
 	}
 	t := f.alloc()
 	f.expr(e, t)
@@ -288,6 +295,15 @@ func (f *funcState) condJump(e syntax.Expr, lbl *label, jumpIf bool) {
 		}
 	}
 	mark := f.nregs
+	if b, ok := compareJump(e); ok {
+		// What exprReg and expr do before binary, so that the operands
+		// get the same registers and the jump the comparison's position.
+		t := f.alloc()
+		f.setPosNode(b)
+		f.binary(b, t, &condJumpTo{lbl: lbl, jumpIf: jumpIf})
+		f.free(mark)
+		return
+	}
 	r := f.exprReg(e)
 	if jumpIf {
 		f.emitJump(bytecode.JmpT, r, lbl)
@@ -445,15 +461,18 @@ var compoundOps = map[syntax.Token]syntax.Token{
 // register: computing each level's left operand into a fresh temporary held
 // one live register per term, so a 250-term string concatenation failed with
 // the 256-register limit.
-func (f *funcState) binary(e *syntax.BinaryExpr, dst int) {
+//
+// With jmp set, e is a comparison that compareJump accepted: its result
+// decides the jump instead of landing in dst.
+func (f *funcState) binary(e *syntax.BinaryExpr, dst int, jmp *condJumpTo) {
 	mark := f.nregs
 	defer f.free(mark)
-	if f.typeofIs(e, dst) {
+	if jmp == nil && f.typeofIs(e, dst) {
 		return
 	}
 	x, ok := e.X.(*syntax.BinaryExpr)
 	if !ok || !f.chainLink(x) {
-		f.binaryOp(e, dst, -1)
+		f.binaryOp(e, dst, -1, jmp)
 		return
 	}
 	spine := []*syntax.BinaryExpr{e, x}
@@ -466,11 +485,11 @@ func (f *funcState) binary(e *syntax.BinaryExpr, dst int) {
 		spine = append(spine, x)
 	}
 	acc := f.alloc()
-	f.binaryOp(spine[len(spine)-1], acc, -1)
+	f.binaryOp(spine[len(spine)-1], acc, -1, nil)
 	for i := len(spine) - 2; i > 0; i-- {
-		f.binaryOp(spine[i], acc, acc)
+		f.binaryOp(spine[i], acc, acc, nil)
 	}
-	f.binaryOp(e, dst, acc)
+	f.binaryOp(e, dst, acc, jmp)
 }
 
 // chainLink reports whether x, the left operand of a binary node, is compiled
@@ -488,8 +507,9 @@ func (f *funcState) chainLink(x *syntax.BinaryExpr) bool {
 }
 
 // binaryOp emits one binary operation into dst; left is the register already
-// holding the left operand, or -1 when e.X is still to be evaluated.
-func (f *funcState) binaryOp(e *syntax.BinaryExpr, dst, left int) {
+// holding the left operand, or -1 when e.X is still to be evaluated. With
+// jmp set it emits the comparison's jump instead (binary).
+func (f *funcState) binaryOp(e *syntax.BinaryExpr, dst, left int, jmp *condJumpTo) {
 	mark := f.nregs
 	defer f.free(mark)
 	if pn, ok := e.X.(*syntax.PrivateName); ok && left < 0 {
@@ -522,7 +542,36 @@ func (f *funcState) binaryOp(e *syntax.BinaryExpr, dst, left int) {
 		b = f.operand(e.X, e.Y)
 	}
 	c := f.operand(e.Y)
+	if jmp != nil {
+		jop, _ := bytecode.CompareJump(op, jmp.jumpIf)
+		f.emitJump(jop, b, jmp.lbl)
+		f.emitExtra(uint32(c))
+		return
+	}
 	f.emitABC(op, dst, b, c)
+}
+
+// condJumpTo is the jump that a comparison compiled by binary ends in.
+type condJumpTo struct {
+	lbl    *label
+	jumpIf bool
+}
+
+// compareJump reports whether condJump compiles e as one compare-and-branch
+// op: a relational or strict equality comparison that is not a typeof test
+// (TypeofIs).
+func compareJump(e syntax.Expr) (*syntax.BinaryExpr, bool) {
+	b, ok := e.(*syntax.BinaryExpr)
+	if !ok {
+		return nil, false
+	}
+	if _, ok := bytecode.CompareJump(binaryOps[b.Op], false); !ok {
+		return nil, false
+	}
+	if _, _, ok := typeofIsParts(b); ok {
+		return nil, false
+	}
+	return b, true
 }
 
 // typeofIs fuses `typeof x === "name"` (and ==, !==, !=) into TypeofIs.
@@ -886,6 +935,35 @@ func (f *funcState) intoReg(e syntax.Expr) bool {
 	return false
 }
 
+// lastOpWrites reports whether e, compiled into the register of a variable
+// it reads, still reads every old value it needs: e writes its register
+// only with its last instruction, after it evaluated its operands into
+// temporaries or read them where they are (a binary operator, a unary
+// operator other than delete and void, a property read, or a comma
+// expression ending in one of those). Evaluating an operand writes the
+// register only for an assignment to the variable inside e, which the
+// last instruction then overwrites as it must, and operand copies a
+// variable an operand assigns before reading it. Each of those last
+// instructions writes its register only when it completes, so a handler
+// that catches its throw finds the variable's old value, as one that
+// catches a throw from an operand does. A call is not one: its result
+// register is fixed by the calling convention (callBase), and so is the
+// partial value an update or a logical, conditional or array expression
+// leaves.
+func lastOpWrites(e syntax.Expr) bool {
+	switch e := e.(type) {
+	case *syntax.BinaryExpr:
+		return true
+	case *syntax.UnaryExpr:
+		return e.Op != syntax.KwDelete && e.Op != syntax.KwVoid
+	case *syntax.MemberExpr:
+		return !isSuper(e) && !e.Optional
+	case *syntax.SeqExpr:
+		return lastOpWrites(e.Exprs[len(e.Exprs)-1])
+	}
+	return false
+}
+
 // logicalSkip emits the short-circuit jump of a logical assignment operator
 // and returns its label, or nil for other operators.
 func (f *funcState) logicalSkip(op syntax.Token, cur int) *label {
@@ -917,7 +995,7 @@ func (f *funcState) assignIdent(e *syntax.AssignExpr, target *syntax.Ident, dst 
 		name = ""
 	}
 	if e.Op == syntax.Assign {
-		if reg >= 0 && !mentions(e.Value, b) && f.intoReg(e.Value) {
+		if reg >= 0 && (!mentions(e.Value, b) && f.intoReg(e.Value) || lastOpWrites(e.Value)) {
 			f.exprNamed(e.Value, reg, name)
 			if want {
 				f.emitMove(dst, reg)

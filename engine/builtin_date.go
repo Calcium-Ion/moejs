@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"time"
+	"unsafe"
 )
 
 // Date (ES2024 §21.4, with Annex B getYear, setYear and toGMTString). The
@@ -45,6 +46,7 @@ func (o *Object) dateData() *DateData {
 // newDateObject creates a Date with prototype proto and time value tv.
 func (r *Realm) newDateObject(proto *Object, tv float64) *Object {
 	do := &dateObject{}
+	r.chargeObject(unsafe.Sizeof(dateObject{}))
 	o := &do.obj
 	r.markPrototype(proto)
 	o.shape = r.rootShapeFor(proto)

@@ -1,6 +1,9 @@
 package engine
 
-import "github.com/Calcium-Ion/moejs/bytecode"
+import (
+	"github.com/Calcium-Ion/moejs/bytecode"
+	"unsafe"
+)
 
 // Async iteration: for await and an async generator's yield* step their
 // iterator with ops that call, then check the awaited result, the await
@@ -208,6 +211,7 @@ type asyncFromSyncIter struct {
 // sync iterator it with next method next.
 func (r *Realm) newAsyncFromSyncIterator(it, next Value) Value {
 	w := &asyncFromSyncIter{it: it, next: next}
+	r.chargeObject(unsafe.Sizeof(asyncFromSyncIter{}))
 	proto := r.asyncIntr().AsyncFromSyncIteratorPrototype
 	o := initObject(&w.obj, ClassObject, r.rootShapeFor(proto))
 	o.internal = w

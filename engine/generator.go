@@ -1,6 +1,9 @@
 package engine
 
-import "github.com/Calcium-Ion/moejs/bytecode"
+import (
+	"github.com/Calcium-Ion/moejs/bytecode"
+	"unsafe"
+)
 
 // Generators (ECMA-262 §27.3, §27.5) run on the interpreter's register stack
 // like every bytecode function: no goroutine or Go stack is kept per
@@ -172,6 +175,7 @@ func (r *Realm) newGenerator(fn *Object, fd *FunctionData, this Value) (*Object,
 	}
 	r.markPrototype(proto)
 	gen := &generatorObject{g: genFrame{fn: fn, fd: fd, this: this, regs: make([]Value, fd.code.NumRegs)}}
+	r.chargeObject(unsafe.Sizeof(generatorObject{}) + uintptr(len(gen.g.regs)*valueSize))
 	o := initObject(&gen.obj, ClassGenerator, r.rootShapeFor(proto))
 	o.internal = &gen.g
 	return o, nil

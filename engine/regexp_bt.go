@@ -40,13 +40,14 @@ type btInput struct {
 }
 
 func newBTInput(s *String, unicode bool) btInput {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return btInput{s: s.s, n: len(s.s), unicode: unicode}
+	if f.kind == strASCII {
+		return btInput{s: f.s, n: len(f.s), unicode: unicode}
 	}
-	return btInput{u: s.u, wide: true, n: len(s.u), unicode: unicode}
+	return btInput{u: f.units(), wide: true, n: int(f.n), unicode: unicode}
 }
 
 func (in *btInput) unit(i int) rune {

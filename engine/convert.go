@@ -251,6 +251,9 @@ func ToInt32Float(f float64) int32 {
 	if f >= -2147483648 && f <= 2147483647 {
 		return int32(f) // truncates toward zero; handles -0
 	}
+	if f > -1<<63 && f < 1<<63 {
+		return int32(int64(f)) // the low 32 bits of the truncated value
+	}
 	if f != f || math.IsInf(f, 0) {
 		return 0
 	}
@@ -262,6 +265,9 @@ func ToInt32Float(f float64) int32 {
 func ToUint32Float(f float64) uint32 {
 	if f >= 0 && f <= 4294967295 {
 		return uint32(f)
+	}
+	if f > -1<<63 && f < 1<<63 {
+		return uint32(int64(f))
 	}
 	if f != f || math.IsInf(f, 0) {
 		return 0

@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // Async generators (ECMA-262 §27.6) combine the two suspensions: the frame
 // suspends at AsyncGenStart and AsyncYield the way a generator's does at
 // GenStart and Yield, and at Await the way an async function's does. The
@@ -46,6 +48,7 @@ func (r *Realm) newAsyncGenerator(fn *Object, fd *FunctionData, this Value) (*Ob
 	}
 	r.markPrototype(proto)
 	ag := &asyncGenerator{g: genFrame{fn: fn, fd: fd, this: this, regs: make([]Value, fd.code.NumRegs)}}
+	r.chargeObject(unsafe.Sizeof(asyncGenerator{}) + uintptr(len(ag.g.regs)*valueSize))
 	o := initObject(&ag.obj, ClassAsyncGenerator, r.rootShapeFor(proto))
 	o.internal = ag
 	return o, nil

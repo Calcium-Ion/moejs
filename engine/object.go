@@ -1,6 +1,9 @@
 package engine
 
-import "slices"
+import (
+	"slices"
+	"unsafe"
+)
 
 // Class is the object's exotic/internal kind.
 type Class uint8
@@ -294,6 +297,7 @@ func (r *Realm) newObject(class Class, shape *Shape) *Object {
 	} else {
 		o = new(Object)
 	}
+	r.chargeObject(unsafe.Sizeof(Object{}))
 	return initObject(o, class, shape)
 }
 
@@ -356,6 +360,7 @@ func (r *Realm) NewObjectCap(n int) *Object {
 	default:
 		o = &Object{slots: make([]Value, 0, n)}
 	}
+	r.chargeObject(unsafe.Sizeof(Object{}) + uintptr(cap(o.slots)*valueSize))
 	return initObject(o, ClassObject, r.plainRoot)
 }
 
@@ -407,13 +412,17 @@ func (o *Object) addNamed(r *Realm, key PropertyKey, cell propCell) {
 	if o.flags&flagDict == 0 {
 		if o.shape.count < maxShapeProps {
 			o.shape = o.shape.addProperty(r, key, cell.attrs)
-			o.slots = append(o.slots, cell.value)
+			c := cap(o.slots)
+			if o.slots = append(o.slots, cell.value); cap(o.slots) != c {
+				r.charge(cap(o.slots) * valueSize)
+			}
 			r.bumpEpoch(o)
 			return
 		}
 		o.toDictionary(r)
 	}
 	o.dict.add(key, cell)
+	r.charge(dictEntrySize)
 	r.bumpEpoch(o)
 }
 
@@ -461,6 +470,7 @@ func (o *Object) toDictionary(r *Realm) {
 	props := o.shape.Props()
 	o.dict.index = make(map[PropertyKey]int32, len(props)+8)
 	o.dict.entries = make([]dictEntry, 0, len(props)+8)
+	r.charge((len(props) + 8) * dictEntrySize)
 	for i, p := range props {
 		o.dict.add(p.key, propCell{value: o.slots[i], attrs: p.attrs})
 	}
@@ -529,16 +539,26 @@ func (o *Object) addIndex(r *Realm, i uint32, cell propCell) {
 		case int(i) < n:
 			o.elements[i] = cell.value
 		case int(i) == n:
-			o.elements = append(o.elements, cell.value)
+			o.elements = r.appendValue(o.elements, cell.value)
 		default:
-			o.elements = growWithHoles(o.elements, int(i)+1)
+			o.elements = r.growWithHoles(o.elements, int(i)+1)
 			o.elements[i] = cell.value
 		}
 		r.bumpEpoch(o)
 		return
 	}
 	o.sparseMap()[i] = cell
+	r.charge(sparseEntrySize)
 	r.bumpEpoch(o)
+}
+
+// growWithHoles is growWithHoles charging the storage it allocates.
+func (r *Realm) growWithHoles(elements []Value, n int) []Value {
+	c := cap(elements)
+	if elements = growWithHoles(elements, n); cap(elements) != c {
+		r.charge(cap(elements) * valueSize)
+	}
+	return elements
 }
 
 // growWithHoles extends elements to length n, filling new slots with holes.
@@ -613,7 +633,7 @@ func (o *Object) getOwnCell(key PropertyKey) (propCell, bool) {
 		case ClassString:
 			s := o.internal.(*String)
 			if i := key.Index(); int(i) < s.Len() {
-				return propCell{value: StringValue(s.Substring(int(i), int(i)+1)), attrs: attrEnumerable}, true
+				return propCell{value: StringValue(charString(s.At(int(i)))), attrs: attrEnumerable}, true
 			}
 		case ClassTypedArray:
 			return typedArrayOwnCell(o, key)
@@ -787,6 +807,9 @@ func (o *Object) Set(r *Realm, key PropertyKey, v Value, receiver Value) (bool, 
 					return true, nil
 				}
 			}
+			if o.setAbsentIndex(r, key.Index(), v) {
+				return true, nil
+			}
 		} else if o.class != ClassArray || key != lengthKey {
 			if o.flags&flagHasLazy == 0 || o.resolveLazyWrite(key) {
 				if p, attrs, ok := o.lookupNamed(key); ok && attrs&attrAccessor == 0 {
@@ -848,7 +871,66 @@ func (o *Object) Set(r *Realm, key PropertyKey, v Value, receiver Value) (bool, 
 		// forwarding its receiver): update it rather than redefine it.
 		return r.receiverSet(recv, key, v)
 	}
+	return o.createAbsent(r, key, v)
+}
+
+// createAbsent is CreateDataProperty(o, key, v) for a key o was just found
+// not to have. An ordinary extensible object gets the property directly:
+// ValidateAndApplyPropertyDescriptor of a new default data property only
+// checks extensibility. Lazy, shared, proxy and typed array objects, and
+// indices on objects other than arrays and ordinary ones, take
+// DefineOwnProperty.
+func (o *Object) createAbsent(r *Realm, key PropertyKey, v Value) (bool, error) {
+	if o.flags&(flagHasLazy|flagShared) == 0 && o.class != ClassProxy && o.class != ClassTypedArray {
+		if !key.IsIndex() {
+			if o.flags&flagExtensible == 0 {
+				return false, nil
+			}
+			o.addNamed(r, key, propCell{value: v, attrs: attrDefault})
+			return true, nil
+		}
+		if o.class == ClassObject || o.class == ClassArray {
+			if o.flags&flagExtensible == 0 || o.class == ClassArray && key.Index() >= o.internal.(*ArrayData).length && !o.internal.(*ArrayData).lengthWritable {
+				return false, nil
+			}
+			o.addIndex(r, key.Index(), propCell{value: v, attrs: attrDefault})
+			return true, nil
+		}
+	}
 	return o.DefineOwnProperty(r, key, DataDescriptor(v, attrDefault))
+}
+
+// setAbsentIndex is OrdinarySet of index i on o with o as the receiver when
+// it adds the element to the dense storage: o is an extensible array or
+// ordinary object without sparse elements, nothing on its prototype chain
+// has indexed properties (indexFreeProtos), and i is a hole in the storage
+// or the index right after it. An array's length grows past i if it is
+// writable. It reports whether it did.
+func (o *Object) setAbsentIndex(r *Realm, i uint32, v Value) bool {
+	n := len(o.elements)
+	if int(i) > n || int(i) < n && !o.elements[i].IsHole() ||
+		o.flags&(flagExtensible|flagHasLazy) != flagExtensible || o.dict != nil && o.dict.sparse != nil || !indexFreeProtos(o) {
+		return false
+	}
+	switch o.class {
+	case ClassArray:
+		if ad := o.internal.(*ArrayData); i >= ad.length {
+			if !ad.lengthWritable {
+				return false
+			}
+			ad.length = i + 1
+		}
+	case ClassObject:
+	default:
+		return false
+	}
+	if int(i) < n {
+		o.elements[i] = v
+	} else {
+		o.elements = r.appendValue(o.elements, v)
+	}
+	r.bumpEpoch(o)
+	return true
 }
 
 // SetProp is [[Set]] with the object as receiver, throwing a TypeError in

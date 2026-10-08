@@ -42,7 +42,7 @@ func TestDynamicSourceRopeOverLimit(t *testing.T) {
 	for _, unit := range []string{"x", "é"} {
 		s := FromGoString(unit)
 		for s.Len() < 1<<24 {
-			s = concat(s, s)
+			s = ropeOf(s, s)
 		}
 		for _, c := range []struct {
 			name string
@@ -57,7 +57,7 @@ func TestDynamicSourceRopeOverLimit(t *testing.T) {
 				_, err := r.Call(c.fn, Undefined(), c.args)
 				assert.EqualError(t, err, fmt.Sprintf("RangeError: Source text of %d code units is longer than the %d bytes this realm compiles at run time (MaxDynamicSource)", c.want, DefaultMaxDynamicSource))
 				assert.Equal(t, strRope, s.kind, "not flattened")
-				assert.NotNil(t, s.left)
+				assert.NotNil(t, s.p)
 			})
 		}
 	}

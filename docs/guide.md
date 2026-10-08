@@ -28,7 +28,48 @@ converts its data once, and a host without a pool skips the step.
 
 Values already returned stay valid. Data the module stored stays alive along
 with everything it references, so an object the module kept from an argument
-can keep the whole argument alive.
+can keep the whole argument alive. A `json.RawMessage` is copied when it
+is converted, so the host can reuse its buffer for the next request. A Go
+map or slice that the module stores before reading it still refers to the
+host's values, `json.RawMessage` bytes inside it included, and those must
+not change while the module keeps it.
+
+### Memory
+
+Until `ReleaseCallData`, a runtime keeps each request's input and output.
+The input is the copy of the text that `ParseJSON` makes, or for `FromGo`
+the host's own Go values, which it refers to rather than copies. The
+exceptions are a `json.RawMessage`, whose text `FromGo` copies, and the
+types it converts from their `json.Marshal` text. The live heap therefore
+grows with the number of requests in flight times the size of one request,
+on top of what the host itself keeps of each request. `ParseJSONString`,
+and `FromGo` of the host's maps, slices and strings, add no copy of the
+input's ASCII strings that have no escapes, such as base64 data. Strings
+that are not ASCII are held as UTF-16 either way.
+
+Under the default `GOGC=100`, a Go process's resident memory runs at
+roughly twice its live heap, because the collector lets the heap grow by
+as much as is live before it collects again. It runs higher with many
+goroutines, and when long collection cycles overlap with contention for
+the CPU.
+
+To cap memory, set `GOMEMLIMIT` well above the expected peak live heap,
+since the limit counts all of the Go runtime's memory and not the heap
+alone, and keep `GOGC` at its default. Throughput is then unaffected until
+the process nears the limit. A `GOMEMLIMIT` below the live heap makes the
+collector run continuously, and throughput drops sharply. Lowering `GOGC`
+trades throughput for memory across the whole process.
+
+As an example, take an 8.1 MB JSON body with five base64 images, 32
+requests in flight with `GOMAXPROCS=8`, and a host that keeps each body
+until its request is done (Intel i5-13500H, Linux, go1.26.6, medians of 3
+runs of 10 seconds). With `ParseJSON` the live heap was about 500 MB and
+the resident memory about 1.1 GB. With `ParseJSONString` they were about
+330 MB and 740 MB, and the process served 1.5 times as many requests per
+second. Still with `ParseJSONString`, `GOMEMLIMIT=768MiB` left the requests
+per second as they were, `GOMEMLIMIT=256MiB`, below the live heap, cut them
+by 38%, and `GOGC=25` cut them by 9% and the resident memory to about
+410 MB.
 
 ### Interrupts
 
@@ -40,15 +81,132 @@ interrupt while they work.
 An interrupt that arrives while nothing runs stops the next call, so the
 host calls `ClearInterrupt` before it reuses the runtime.
 
+A runtime that an event loop runs (`eventloop`, below) is interrupted
+through `Loop.Interrupt`. `Runtime.Interrupt` alone stops the JavaScript
+that is running, but does not wake a loop that sleeps until its next timer.
+
+### Memory limit
+
+`Options.MemoryLimit` caps the bytes one request's JavaScript may allocate
+between resets. `ReleaseCallData` resets the count, and so does
+`ResetAllocation`, for a host without a pool. A call that passes the limit
+stops as an interrupt does: it returns an `*InterruptedError` whose value is
+a `*MemoryLimitError` carrying the limit, the bytes counted and the
+JavaScript stack at the allocation, and `errors.Is(err, moejs.ErrMemoryLimit)`
+holds.
+
+```go
+rt := moejs.NewRuntime(moejs.Options{MemoryLimit: 64 << 20})
+res, err := rt.Call(hook, arg)
+if errors.Is(err, moejs.ErrMemoryLimit) {
+	var mle *moejs.MemoryLimitError
+	errors.As(err, &mle)
+	log.Printf("plugin used %d bytes, limit %d\n%s", mle.Allocated, mle.Limit, mle.Stack)
+}
+rt.ClearInterrupt()
+rt.ReleaseCallData() // a new budget for the next request
+pool.Put(rt)
+```
+
+A script cannot catch the hit. The engine allocates without failing, so the
+only way to stop a script that allocates is an interrupt, and an interrupt
+runs no `catch` or `finally` and drops the queued promise jobs. A script that
+caught it could go on allocating. The builtins that know a result's size
+before they allocate it throw the `RangeError` they throw for a size past
+the engine's limits for a size past what is left of the budget instead, and
+a script can catch that: `repeat`, `padStart` and `padEnd`, `new
+ArrayBuffer`, typed array constructors, `btoa`, `escape`, `toBase64` and
+`toHex`.
+
+The count is of allocation, not of live memory: garbage counts until the
+next reset, and nothing a request frees is taken off. It covers objects,
+the storage their properties and elements grow into, strings, `Map` and
+`Set` tables, buffers, `BigInt` results, closures' environments and code
+compiled by `eval` and `Function`, each by about what it asks the Go
+allocator for. A rope, the result of joining two
+long strings, counts its node, and its units once it is read and flattened.
+`FromGo` counts the wrappers it makes for the host's maps and slices but not
+the host's Go values, which it refers to without copying; `ParseJSON`
+counts its copy of the text. A few internal caches of bounded size are not
+counted, nor is the interpreter's register stack, which the call depth
+limit bounds and `ReleaseCallData` trims. Expect the count to run within a small factor of what the request
+allocates, and set the limit with room.
+
+Setup does not count against the first request: `Load` and `SetGlobal`
+are setup, and each ends by resetting the count when it succeeds (for
+`Load`, also when it returns `ErrModulePending`). A failed `Load` leaves
+the count and the hit's error in `Stats` for the host to read. Called from
+a host function, `SetGlobal` does not reset, which would give the running
+script a new budget. A host that sets a global for each request sets it
+before the request's first `Call`: between two hooks of one request, the
+reset would let the request allocate the limit again. The limit bounds what
+one request allocates, not what the module keeps from request to request; a
+runtime that grows across requests is better discarded.
+
+After a hit the runtime is reusable: `ClearInterrupt` and `ReleaseCallData`
+leave it as a pooled runtime after any request. A host that would rather not
+trust the module's state, which the hit may have left half-updated, drops
+the runtime. Clearing the interrupt without a reset leaves the budget spent,
+and the next allocation stops the runtime again.
+
+The hit is the runtime's single pending interrupt, so a host's own
+`Interrupt` (a timeout) from another goroutine can replace it, and the call
+then returns the host's error. `Stats().MemoryLimitHits` counts the hit
+either way, and `Stats().LastMemoryLimitError` keeps its error until the
+next reset.
+
+With no limit the runtime keeps no count, and each place that would charge
+an allocation costs two loads and two branches.
+
+Under `eventloop`, the loop gives each timer or immediate callback and each
+task a new budget, so the limit applies to a macrotask and the promise jobs
+it queues.
+
+### Counters
+
+`rt.Stats()` returns the runtime's counters, each read in constant time. A
+host reads them on the goroutine that uses the runtime, between requests or
+from a host function during one:
+
+- `AllocatedBytes`, `Objects`, `Strings`, `Shapes`: what was counted since
+  the limit was set, and `RequestAllocatedBytes` since the last reset.
+  They count only while a limit is set; a limit of `math.MaxInt64` counts
+  without limiting.
+- `MemoryLimitHits` and `LastMemoryLimitError`, above.
+- `Interrupts`: the calls of `Interrupt`, hits included.
+- `ICEntries`: the inline cache entries of the functions that ran.
+- `PendingJobs`: the queued promise jobs and microtasks.
+- `RegisterStackBytes`: the size of the interpreter's register stack.
+
+A pool can export them when it takes a runtime back:
+
+```go
+st := rt.Stats()
+metrics.Observe("plugin_request_bytes", st.RequestAllocatedBytes)
+rt.ReleaseCallData()
+```
+
+A host function can give them to the module:
+
+```go
+rt.SetGlobal("memoryUsage", moejs.NativeFunc(func(r *moejs.Realm, this moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	return moejs.Int(r.Stats().RequestAllocatedBytes), nil
+}))
+```
+
+A host function that allocates for JavaScript on its own can count that
+too, with `Realm.ChargeMemory(n)`, which returns the interrupt's error once
+the limit is passed.
+
 ### Objects belong to one runtime
 
 Objects that a runtime's JavaScript creates belong to that runtime. Using an
 object of another runtime can run that runtime's code, so pass only Go values
 and JSON between runtimes.
 
-`Call`, `SetGlobal`, `FromGo` and the settle functions of `NewPromise` return
-`ErrForeign` for a function or generator of another runtime, or for a bound
-function or proxy of one. Inside the Go containers that `FromGo` converts,
+`Call`, `CallFunction`, `SetGlobal`, `FromGo` and the settle functions of
+`NewPromise` return `ErrForeign` for a function or generator of another
+runtime, or for a bound function or proxy of one. Inside the Go containers that `FromGo` converts,
 reading such a function throws a `TypeError` with `ErrForeign`'s message.
 
 The check covers the value passed and the members of Go containers. It skips
@@ -69,6 +227,16 @@ own properties.
 A path that leads nowhere gives `ErrHookNotFound`, and a path that ends at a
 value other than a function gives `ErrNotCallable`. `Has` returns false for
 both.
+
+### Function values
+
+`CallFunction(fn, this, args...)` calls a function value the host got
+earlier, such as a callback that a plugin passed to a host function. It
+checks what `Call` checks. A value that is not a function gives
+`ErrNotCallable`, a function of another runtime gives `ErrForeign`, and an
+interrupt stops the call before a host function runs. The jobs the call
+queues run before it returns. Called from inside a host function, it leaves
+them to the end of the outermost call.
 
 ### Module graphs
 
@@ -128,6 +296,71 @@ imp := &moejs.Importer{Resolve: func(referrer moejs.Referrer, specifier string) 
 	return host.module(specifier)
 }}
 rt := moejs.NewRuntime(moejs.Options{Importer: imp}) // one imp for every runtime
+```
+
+### TypeScript
+
+`CompileTS(name, source)` compiles a TypeScript module. The parser drops the
+type syntax as it reads it, as Node's type stripping does, and the module
+runs as the JavaScript that is left. Nothing is type-checked.
+
+The parser erases:
+
+- type annotations, type parameters and type arguments, `as`, `satisfies`,
+  `x!` and `<T>x`;
+- `interface` and `type` declarations, everything after `declare`, function
+  overload signatures, and namespaces that hold only types;
+- `import type`, `export type` and specifiers marked `type`;
+- a `this` parameter, which does not count in the function's `length`;
+- the TypeScript modifiers of class members (`public`, `private`,
+  `protected`, `readonly`, `override`, `abstract`, `declare`), index
+  signatures, and methods without a body. A `declare` or `abstract` field
+  produces nothing. A field with only a type stays a field, initialized to
+  `undefined`, as tsc emits it for ES2022 and later.
+
+TypeScript that has run-time semantics fails with a `*SyntaxError` that
+names it: `enum` and `const enum` outside `declare`, a namespace with
+values, constructor parameter properties (`constructor(private x: T)`),
+`import x = require("m")`, `export import x = A.B`, an alias
+`import x = A.B` used as a value, `export =`, `export as namespace`, and
+`accessor` fields. Decorators are not
+supported, as in JavaScript. TSX is not supported.
+
+As tsc does, the compiler drops an import specifier whose binding no
+expression reads, and an import declaration left without bindings.
+`import "m"` stays. A reference in a type, `typeof x` included, does not
+count as a read. `export { T }` and `export default T` are dropped when `T`
+names only a type. So a module may import types and values from one
+package by name, and the host's module for that package needs to export
+only the values.
+
+Errors and stack traces refer to the TypeScript text, so no source map is
+needed. `Function.prototype.toString` returns the function's TypeScript
+source, types included; Node returns it with the types blanked out.
+
+A host that compiles TypeScript it does not trust should cap the length of
+the source. Telling an arrow function from a parenthesised expression can
+take time quadratic in the nesting: conditionals nested in the true
+branches of each other as `a ? (b): T => a ? (b): T => …` take about
+1.5 s at 2,000 levels and a few seconds just below the nesting limit, and
+the cost adds up over every such expression of a source. `Runtime.Interrupt`
+does not stop `CompileTS` or `Compile`, which the host calls itself.
+
+A `Resolver` or an `Importer` picks the compiler per module, for example by
+file extension. Modules from `CompileTS` and from `Compile` link with each
+other.
+
+```go
+resolve := func(referrer moejs.Referrer, specifier string) (*moejs.Module, error) {
+	src, err := host.read(specifier)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(specifier, ".ts") {
+		return moejs.CompileTS(specifier, src)
+	}
+	return moejs.Compile(specifier, src)
+}
 ```
 
 ### Scripts
@@ -198,8 +431,26 @@ Objects converted from Go maps enumerate their keys in sorted order.
 A `[]byte` becomes an `ArrayBuffer` over the same bytes, so JavaScript writes
 to it change the Go slice.
 
-Structs and other types return an error. Marshal them to JSON and pass the
-bytes to `ParseJSON`.
+A named type whose underlying type is in that list converts as that type:
+`type Settings map[string]any` becomes a lazy map, and `type Status string`
+a string.
+
+Other types that `encoding/json` writes, such as structs, pointers,
+`map[string]int` and `[]map[string]string`, convert from their
+`json.Marshal` text, which the engine parses once. Struct tags and
+`MarshalJSON` methods apply as they do in `json.Marshal`, and a `[]byte`
+field becomes a base64 string. The result is a snapshot taken when `FromGo`
+runs, or, for a value inside a Go map or slice, when JavaScript first reads
+that container. Later changes to the struct are not seen.
+
+Channels, functions other than `NativeFunc`, complex numbers and values that
+`json.Marshal` rejects return an error. So do an `error` and a struct none
+of whose fields `json.Marshal` writes, such as a `sync.Mutex` or a
+`context.Context`, unless the type has a `MarshalJSON` or `MarshalText`
+method: `json.Marshal` would write them as `{}` or as a text that says
+nothing about them. Pass `err.Error()` for an error. A struct with no fields
+at all is `{}`. Inside a container, reading such a member throws a
+`TypeError`.
 
 `SetGlobal(name, v)` converts `v` the same way, so a host can install a
 namespace of functions as a `map[string]any` of `NativeFunc` values.
@@ -210,7 +461,35 @@ namespace of functions as a `map[string]any` of `NativeFunc` values.
 
 `ParseJSON(b)` runs `JSON.parse` on the bytes. Use it for arguments the host
 holds as JSON, such as stored task data or a request body. It copies the
-bytes into a string first.
+bytes into a string first, so the host can reuse them once it returns.
+
+`ParseJSONString(s)` parses a string without that copy when it is valid
+UTF-8, and strings in the result can share the memory of `s`. A host that
+holds the text as a `[]byte` can pass
+`unsafe.String(unsafe.SliceData(b), len(b))` if it never modifies the bytes
+before `ReleaseCallData`, nor while it or the module keeps values derived
+from them. Nothing checks this; the host is responsible for it.
+
+`FromGo` also takes a `json.RawMessage`, alone or as a member of a
+`map[string]any` or `[]any`, and JavaScript gets `JSON.parse` of its text.
+It is converted from a copy of the text, made when `FromGo` runs or, for a
+member, when JavaScript first reads its container. After that the host may
+reuse the bytes. The text of an object or an array is checked when it is
+converted and parsed when JavaScript first reads the value, so a hook that
+never reads it never pays for the parse. Other text is parsed at once.
+Invalid text is a `SyntaxError`: `FromGo` returns it for a top-level value,
+and reading the member throws it inside a container. A nil
+`json.RawMessage` is `null`. A `json.RawMessage` that JavaScript has not
+read comes back from `ToGo` as a new `json.RawMessage` with the text.
+
+Typed containers of `json.RawMessage`, such as `[]json.RawMessage`,
+`map[string]json.RawMessage`, a `*json.RawMessage` or a struct field, go
+through `json.Marshal` like any other type, and are parsed at once.
+
+`ParseJSON` and `ParseJSONString` are the cheaper choice for a text the hook
+always reads: they parse the text once, and `ParseJSON` copies it once. A
+`json.RawMessage` copies and checks the text, and parses it only when the
+hook reads it, so it pays off for a text the hook may not read.
 
 ### Go values out
 
@@ -277,16 +556,59 @@ whose value is `undefined` stays, as `null`. A -0 stays -0. NaN and
 ±Infinity are an error. `toJSON` is not called. As with `ToGo`, an
 interrupt stops it only while a getter runs.
 
+A `json.RawMessage` in the target receives the JSON text of its part of the
+value, while the rest of the target is still filled directly. It can be a
+field, a pointer, a map value, a slice element or the target itself. The
+bytes are the ones the round trip gives it: `AppendJSON`'s text for
+`Unmarshal`, and for `ToGoInto` the `json.Marshal` text of `ToGo`'s result,
+with keys sorted and `<`, `>` and `&` escaped. Like `json.Unmarshal`, it
+writes into the `json.RawMessage`'s own array when the text fits. For
+`ToGoInto`, a `json.RawMessage` argument that the hook returns unread is not
+parsed: the target receives its text as `json.Marshal` compacts it. Any
+other type that unmarshals itself still sends the whole value through the
+round trip.
+
+### Bounding a result
+
+`UnmarshalWith`, `ToGoIntoWith` and `ToGoWith` take `DecodeOptions` that
+limit the JSON text of the result. `MaxBytes` limits its length, and
+`MaxNodes` the number of values in it: objects, arrays, strings, numbers,
+booleans and null, but not keys. The text is the one the round trip writes,
+which is `AppendJSON`'s for `UnmarshalWith` and the `json.Marshal` text of
+`ToGo`'s result for the other two. The counts are exact: a result whose text
+has `n` bytes passes `MaxBytes: n` and fails `MaxBytes: n-1`. A zero field
+sets no limit.
+
+A result past a limit returns an error that wraps `ErrTooLarge`, and the
+target keeps its old contents. The value is counted before anything is
+decoded, without writing the text, when it can be read without running
+JavaScript: plain objects, arrays and arguments from `FromGo`. A
+`json.RawMessage` argument the hook returns unread is the one exception for
+`UnmarshalWith`: `AppendJSON` writes the text of the value it parses to, so
+it is parsed to be counted, unless a quick scan of it already shows a text
+past the limit. `ToGoIntoWith` and `ToGoWith` count its text without a
+parse. A value that needs JavaScript to be read, such as a `toJSON`, a
+getter or a proxy, is counted on the text once the round trip has written
+it, or for `ToGoWith` on the result of `ToGo`, but still before anything is
+decoded. A cycle, and nesting deeper than 10,000 levels, passes every
+limit.
+
+With no limit set, these functions are `Unmarshal`, `ToGoInto` and `ToGo`,
+at the same cost.
+
 ### Strings kept after the request
 
 Strings that `ToGo`, `Unmarshal` and `ToGoInto` return from a value
-`ParseJSON` produced can share memory with the parsed text and keep it
-alive. Call `strings.Clone` on the strings the host keeps.
+`ParseJSON` or `ParseJSONString` produced, or from a `json.RawMessage`
+argument, can share memory with the parsed text (for `ParseJSONString`, the
+host's string; for a `json.RawMessage`, the runtime's copy of it) and keep
+it alive. So can `String()` of a string value. Call `strings.Clone` on the
+strings the host keeps.
 
 ### Nesting
 
-`ParseJSON`, `ToGo` and `AppendJSON` return a `RangeError` when arrays and
-objects nest deeper than 10,000 levels.
+`ParseJSON`, `ParseJSONString`, `ToGo` and `AppendJSON` return a
+`RangeError` when arrays and objects nest deeper than 10,000 levels.
 
 ## Promises and errors
 
@@ -296,6 +618,13 @@ objects nest deeper than 10,000 levels.
 functions that settle it later. `PromiseResult` reads a promise's state and
 result. `SetPromiseRejectionTracker` reports rejections that no handler
 caught, like Sobek's tracker.
+
+`ThrownValue(err)` returns the value that a host function returning `err`
+throws. A host rejects a promise with it to give JavaScript the same
+`Error`, which unwraps to `err` when it comes back as an `*Exception`.
+
+The settle functions run only on the goroutine that uses the runtime. The
+`eventloop` package (below) settles promises from other goroutines.
 
 ### Errors
 
@@ -307,13 +636,185 @@ When a host function returns a Go error, JavaScript sees a thrown `Error`
 whose message is the error's text. The resulting `*Exception` unwraps to the
 original Go error.
 
-An interrupt is an `*InterruptedError`. A malformed module or script is a
+An interrupt is an `*InterruptedError`. It unwraps to the interrupt's value
+when that value is an error, so a host that calls
+`Interrupt(context.Cause(ctx))` finds `context.DeadlineExceeded`, or its own
+cause, with `errors.Is` and `errors.As`. A malformed module or script is a
 `*SyntaxError` with its position. A Go panic during a call, for example in a
 host function, is an `*InternalError`, and the runtime can still be used
 afterwards.
 
+A `Call` or `CallFunction` made inside a host function returns the
+`*InternalError` of a panic below it to that host function. If the host
+function returns the error, JavaScript sees it thrown as an `Error` that it
+can catch, like any other Go error.
+
 `Runtime.StackTrace(exc)` returns the V8-format `stack` of a thrown `Error`,
 also without running JavaScript.
+
+## Event loop and timers
+
+### Running a loop
+
+A bare `Runtime` has no timers. The `eventloop` package adds them, along
+with an event loop that owns the runtime while it runs:
+
+```go
+loop, err := eventloop.New(rt, eventloop.Options{})
+err = loop.Run(func(rt *moejs.Runtime) error {
+	_, err := rt.RunScript(script) // the script may call setTimeout
+	return err
+})
+```
+
+`New` installs `setTimeout`, `clearTimeout`, `setInterval`,
+`clearInterval`, `setImmediate` and `clearImmediate` as globals. `Run`
+calls the function, then runs timers, immediates and posted tasks on the
+same goroutine. It returns when nothing keeps the loop alive: no ref'd
+timer or immediate, no `Hold` that is not done, no promise of `NewPromise`
+that is not settled and no task that has not run.
+
+A module whose top-level `await` waits for a timer makes `Load` return
+`ErrModulePending`. The loop runs the timer later and the module finishes
+then, so the function passed to `Run` treats that error as success.
+
+`Start` runs the loop on a new goroutine instead. That loop stays alive
+while idle, until `Stop` or `Terminate`.
+
+### Phases
+
+Each iteration has three phases, like Node's timers, poll and check phases:
+
+1. The timers due when the phase starts, in order of expiry, then of
+   scheduling.
+2. The tasks posted before the phase starts: `RunOnLoop`, the `done`
+   function of `Hold` and the settle function of `NewPromise`.
+3. The immediates set before the phase starts.
+
+Work that a phase adds waits for a later iteration. A delay is at least
+1 ms, so a timer that a timer callback sets runs in a later iteration. The
+promise jobs and `queueMicrotask` callbacks that a callback queues run when
+it returns, before the next callback. With nothing to run, the loop sleeps
+until the next timer is due or a task arrives.
+
+### Node compatibility
+
+The timers follow Node.js, because the code that needs them is written for
+Node:
+
+- `setTimeout` and `setInterval` return a `Timeout` object with `ref`,
+  `unref`, `hasRef`, `refresh`, `close` and `[Symbol.toPrimitive]`, which
+  returns a numeric id. `setImmediate` returns an `Immediate` with `ref`,
+  `unref` and `hasRef`.
+- A callback gets the extra arguments, and the `Timeout` or `Immediate` as
+  `this`. A callback that is not a function throws a `TypeError` with the
+  code `ERR_INVALID_ARG_TYPE`. A string is not evaluated.
+- The delay goes through `ToNumber` and is truncated to whole milliseconds.
+  NaN, a delay below 1 and a delay above 2147483647 become 1 ms.
+- An interval is rescheduled for its delay after the time its callback
+  started. `refresh` restarts a timer's delay from now, and runs a timeout
+  that already fired again.
+- `clearTimeout` and `clearInterval` take a `Timeout`, or its id as a
+  number or a string once the id has been read. `clearImmediate` takes an
+  `Immediate`. All three ignore anything else, and work inside the timer's
+  own callback.
+- An unref'd timer or immediate does not keep `Run` alive. It runs only
+  while something else does.
+
+Some details differ from Node. The `Timeout` and `Immediate` objects have
+no own properties: `JSON.stringify` gives `{}`, and `constructor.name` is
+`"Object"`. Their methods throw a `TypeError` when called on another object,
+including a `Proxy` of one, and a `Timeout` has no `Symbol.dispose` method.
+Timers expire in the order of their exact due times, where Node compares
+whole milliseconds. `timers/promises`, the `AbortSignal` options and
+`util.promisify` are not provided.
+
+### Asynchronous host functions
+
+While the loop runs, only its goroutine uses the runtime. Other goroutines
+hand it work in three ways:
+
+- `RunOnLoop(fn)` posts `fn`. It returns false once the loop is
+  terminated.
+- `Hold()` keeps the loop alive until its `done(fn)` is called, which posts
+  `fn`.
+- `NewPromise()`, which a host function calls on the loop, returns a
+  promise and a `settle` function. `settle(f)` runs `f` on the loop. A
+  value fulfills the promise, and a Go error rejects it with the `Error` a
+  host function's error throws (`ThrownValue`).
+
+`done` and `settle` can be called from any goroutine. The first call counts,
+and later calls do nothing. Take a hold on the loop, in a host function or a
+callback. A hold taken on another goroutine races with a `Run` that has
+nothing else left, and almost always loses: it then keeps only the next
+`Run` alive.
+
+```go
+rt.SetGlobal("fetchJSON", moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	url := moejs.Arg(args, 0).String()
+	p, settle := loop.NewPromise()
+	go func() {
+		body, err := download(url) // blocking work runs off the loop
+		settle(func(rt *moejs.Runtime) (moejs.Value, error) {
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return rt.ParseJSON(body)
+		})
+	}()
+	return p, nil
+}))
+```
+
+### Errors
+
+These errors stop the loop, and `Run` returns them: a callback's exception,
+the first exception of the jobs after it (from a `queueMicrotask` callback,
+for example), a Go panic in a host function, and a failure of `settle`. An
+uncaught exception ends a Node.js process too. With `Options.OnError` set,
+the loop passes these errors to it and keeps running. An error from `Run`'s
+own function ends `Run` at once.
+
+An interrupt always stops the loop, before it takes the next timer, task or
+immediate off its queues, which keep them. `Run` returns the
+`*InterruptedError`. `Loop.Interrupt(v)` interrupts the runtime and wakes
+the loop; `Runtime.Interrupt` alone leaves a sleeping loop asleep until its
+next timer. The interrupt stays pending, so the host calls `ClearInterrupt`
+before it runs the loop again.
+
+A panic in a host task (the functions of `RunOnLoop`, `done` and `settle`,
+or `OnError`) is not recovered. It unwinds through `Run`, and ends the
+program for a loop started with `Start`. The tasks and immediates of the
+phase that had not run stay queued for the next `Run`. The task that
+panicked is gone, and a promise whose settle function panicked stays
+pending.
+
+A rejection that no handler catches is the host's business, through
+`SetPromiseRejectionTracker`.
+
+### Stopping and reuse
+
+`Stop` ends the loop after the callback it is running and waits for the loop
+to end. It returns what ended that run, as `Run` would: `nil`, the error
+that stopped it, the `*InterruptedError` of an interrupt or
+`ErrTerminated`. That is how a host learns of an error that stopped a loop
+started with `Start`. `StopNoWait` does not wait, so a callback on the loop
+can call it. `Stop` and `Terminate` must not be called on the loop, which
+includes the function passed to `Run`, because they would wait for
+themselves.
+
+When `Run` returns or the loop stops, the runtime is the host's again. What
+is still pending stays pending, such as an unref'd timer, or everything a
+stop, an error or an interrupt left. The next `Run` or `Start` continues it. JavaScript
+that the host runs in between, with `Call` for example, can set more timers.
+
+`Terminate` ends the loop for good. It interrupts the runtime with
+`ErrTerminated`, which stops the running JavaScript, drops every pending
+timer, immediate and task, and waits for the loop to end. Afterwards `Run`
+returns `ErrTerminated`, `RunOnLoop` returns false and the timer functions
+throw. The interrupt stays pending even when no JavaScript was running, so
+the host calls `ClearInterrupt` before it uses the runtime again. Another
+`New` gives the runtime a fresh loop.
 
 ## Isolation
 

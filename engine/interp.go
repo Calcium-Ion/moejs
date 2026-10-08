@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"unicode/utf8"
+	"unsafe"
 	"weak"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
@@ -161,7 +162,6 @@ func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, n
 }
 
 func init() {
-	runFunction = interpRun
 	constructFunction = interpConstruct
 	defaultStackCapture = captureStack
 	defaultStackCaptureInto = captureStackInto
@@ -291,6 +291,7 @@ func (r *Realm) newClosure(code *bytecode.Function, meta *funcMeta, env *Env, th
 	fd.env = env
 	fd.meta = meta
 	fd.icBase = icUnbound
+	fd.plain = !code.HasRest && !code.HasArguments && len(code.CaptureLayout) == 0
 	fd.thisValue = Undefined()
 	switch code.Kind {
 	case bytecode.KindArrow:
@@ -310,6 +311,7 @@ func (r *Realm) newClosure(code *bytecode.Function, meta *funcMeta, env *Env, th
 func (o *Object) materializePrototype(slot *Value) {
 	r := o.internal.(*FunctionData).realm
 	po := &protoObject{}
+	r.chargeObject(unsafe.Sizeof(protoObject{}))
 	p := &po.obj
 	p.shape = r.plainRoot.addProperty(r, StringKey(AtomConstructor), attrHidden)
 	p.proto = r.ObjectPrototype
@@ -328,17 +330,12 @@ func (o *Object) materializePrototype(slot *Value) {
 // round unbinds those no frame runs (dynamic.go).
 const icUnbound = ^uint32(0)
 
-// interpRun implements [[Call]] for bytecode functions (runFunction).
-func interpRun(r *Realm, fn *Object, fd *FunctionData, this Value, args []Value) (Value, error) {
-	return r.enterFrame(fn, fd, this, args)
-}
-
 // interpConstruct implements [[Construct]] for bytecode functions.
 func interpConstruct(r *Realm, fn *Object, fd *FunctionData, args []Value, newTarget *Object) (Value, error) {
 	if fd.code.NewTarget {
 		return r.constructNT(fn, fd, args, newTarget)
 	}
-	obj, err := r.OrdinaryCreateFromConstructor(newTarget, r.ObjectPrototype, ClassObject)
+	obj, err := r.constructThis(newTarget)
 	if err != nil {
 		return Undefined(), err
 	}
@@ -346,41 +343,91 @@ func interpConstruct(r *Realm, fn *Object, fd *FunctionData, args []Value, newTa
 	if err != nil {
 		return Undefined(), err
 	}
-	if res.IsObject() {
-		return res, nil
+	if !res.IsObject() {
+		res = ObjectValue(obj)
 	}
-	return ObjectValue(obj), nil
+	if fn == newTarget {
+		noteCtorSlots(fd, res)
+	}
+	return res, nil
 }
 
 // enterFrame reserves a register window, binds arguments and the closure
 // environment, and runs the function. It allocates only when the stack or
 // frame table must grow, when the function has captured bindings (its Env)
-// or a rest parameter (its array).
+// or a rest parameter (its array). Nothing but run is called on the path of
+// an ordinary call, so the arguments stay in registers: the interrupt
+// check, the first call's IC binding and stack growth are enterFrameSlow's,
+// a rest array, arguments object or captured binding enterFrameExtra's.
 func (r *Realm) enterFrame(fn *Object, fd *FunctionData, this Value, args []Value) (Value, error) {
-	if r.interruptFlag.Load() != 0 {
-		return Undefined(), r.interruptError()
-	}
 	code := fd.code
-	if fd.icBase == icUnbound {
-		if fd.meta.dyn != 0 {
-			return r.enterDynamic(fn, fd, this, args)
-		}
-		fd.icBase = r.icBaseFor(fd.meta, code.ICCount)
-	}
 	st := &r.interp
+	if r.interruptFlag.Load() != 0 || fd.icBase == icUnbound || st.sp+int(code.NumRegs) > len(st.stack) {
+		if res, done, err := r.enterFrameSlow(fn, fd, this, args); done {
+			return res, err
+		}
+	}
 	base := st.sp
 	top := base + int(code.NumRegs)
-	if top > len(st.stack) {
-		r.growStack(top)
-	}
 	regs := st.stack[base:top:top]
 	np := int(code.NumParams)
 	n := min(np, len(args))
-	copy(regs, args[:n])
+	dst, src := regs[:n], args[:n]
+	for i := range src {
+		dst[i] = src[i]
+	}
 	u := Undefined()
 	for i := n; i < np; i++ {
 		regs[i] = u
 	}
+	env := fd.env
+	if !fd.plain {
+		env = r.enterFrameExtra(code, fd.env, regs, args)
+	}
+	if code.Kind == bytecode.KindArrow {
+		this = fd.thisValue
+	}
+	fi := st.nframes
+	if fi == len(st.frames) {
+		r.growFrames()
+	}
+	st.frames[fi] = frameInfo{fn: fn, base: uint32(base)}
+	st.nframes = fi + 1
+	st.sp = top
+	res, err := r.run(fi, fd, base, env, this, fn)
+	st.sp = base
+	st.nframes = fi
+	return res, err
+}
+
+// enterFrameSlow prepares enterFrame's frame when an interrupt is pending,
+// the closure's inline caches are unbound or the register stack must grow.
+// done reports a call it finished itself: the interrupt's error, or the
+// whole call of a closure of dynamic code (enterDynamic). It returns to
+// enterFrame rather than calling it, so a first call is no deeper on the Go
+// stack than the next ones.
+func (r *Realm) enterFrameSlow(fn *Object, fd *FunctionData, this Value, args []Value) (res Value, done bool, err error) {
+	if r.interruptFlag.Load() != 0 {
+		return Undefined(), true, r.interruptError()
+	}
+	if fd.icBase == icUnbound {
+		if fd.meta.dyn != 0 {
+			res, err = r.enterDynamic(fn, fd, this, args)
+			return res, true, err
+		}
+		fd.icBase = r.icBaseFor(fd.meta, fd.code.ICCount)
+	}
+	if top := r.interp.sp + int(fd.code.NumRegs); top > len(r.interp.stack) {
+		r.growStack(top)
+	}
+	return Undefined(), false, nil
+}
+
+// enterFrameExtra binds the rest array and the arguments object of a frame
+// and returns its environment: a new one when the function has captured
+// bindings, else env.
+func (r *Realm) enterFrameExtra(code *bytecode.Function, env *Env, regs, args []Value) *Env {
+	np := int(code.NumParams)
 	if code.HasRest {
 		var rest []Value
 		if len(args) > np {
@@ -396,31 +443,24 @@ func (r *Realm) enterFrame(fn *Object, fd *FunctionData, this Value, args []Valu
 		}
 		regs[i] = ObjectValue(r.newArguments(args))
 	}
-	env := fd.env
 	if layout := code.CaptureLayout; len(layout) > 0 && code.Kind != bytecode.KindModule && code.Kind != bytecode.KindScript {
-		env = newEnvSized(fd.env, len(layout))
+		env = newEnvSized(env, len(layout))
+		r.charge(int(unsafe.Sizeof(Env{})) + len(layout)*valueSize)
 		for i, reg := range layout {
 			if reg != bytecode.NoRegister {
 				env.slots[i] = regs[reg]
 			}
 		}
 	}
-	if code.Kind == bytecode.KindArrow {
-		this = fd.thisValue
-	}
-	fi := st.nframes
-	if fi == len(st.frames) {
-		nf := make([]frameInfo, max(initialFrames, 2*len(st.frames)))
-		copy(nf, st.frames)
-		st.frames = nf
-	}
-	st.frames[fi] = frameInfo{fn: fn, base: uint32(base)}
-	st.nframes = fi + 1
-	st.sp = top
-	res, err := r.run(fi, fd, base, env, this, fn)
-	st.sp = base
-	st.nframes = fi
-	return res, err
+	return env
+}
+
+// growFrames doubles the frame table.
+func (r *Realm) growFrames() {
+	st := &r.interp
+	nf := make([]frameInfo, max(initialFrames, 2*len(st.frames)))
+	copy(nf, st.frames)
+	st.frames = nf
 }
 
 // Small environments are co-allocated with their slot storage so that a

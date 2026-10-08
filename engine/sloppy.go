@@ -486,6 +486,9 @@ func (r *Realm) setNamedSloppy(o *Object, key PropertyKey, v Value, e *ICEntry) 
 		}
 		return r.callSetter(a, ObjectValue(o), key, v)
 	}
+	if r.setNamedAdd(o, key, v, e) {
+		return nil
+	}
 	ok, err := o.Set(r, key, v, ObjectValue(o))
 	if err != nil || !ok {
 		return err

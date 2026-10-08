@@ -128,7 +128,7 @@ func contentIn(a, b *String) bool {
 		if s.kind == strASCII {
 			return uintptr(unsafe.Pointer(unsafe.StringData(s.s))), uintptr(len(s.s))
 		}
-		return uintptr(unsafe.Pointer(unsafe.SliceData(s.u))), 2 * uintptr(len(s.u))
+		return uintptr(unsafe.Pointer(unsafe.SliceData(s.units()))), 2 * uintptr(s.n)
 	}
 	p, _ := span(a)
 	q, n := span(b)
@@ -167,7 +167,7 @@ func TestInternIdentityAcrossCopies(t *testing.T) {
 				if js.kind == strASCII {
 					return globalInternASCII.lookup(name)
 				}
-				return globalInternUTF16.lookup(utf16Key(js.u))
+				return globalInternUTF16.lookup(utf16Key(js.units()))
 			}
 			require.Nil(t, lookup(), "the name is new to the process")
 			big := name + strings.Repeat(tc.fill, 4096)
@@ -198,7 +198,7 @@ func TestInternIdentityAcrossCopies(t *testing.T) {
 				}
 				cached := r.internCacheASCII[name]
 				if js.kind != strASCII {
-					cached = r.internCacheUTF16[utf16Key(js.u)]
+					cached = r.internCacheUTF16[utf16Key(js.units())]
 				}
 				require.Same(t, atom, cached, "realm %d caches the atom", i)
 			}

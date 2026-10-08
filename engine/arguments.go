@@ -1,6 +1,9 @@
 package engine
 
-import "github.com/Calcium-Ion/moejs/bytecode"
+import (
+	"github.com/Calcium-Ion/moejs/bytecode"
+	"unsafe"
+)
 
 // Arguments objects. A function gets one only when its body or a nested
 // arrow references `arguments` (the compiler sets
@@ -36,6 +39,7 @@ func (r *Realm) argumentsShape() *Shape {
 // %Array.prototype.values% and a %ThrowTypeError% callee accessor.
 func (r *Realm) newArguments(args []Value) *Object {
 	x := &argumentsObject{}
+	r.chargeObject(unsafe.Sizeof(argumentsObject{}))
 	o := initObject(&x.Object, ClassArguments, r.argumentsShape())
 	o.slots = x.slots[:]
 	o.slots[0] = IntValue(len(args))

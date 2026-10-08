@@ -217,6 +217,20 @@ const (
 	MapArguments    // A     make the arguments object R[A] mapped to the parameters in the function's own Env
 	CallEval        // ABC+X R[A] = call of callee R[A] with this R[A+1] and args R[A+2..] (B = argc, C = 1: one spread array), a direct eval when the callee is %eval%; X = index into Extra.Evals
 
+	// --- compare and branch (a comparison whose result only feeds a
+	// conditional jump; numbered last so that code without them keeps its
+	// encoding). The offset is relative to the X word. ---
+	JmpLt       // AsBx+X if R[A] < R[X] pc += sBx
+	JmpLe       // AsBx+X if R[A] <= R[X] pc += sBx
+	JmpGt       // AsBx+X if R[A] > R[X] pc += sBx
+	JmpGe       // AsBx+X if R[A] >= R[X] pc += sBx
+	JmpNLt      // AsBx+X if !(R[A] < R[X]) pc += sBx
+	JmpNLe      // AsBx+X if !(R[A] <= R[X]) pc += sBx
+	JmpNGt      // AsBx+X if !(R[A] > R[X]) pc += sBx
+	JmpNGe      // AsBx+X if !(R[A] >= R[X]) pc += sBx
+	JmpStrictEq // AsBx+X if R[A] === R[X] pc += sBx
+	JmpStrictNe // AsBx+X if R[A] !== R[X] pc += sBx
+
 	opCount
 )
 
@@ -428,6 +442,36 @@ var opTable = [...]opInfo{
 	CoerceThis:      {"CoerceThis", FmtNone, 0},
 	MapArguments:    {"MapArguments", FmtA, 0},
 	CallEval:        {"CallEval", FmtABC, 1},
+
+	JmpLt:       {"JmpLt", FmtAsBx, 1},
+	JmpLe:       {"JmpLe", FmtAsBx, 1},
+	JmpGt:       {"JmpGt", FmtAsBx, 1},
+	JmpGe:       {"JmpGe", FmtAsBx, 1},
+	JmpNLt:      {"JmpNLt", FmtAsBx, 1},
+	JmpNLe:      {"JmpNLe", FmtAsBx, 1},
+	JmpNGt:      {"JmpNGt", FmtAsBx, 1},
+	JmpNGe:      {"JmpNGe", FmtAsBx, 1},
+	JmpStrictEq: {"JmpStrictEq", FmtAsBx, 1},
+	JmpStrictNe: {"JmpStrictNe", FmtAsBx, 1},
+}
+
+// CompareJump returns the op that jumps when the comparison op (Lt, Le, Gt,
+// Ge, StrictEq or StrictNe) of R[A] and R[X] is jumpIf, and false for any
+// other op.
+func CompareJump(op Op, jumpIf bool) (Op, bool) {
+	switch op {
+	case Lt, Le, Gt, Ge:
+		if jumpIf {
+			return JmpLt + (op - Lt), true
+		}
+		return JmpNLt + (op - Lt), true
+	case StrictEq, StrictNe:
+		if (op == StrictEq) == jumpIf {
+			return JmpStrictEq, true
+		}
+		return JmpStrictNe, true
+	}
+	return 0, false
 }
 
 // String returns the mnemonic.

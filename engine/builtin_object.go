@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // installObject fills the Object constructor and Object.prototype. It runs
 // first in the install list because the abstract operations of every other
 // builtin resolve Object.prototype.toString/valueOf.
@@ -180,6 +182,9 @@ func objectKeys(r *Realm, this Value, args []Value) (Value, error) {
 	}
 	ao, items := r.newArrayStorage(len(keys), len(keys))
 	for i, k := range keys {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		items[i] = StringValue(k.ToJSString(r))
 	}
 	return ObjectValue(r.initArray(ao, items, uint32(len(keys)))), nil
@@ -218,7 +223,10 @@ func enumerableOwnProperties(r *Realm, v Value, entries bool) (Value, error) {
 		pairs = make([]Value, 0, 2*len(keys))
 	}
 	self := ObjectValue(o)
-	for _, k := range keys {
+	for i, k := range keys {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		var val Value
 		if proxy {
 			// The descriptor and the value of each key are read in turn.
@@ -315,7 +323,10 @@ func assignProperties(r *Realm, to, from *Object) error {
 	if err != nil {
 		return err
 	}
-	for _, k := range keys {
+	for i, k := range keys {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return err
+		}
 		if err := assignProperty(r, to, from, k); err != nil {
 			return err
 		}
@@ -724,6 +735,7 @@ func (r *Realm) descriptorShape(accessor bool) *Shape {
 // descriptor ([[GetOwnProperty]] results) in one allocation.
 func (r *Realm) FromPropertyDescriptor(d PropertyDescriptor) Value {
 	x := &object4{}
+	r.chargeObject(unsafe.Sizeof(object4{}))
 	o := initObject(&x.Object, ClassObject, r.descriptorShape(d.IsAccessorDescriptor()))
 	if d.IsAccessorDescriptor() {
 		x.buf = [4]Value{d.Get, d.Set, Bool(d.Enumerable()), Bool(d.Configurable())}
@@ -764,7 +776,10 @@ func objectGetOwnPropertyNames(r *Realm, this Value, args []Value) (Value, error
 		return Undefined(), err
 	}
 	items := make([]Value, 0, len(keys))
-	for _, k := range keys {
+	for i, k := range keys {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		if k.IsSymbol() {
 			continue
 		}
@@ -780,7 +795,12 @@ func objectFromEntries(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), r.TypeError("Object.fromEntries requires an iterable, got %s", iterable.String())
 	}
 	obj := r.NewObject()
+	n := int64(0)
 	err := r.addEntriesFromIterable(iterable, func(k, v Value) error {
+		if err := interruptEvery(r, n); err != nil {
+			return err
+		}
+		n++
 		key, err := r.ToPropertyKey(k)
 		if err != nil {
 			return err

@@ -265,3 +265,32 @@ func TestTypedArrayLateGroup(t *testing.T) {
 		assert.Same(t, b.Atomics, v.Value.AsObject())
 	}
 }
+
+// TestTypedArrayElementNumberKeys covers the element reads and writes with a
+// Number key (getElemSlow, setElemSlow): the in-place access of an index
+// inside a fixed-length array whose buffer holds it, and every case it
+// leaves to TypedArrayGetElement and TypedArraySetElement.
+func TestTypedArrayElementNumberKeys(t *testing.T) {
+	runProtoCases(t, []protoCase{
+		{"every type", `const out = []; for (const T of [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float16Array, Float32Array, Float64Array]) { const a = new T(3); for (let i = 0; i < 3; i++) a[i] = 1.5 * i - 1; out.push(T.name + ":" + [a[0], a[1], a[2]].join(" ")); } return out.join()`,
+			"Int8Array:-1 0 2,Uint8Array:255 0 2,Uint8ClampedArray:0 0 2,Int16Array:-1 0 2,Uint16Array:65535 0 2,Int32Array:-1 0 2,Uint32Array:4294967295 0 2,Float16Array:-1 0.5 2,Float32Array:-1 0.5 2,Float64Array:-1 0.5 2"},
+		{"wrap and clamp", `const i8 = new Int8Array(1), u8 = new Uint8Array(1), c = new Uint8ClampedArray(4), u32 = new Uint32Array(1), i32 = new Int32Array(1); let k = 0; i8[k] = 128; u8[k] = -1.9; u32[k] = -1; i32[k] = 2 ** 32 + 5; c[k] = 1.5; c[k + 1] = 2.5; c[k + 2] = 300; c[k + 3] = NaN; return [i8[k], u8[k], u32[k], i32[k], c.join(" ")].join()`, "-128,255,4294967295,5,2 2 255 0"},
+		{"float specials", `const a = new Float64Array(3), f = new Float32Array(2); let k = 0; a[k] = -0; a[k + 1] = NaN; a[k + 2] = -Infinity; f[k] = 1.1; f[k + 1] = 1e40; return [Object.is(a[k], -0), a[k + 1], a[k + 2], f[k], f[k + 1]].join()`, "true,NaN,-Infinity,1.100000023841858,Infinity"},
+		{"keys", `const a = new Int16Array([10, 20]); const keys = [-0, 0.5, -1, 2, NaN, Infinity, -Infinity, 2 ** 53, 1e300, 2 ** 31]; return keys.map(k => String(a[k])).join() + "|" + keys.map(k => { a[k] = 7; return a.join(" "); }).join()`, "10,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined|7 20,7 20,7 20,7 20,7 20,7 20,7 20,7 20,7 20,7 20"},
+		{"offset view", `const b = new ArrayBuffer(16); const a = new Uint16Array(b, 4, 3), all = new Uint16Array(b); let i = 0; a[i] = 1; a[i + 2] = 3; a[i + 3] = 9; return [all.join(" "), a[i + 2], a[i + 3]].join()`, "0 0 1 0 3 0 0 0,3,"},
+		{"bigint types", `const a = new BigInt64Array(2), u = new BigUint64Array(1); let i = 0; a[i] = -5n; u[i] = 2n ** 64n - 1n; let e; try { a[i + 1] = 1; } catch (x) { e = x.name; } return [a[i], a[i + 1], u[i], e, typeof a[i]].join()`, "-5,0,18446744073709551615,TypeError,bigint"},
+		{"bigint type out of range number", `const a = new BigInt64Array(1); let i = 5; a[i] = 1`, "!TypeError"},
+		{"detached", `const b = new ArrayBuffer(8); const a = new Float64Array(b); let i = 0; a[i] = 1; b.transfer(); a[i] = 2; return [a[i], a.length, a[0]].join()`, ",0,"},
+		{"detached by the conversion", `const b = new ArrayBuffer(8); const a = new Float64Array(b); let i = 0; a[i] = {valueOf() { b.transfer(); return 5; }}; return [a[i], a.length].join()`, ",0"},
+		{"resized by the conversion", `const b = new ArrayBuffer(8, {maxByteLength: 16}); const a = new Uint8Array(b, 0, 8); let i = 7; a[i] = {valueOf() { b.resize(4); return 5; }}; return [a[i], a.length, b.byteLength].join()`, ",0,4"},
+		{"fixed view over a resizable buffer", `const b = new ArrayBuffer(8, {maxByteLength: 16}); const a = new Uint8Array(b, 2, 4); let i = 3; a[i] = 9; const before = a[i]; b.resize(5); const out = [before, a[i], a[0], a.length]; a[0] = 1; b.resize(16); out.push(a[i], a[0], a.length); b.resize(6); out.push(a[i], a[1], a.length); return out.join()`, "9,,,0,0,0,4,0,0,4"}, // a shrink drops the bytes, a grow brings zeros
+		{"length tracking", `const b = new ArrayBuffer(4, {maxByteLength: 16}); const a = new Uint8Array(b); let i = 5; a[i] = 1; const out = [a[i]]; b.resize(8); a[i] = 2; out.push(a[i], a.length); b.resize(2); out.push(a[i], a.length); return out.join()`, ",2,8,,2"},
+		{"shared buffer", `const a = new Int32Array(new SharedArrayBuffer(8)); let i = 1; a[i] = -3; return a[i]`, "-3"},
+		{"non-extensible", `const a = Object.preventExtensions(new Uint8Array(2)); let i = 1; a[i] = 5; a[i + 1] = 6; return [a[i], a[i + 1], Object.isExtensible(a)].join()`, "5,,false"},
+		{"proxy", `const a = new Uint8Array(2); const log = []; const p = new Proxy(a, {get(t, k, r) { log.push("get " + String(k)); return Reflect.get(t, k); }, set(t, k, v) { log.push("set " + String(k)); return Reflect.set(t, k, v); }}); let i = 1; p[i] = 3; return [p[i], a[i], log.join(" ")].join()`, "3,3,set 1 get 1"},
+		{"receiver of a subclass", `class M extends Float64Array { get extra() { return 1; } } const a = new M(2); let i = 1; a[i] = 2.5; return [a[i], a.extra].join()`, "2.5,1"},
+	})
+	runMutableProtoCases(t, []protoCase{
+		{"no prototype lookup", `const a = new Uint8Array(1); const P = Object.getPrototypeOf(Uint8Array.prototype); let n = 0; Object.defineProperty(P, "0", {get() { n++; return 9; }, set(v) { n++; }, configurable: true}); Object.defineProperty(P, "3", {get() { n++; return 9; }, set(v) { n++; }, configurable: true}); let i = 0; a[i] = 4; a[i + 3] = 4; const r = [a[i], a[i + 3], n]; delete P[0]; delete P[3]; return r.join()`, "4,,0"},
+	})
+}

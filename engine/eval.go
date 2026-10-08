@@ -295,6 +295,7 @@ func (r *Realm) compileEval(s *String, scope *bytecode.EvalScope) (*dynRoot, err
 	if err != nil {
 		return nil, r.compileError(err)
 	}
+	r.charge(compiledSize(code))
 	d := r.dynMeta(code, r.scriptOrModuleOf(root))
 	if hasTemplate(code) {
 		return d, nil
@@ -453,6 +454,7 @@ func (r *Realm) compileFunction(c Compiler, kind dynamicKind, params, body strin
 	if err != nil {
 		return nil, r.compileError(err)
 	}
+	r.charge(compiledSize(code))
 	d := r.dynMeta(code, r.scriptOrModuleOf(root))
 	if hasTemplate(code) {
 		return d, nil

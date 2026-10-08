@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // DataView (ECMA-262 §25.3): a byte range of an ArrayBuffer or
 // SharedArrayBuffer read and written through a get and a set method for
 // every element type but Uint8Clamped, in either byte order.
@@ -163,6 +165,7 @@ func dataViewConstruct(r *Realm, args []Value, newTarget *Object) (Value, error)
 func (r *Realm) newDataViewObject(proto, buf *Object, offset, length int) *Object {
 	r.markPrototype(proto)
 	vo := &viewObject{view: dataView{buf: buf, data: buf.internal.(*arrayBuffer), offset: offset, length: length}}
+	r.chargeObject(unsafe.Sizeof(viewObject{}))
 	o := &vo.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto

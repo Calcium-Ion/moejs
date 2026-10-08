@@ -35,6 +35,7 @@ var hostSliceTypes = [...]unsafe.Pointer{
 	hostSliceAny:    typeWord([]any(nil)),
 	hostSliceString: typeWord([]string(nil)),
 	hostSliceMaps:   typeWord([]map[string]any(nil)),
+	hostSliceRaw:    typeWord(rawText("")),
 }
 
 func typeWord(v any) unsafe.Pointer { return (*[2]unsafe.Pointer)(unsafe.Pointer(&v))[0] }

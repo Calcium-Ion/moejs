@@ -34,6 +34,13 @@ type Options struct {
 	// for hosts whose code needs none (engine.RealmOptions). Compile and
 	// CompileScript are not affected.
 	DisableDynamicCode bool
+	// MemoryLimit is the number of bytes the runtime's JavaScript may
+	// allocate between resets (ReleaseCallData, ResetAllocation, and the
+	// end of a Load or SetGlobal that succeeded) before the runtime
+	// interrupts itself: the call returns an *InterruptedError whose value
+	// is a *MemoryLimitError, which errors.Is finds as ErrMemoryLimit. Zero
+	// means no limit. The guide's "Memory limit" tells what is counted.
+	MemoryLimit int64
 }
 
 // Runtime is one JavaScript global environment with at most one loaded
@@ -45,13 +52,13 @@ type Options struct {
 // or generator but also through a method, an accessor, a proxy, a promise
 // or a thenable, and that code reads the caches of the runtime running it:
 // wrong results or an *InternalError. Only Go values (ToGo, FromGo) and
-// JSON are safe to pass between runtimes. Call, SetGlobal, FromGo and the
-// settlers of NewPromise return ErrForeign for a function or generator of
-// another runtime (or a bound function or proxy of one), FromGo also for one
-// inside the Go containers it converts (reading that member throws); they do
-// not look inside other objects, and do not check a proxy of another runtime
-// that is not callable, even inside a Go map: its traps run in the runtime
-// that reads it.
+// JSON are safe to pass between runtimes. Call, CallFunction, SetGlobal,
+// FromGo and the settlers of NewPromise return ErrForeign for a function or
+// generator of another runtime (or a bound function or proxy of one), FromGo
+// also for one inside the Go containers it converts (reading that member
+// throws); they do not look inside other objects, and do not check a proxy
+// of another runtime that is not callable, even inside a Go map: its traps
+// run in the runtime that reads it.
 type Runtime struct {
 	realm *engine.Realm
 	mod   *Module
@@ -68,7 +75,7 @@ type Runtime struct {
 
 // NewRuntime creates a runtime.
 func NewRuntime(opts Options) *Runtime {
-	rt := &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone, MaxDynamicSource: opts.MaxDynamicSource, DisableDynamicCode: opts.DisableDynamicCode})}
+	rt := &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone, MaxDynamicSource: opts.MaxDynamicSource, DisableDynamicCode: opts.DisableDynamicCode, MemoryLimit: opts.MemoryLimit})}
 	if opts.Importer != nil {
 		rt.realm.SetImportHooks(opts.Importer.engineHooks())
 	}
@@ -83,7 +90,8 @@ func (rt *Runtime) Realm() *Realm { return rt.realm }
 // host installs a namespace of functions as a map[string]any with
 // NativeFunc values. It writes the global object, whose property a script's
 // global let, const or class declaration of the same name shadows
-// (ECMA-262 9.1.1.4.1).
+// (ECMA-262 9.1.1.4.1). Like Load, it is setup: called outside any call, it
+// ends by starting a new budget of Options.MemoryLimit when it succeeds.
 func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
@@ -92,7 +100,7 @@ func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 		return err
 	}
 	r.HoldJobs()
-	return r.ReleaseJobs(r.Global.SetProp(r, r.KeyFromGoString(name), val))
+	return rt.setupDone(r.ReleaseJobs(r.Global.SetProp(r, r.KeyFromGoString(name), val)))
 }
 
 // Function creates a host function with a name and a length, the values of
@@ -124,9 +132,15 @@ func (rt *Runtime) Function(name string, length int, fn NativeFunc) Value {
 // those jobs wins), or ErrModulePending when it still awaits; an exported
 // function called while it awaits throws a ReferenceError for a binding it
 // has not initialized yet.
+//
+// Load is setup: when it succeeds, or returns ErrModulePending, it ends by
+// starting a new budget of Options.MemoryLimit (ResetAllocation), so the
+// top level's allocation does not count against the first request. A
+// failed Load leaves the count, and the error of a memory limit hit in
+// Stats, as they are.
 func (rt *Runtime) Load(m *Module) (err error) {
 	if rt.mod != nil {
-		return errors.New("moejs: runtime already loaded module " + rt.mod.name)
+		return errors.New("moejs: runtime already loaded module " + rt.mod.Name())
 	}
 	if m.graph != nil {
 		return rt.loadGraph(m, m.graph.g)
@@ -140,7 +154,7 @@ func (rt *Runtime) Load(m *Module) (err error) {
 			}
 			return rt.loadGraph(m, g)
 		}
-		return errors.New("moejs: module " + strconv.Quote(m.name) + " imports " + strconv.Quote(l.Requests[0].Specifier) + ": link it with moejs.Link and a resolver")
+		return errors.New("moejs: module " + strconv.Quote(m.Name()) + " imports " + strconv.Quote(l.Requests[0].Specifier) + ": link it with moejs.Link and a resolver")
 	}
 	r := rt.realm
 	if r.ImportHooks() != nil {
@@ -164,6 +178,20 @@ func (rt *Runtime) Load(m *Module) (err error) {
 	rt.failed = err
 	if err = r.ReleaseJobs(err); p != nil {
 		err = r.ModuleEvaluationError(p, err)
+	}
+	return rt.setupDone(err)
+}
+
+// setupDone ends a setup method, Load or SetGlobal, that returns err: when
+// it succeeded outside any call (or left a module awaiting,
+// ErrModulePending), it starts a new budget of Options.MemoryLimit, so
+// that the host's setup does not count against the first request. A
+// failure leaves the count, and a hit's error in Stats, as they are. From
+// a host function it does nothing: a reset there would give the running
+// script a new budget.
+func (rt *Runtime) setupDone(err error) error {
+	if (err == nil || err == ErrModulePending) && rt.realm.CallDepth() == 0 {
+		rt.realm.ResetAllocation()
 	}
 	return err
 }
@@ -200,7 +228,7 @@ func (rt *Runtime) loadGraph(m *Module, g *engine.ModuleGraph) (err error) {
 			rt.failed = err
 		}
 	}
-	return err
+	return rt.setupDone(err)
 }
 
 // Module returns the loaded module, or nil.
@@ -259,9 +287,12 @@ func (rt *Runtime) Has(h Hook) (ok bool, err error) {
 // Call invokes the function h names with this = undefined. A path that
 // does not lead to a value is ErrHookNotFound, one that leads to a value
 // that is not a function ErrNotCallable; a throw is an *Exception, an
-// interrupt an *InterruptedError. The hooks of a module whose top level
-// failed return Load's error. An argument that is a function or generator
-// of another runtime is ErrForeign.
+// interrupt an *InterruptedError, a Go panic below it an *InternalError.
+// The hooks of a module whose top level failed return Load's error. An
+// argument that is a function or generator of another runtime is
+// ErrForeign. A Call made inside a host function gives its *InternalError
+// to that host function, as CallFunction does: returned to JavaScript, it
+// is an Error JavaScript can catch.
 func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 	r := rt.realm
 	base := len(rt.argStack)
@@ -297,7 +328,8 @@ func (rt *Runtime) Call(h Hook, args ...Value) (res Value, err error) {
 // returns the runtime to its pool; Call does not, so that a request running
 // several hooks converts its data as one, and hosts that do not pool pay
 // nothing. Values already returned stay valid: their nodes keep their own
-// storage, so ToGo and Get of them work after it. Between calls only; a
+// storage, so ToGo and Get of them work after it. It also starts a new
+// budget of Options.MemoryLimit (ResetAllocation). Between calls only; a
 // no-op inside one (from a host function).
 //
 // What JavaScript keeps stays alive with what it references: a string of a
@@ -407,27 +439,65 @@ func (rt *Runtime) Interrupt(v any) { rt.realm.Interrupt(v) }
 // ClearInterrupt drops a pending interrupt.
 func (rt *Runtime) ClearInterrupt() { rt.realm.ClearInterrupt() }
 
+// ResetAllocation starts a new budget of Options.MemoryLimit: what the
+// runtime counted since the last reset goes back to zero. ReleaseCallData,
+// Load and SetGlobal do it too; a host that does not pool runtimes calls
+// this where a request starts. It leaves a pending interrupt pending.
+func (rt *Runtime) ResetAllocation() { rt.realm.ResetAllocation() }
+
+// Stats returns the runtime's counters, each read in constant time; the
+// allocation counters count only while a MemoryLimit is set. It runs on
+// the goroutine using the runtime, also from a host function.
+func (rt *Runtime) Stats() Stats { return rt.realm.Stats() }
+
 // FromGo converts a Go value: nil, bool, the integer and float kinds,
 // string, json.Number, *big.Int (a bigint), Value, NativeFunc, and the
 // JSON-shaped containers map[string]any, map[string]string,
-// map[string][]string, []any, []string and []map[string]any. Containers convert lazily, one level when first
-// touched, so a large argument the hook reads little of costs little; the
-// Go value must not change while the result is in use, and JavaScript
-// writes never reach it. Maps enumerate their keys sorted. A []byte becomes
-// an ArrayBuffer over the same bytes, not a copy: JavaScript writes reach
-// them, and the host must not modify them while JavaScript may read them.
-// Other types (structs, named map types) are an error: marshal them and use
-// ParseJSON. A Value or *Object that is a function or generator of another
-// runtime is ErrForeign; inside a container, reading its member throws a
-// TypeError with ErrForeign's text.
+// map[string][]string, []any, []string and []map[string]any. Containers
+// convert lazily, one level when first touched, so a large argument the
+// hook reads little of costs little; the Go value must not change while the
+// result is in use, and JavaScript writes never reach it. Maps enumerate
+// their keys sorted. A []byte becomes an ArrayBuffer over the same bytes,
+// not a copy: JavaScript writes reach them, and the host must not modify
+// them while JavaScript may read them.
+//
+// A json.RawMessage converts as JSON.parse of a copy of its text, an object
+// or array text parsed when JavaScript first reads it; a named type as its
+// underlying type; any other type encoding/json writes as JSON.parse of its
+// json.Marshal text, a snapshot. An error without a MarshalJSON or
+// MarshalText method, a struct none of whose fields json.Marshal writes, a
+// channel, a func that is not a NativeFunc and a complex number are an
+// error; inside a container, reading that member throws a TypeError. The
+// guide's "Go values in" and "JSON in" give the details. A Value or *Object
+// that is a function or generator of another runtime is ErrForeign; inside
+// a container, reading its member throws a TypeError with ErrForeign's text.
 func (rt *Runtime) FromGo(v any) (Value, error) {
 	return rt.realm.FromGo(v)
 }
 
 // ParseJSON is JSON.parse of b. Nesting deeper than 10,000 arrays and
-// objects (engine.MaxToGoDepth) is a RangeError.
+// objects (engine.MaxToGoDepth) is a RangeError. It parses a copy of b, so
+// the host may reuse b once it returns; for a large text, ParseJSONString
+// saves the copy.
 func (rt *Runtime) ParseJSON(b []byte) (Value, error) {
+	if err := rt.realm.ChargeMemory(len(b)); err != nil {
+		return engine.Undefined(), err
+	}
 	return rt.realm.JSONParseGoString(string(b))
+}
+
+// ParseJSONString is ParseJSON of s without the copy when s is valid UTF-8
+// (other text is converted first, by both): the strings of the result, and
+// the Go strings ToGo, Unmarshal, ToGoInto and Value.String give for them,
+// may share s's memory, as ParseJSON's share its copy, and keep it alive.
+//
+// A host that holds the text as a []byte may pass
+// unsafe.String(unsafe.SliceData(b), len(b)) if it never modifies b while
+// anything may still read the text: until ReleaseCallData, and for as long
+// as the host or the module keeps values derived from it. The host is then
+// responsible for that; nothing checks it.
+func (rt *Runtime) ParseJSONString(s string) (Value, error) {
+	return rt.realm.JSONParseGoString(s)
 }
 
 // Get reads property key of v, running a getter and walking the prototype
@@ -461,8 +531,9 @@ func (rt *Runtime) Get(v Value, key string) (res Value, err error) {
 // array or object, and a nil map to null. A getter or trap that throws, a
 // revoked proxy, or nesting deeper than 10,000 containers
 // (engine.MaxToGoDepth) is returned as the error. The Go string of an ASCII
-// string is the one v holds: for a value ParseJSON produced it may share the
-// parsed text and keep it alive; strings.Clone what is kept.
+// string is the one v holds: for a value ParseJSON or ParseJSONString
+// produced it may share the parsed text and keep it alive; strings.Clone
+// what is kept.
 func (rt *Runtime) ToGo(v Value) (out any, err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))

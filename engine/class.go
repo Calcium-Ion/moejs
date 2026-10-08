@@ -32,7 +32,7 @@ func (r *Realm) constructNT(fn *Object, fd *FunctionData, args []Value, newTarge
 	var obj *Object
 	this := Undefined()
 	if fd.code.Kind != bytecode.KindDerivedCtor {
-		o, err := r.OrdinaryCreateFromConstructor(newTarget, r.ObjectPrototype, ClassObject)
+		o, err := r.constructThis(newTarget)
 		if err != nil {
 			return Undefined(), err
 		}
@@ -44,10 +44,15 @@ func (r *Realm) constructNT(fn *Object, fd *FunctionData, args []Value, newTarge
 	if err != nil {
 		return Undefined(), err
 	}
-	if obj == nil || res.IsObject() {
-		return res, nil // DerivedResult made it an object
+	if obj != nil && !res.IsObject() {
+		res = this
 	}
-	return this, nil
+	// A derived constructor's result has the fields of every class in the
+	// chain, which super() constructs with the same new.target.
+	if fn == newTarget {
+		noteCtorSlots(fd, res)
+	}
+	return res, nil // DerivedResult made a derived result an object
 }
 
 // classOp executes one class op of the frame whose registers start at base
@@ -101,14 +106,6 @@ func (r *Realm) classOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 			return pc, err
 		}
 		st.stack[base+a] = key.Value()
-	case bytecode.GetElemRef:
-		k, v, err := r.getElemRef(regs[b], regs[uint8(code.Code[pc])])
-		if err != nil {
-			return pc + 1, err
-		}
-		st.stack[base+c] = k
-		st.stack[base+a] = v
-		return pc + 1, nil
 	case bytecode.GetProtoOf:
 		p := Null()
 		if v := regs[b]; v.IsObject() && v.AsObject().proto != nil {

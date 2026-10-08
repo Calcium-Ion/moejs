@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -502,4 +503,86 @@ func TestCreateListFromArrayLike(t *testing.T) {
 	assert.True(t, m.IsUndefined())
 	_, err = r.GetMethod(ObjectValue(arr), lengthKey)
 	assert.ErrorContains(t, err, "is not a function")
+}
+
+// TestJSMod compares jsMod with math.Mod bit for bit (the sign of a zero
+// included) on the int64 fast path's edges and on the cases it leaves to
+// math.Mod.
+func TestJSMod(t *testing.T) {
+	const safe = 1 << 53
+	negZero := math.Copysign(0, -1)
+	vals := []float64{
+		0, negZero, 1, -1, 2, -2, 3, -3, 7, -7, 10, -10, 1000003, -1000003,
+		safe, -safe, safe - 1, -(safe - 1), safe + 2, -(safe + 2), 1 << 62, -(1 << 62),
+		1 << 63, -(1 << 63), 1e300, -1e300, 0.5, -0.5, 2.5, -2.5, 1e-310, -1e-310,
+		math.MaxFloat64, -math.MaxFloat64, math.SmallestNonzeroFloat64,
+		math.Inf(1), math.Inf(-1), math.NaN(),
+	}
+	same := func(t *testing.T, x, y float64) {
+		t.Helper()
+		got, want := jsMod(x, y), math.Mod(x, y)
+		if math.IsNaN(want) {
+			assert.True(t, math.IsNaN(got), "%v %% %v = %v, want NaN", x, y, got)
+			return
+		}
+		assert.Equal(t, math.Float64bits(want), math.Float64bits(got), "%v %% %v = %v, want %v", x, y, got, want)
+	}
+	for _, x := range vals {
+		for _, y := range vals {
+			same(t, x, y)
+		}
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	for range 100000 {
+		x := float64(rng.Int64N(2*safe+1) - safe)
+		y := float64(rng.Int64N(2*safe+1) - safe)
+		if rng.IntN(2) == 0 {
+			y = float64(rng.Int64N(2001) - 1000)
+		}
+		same(t, x, y)
+	}
+	assert.True(t, math.Signbit(jsMod(-7, 7)), "-7 % 7 is -0")
+	assert.True(t, math.Signbit(jsMod(-7, -7)), "-7 % -7 is -0")
+	assert.True(t, math.Signbit(jsMod(negZero, 3)), "-0 % 3 is -0")
+	assert.False(t, math.Signbit(jsMod(7, -7)), "7 % -7 is +0")
+	assert.True(t, math.IsNaN(jsMod(3, 0)), "3 % 0 is NaN")
+	assert.True(t, math.IsNaN(jsMod(3, negZero)), "3 % -0 is NaN")
+}
+
+// TestInterpRemainder runs % through the interpreter: the number case, the
+// conversions of arithSlow and the compound assignment, with -0 told apart
+// from +0.
+func TestInterpRemainder(t *testing.T) {
+	f := evalModule(t, `
+function tag(v) { return Object.is(v, -0) ? "-0" : String(v); }
+export function rem(a, b) { return tag(a % b); }
+export function remAssign(a, b) { let x = a; x %= b; return tag(x); }
+export function remProp(a, b) { const o = { x: a }; o.x %= b; return tag(o.x); }
+export function remSlow() {
+  const v = { valueOf() { return -9; } };
+  return [tag("7" % 2), tag(v % 3), tag(-9 % "3"), tag(true % 1), tag(null % 5), tag(5 % null)].join(",");
+}
+export function remBig() { return [10n % 3n, -10n % 3n].join(","); }
+`)
+	negZero := math.Copysign(0, -1)
+	cases := []struct {
+		a, b any
+		want string
+	}{
+		{7, 3, "1"}, {-7, 3, "-1"}, {7, -3, "1"}, {-7, -3, "-1"},
+		{-7, 7, "-0"}, {7, 7, "0"}, {negZero, 3, "-0"}, {0, 3, "0"},
+		{-6, 2, "-0"}, {6, -2, "0"}, {5, 0, "NaN"}, {5, negZero, "NaN"},
+		{9007199254740992, 3, "2"}, {-9007199254740992, 3, "-2"},
+		{9007199254740993.0, 10, "2"}, {1e17, 7, "5"}, {-1e17, 7, "-5"},
+		{5.5, 2, "1.5"}, {-5.5, 2, "-1.5"}, {5, 2.5, "0"}, {-5, 2.5, "-0"},
+		{math.Inf(1), 3, "NaN"}, {3, math.Inf(1), "3"}, {-3, math.Inf(-1), "-3"},
+		{negZero, math.Inf(1), "-0"}, {math.NaN(), 3, "NaN"}, {3, math.NaN(), "NaN"},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, f.call("rem", c.a, c.b), "%v %% %v", c.a, c.b)
+		assert.Equal(t, c.want, f.call("remAssign", c.a, c.b), "%v %%= %v", c.a, c.b)
+		assert.Equal(t, c.want, f.call("remProp", c.a, c.b), "o.x %%= %v with %v", c.b, c.a)
+	}
+	assert.Equal(t, "1,-0,-0,0,0,NaN", f.call("remSlow"))
+	assert.Equal(t, "1,-1", f.call("remBig"))
 }

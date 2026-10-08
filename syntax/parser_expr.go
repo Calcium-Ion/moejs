@@ -23,6 +23,9 @@ func (p *parser) parseExpression(noIn bool) Expr {
 func (p *parser) parseAssign(noIn bool) Expr {
 	p.enter()
 	defer p.leave()
+	if p.ts {
+		return p.tsAssign(noIn)
+	}
 	start := p.start
 	var lhs Expr
 	switch p.tok {
@@ -208,14 +211,18 @@ func (p *parser) startsExpression() bool {
 func (p *parser) parseConditional(noIn bool) Expr {
 	start := p.start
 	test := p.parseBinary(0, noIn)
-	if !p.eat(Question) {
+	if p.tok != Question || p.ts && p.tsOptionalMark(start) {
 		return test
 	}
+	p.next()
 	return p.parseConditionalTail(test, start, noIn)
 }
 
 // parseConditionalTail parses the branches after `test ?`.
 func (p *parser) parseConditionalTail(test Expr, start int, noIn bool) Expr {
+	if p.ts {
+		p.tsx.blockRet = true
+	}
 	cons := p.parseAssign(false)
 	p.expect(Colon)
 	alt := p.parseAssign(noIn)
@@ -230,9 +237,10 @@ func (p *parser) parseConditionalFrom(x Expr, start int, noIn bool) Expr {
 		x = p.parsePostfix(x, start)
 	}
 	x = p.parseBinaryRest(x, start, 0, noIn)
-	if !p.eat(Question) {
+	if p.tok != Question || p.ts && p.tsOptionalMark(start) {
 		return x
 	}
+	p.next()
 	return p.parseConditionalTail(x, start, noIn)
 }
 
@@ -268,6 +276,9 @@ func (p *parser) parseBinaryRest(left Expr, start, minPrec int, noIn bool) Expr 
 		op := p.tok
 		prec := binaryPrec(op)
 		if prec == 0 || prec <= minPrec || op == KwIn && noIn {
+			if p.ts && op == Identifier && p.tsAs(left, minPrec) {
+				continue
+			}
 			return left
 		}
 		if op == Exp {
@@ -335,6 +346,10 @@ func (p *parser) parseUnary() Expr {
 		p.next()
 		x := p.parseUnary()
 		return &AwaitExpr{Span{start, p.prevEnd}, x}
+	case Lt:
+		if p.ts {
+			return p.tsTypeAssertion()
+		}
 	}
 	x := p.parseLeftHandSide()
 	if (p.tok == Inc || p.tok == Dec) && !p.nlBefore {
@@ -429,6 +444,16 @@ func (p *parser) parseCallTail(x Expr, start int, allowCall bool) Expr {
 				x = &MemberExpr{Span{start, p.prevEnd}, x, idx, true, true}
 			case Template:
 				p.fail(p.start, "Invalid tagged template on optional chain")
+			case Lt, Shl:
+				// a?.<T>(x)
+				if !p.ts || !p.tsTypeArgsInExpr() {
+					p.unexpected()
+				}
+				if p.tok != LParen {
+					p.unexpected()
+				}
+				args := p.parseArguments()
+				x = &CallExpr{Span{start, p.prevEnd}, x, args, true}
 			default:
 				x = &MemberExpr{Span: Span{start, 0}, Object: x, Prop: p.parseMemberName(), Optional: true}
 				x.(*MemberExpr).End = p.prevEnd
@@ -455,6 +480,9 @@ func (p *parser) parseCallTail(x Expr, start int, allowCall bool) Expr {
 			quasi := p.parseTemplate(true)
 			x = &TaggedTemplate{Span{start, p.prevEnd}, x, quasi}
 		default:
+			if p.ts && p.tsMember(x) {
+				continue
+			}
 			if inChain {
 				return &OptChain{Span{start, p.prevEnd}, x}
 			}
@@ -722,7 +750,7 @@ func (p *parser) parsePropertyBody(prop *Property) {
 	if p.eat(Mul) {
 		isGen = true
 	} else if p.tok == Identifier && !p.escaped && (p.val == "async" || p.val == "get" || p.val == "set") {
-		if tok, nl, _ := p.peek(); tok != Comma && tok != Colon && tok != LParen && tok != RBrace && tok != Assign && !(p.val == "async" && nl) {
+		if tok, nl, _ := p.peek(); tok != Comma && tok != Colon && tok != LParen && tok != RBrace && tok != Assign && !(p.val == "async" && nl) && !(p.ts && tok == Lt) {
 			switch p.val {
 			case "async":
 				isAsync = true
@@ -739,7 +767,7 @@ func (p *parser) parsePropertyBody(prop *Property) {
 	}
 	keyTok := p.tok
 	prop.Key, prop.Computed = p.parsePropertyKey()
-	if p.tok == LParen {
+	if p.tok == LParen || p.ts && p.tok == Lt {
 		fn := p.parseMethod(prop.Pos, prop.Key, prop.Computed, kind, isAsync, isGen)
 		prop.Value = fn
 		switch kind {
@@ -865,6 +893,9 @@ func (p *parser) markParenthesized(x Expr) {
 			p.parens = make(map[Expr]struct{})
 		}
 		p.parens[x] = struct{}{}
+		if p.ts {
+			p.tsx.parens = append(p.tsx.parens, x)
+		}
 	}
 }
 
@@ -1179,6 +1210,13 @@ func (p *parser) parseMethod(start int, key Expr, computed bool, kind FuncKind, 
 // parseFunctionRest parses `(params) { body }` into fn.
 func (p *parser) parseFunctionRest(fn *Function, start int) {
 	saved := p.enterFunction(fn)
+	bodiless := false
+	if p.ts {
+		bodiless, p.tsx.bodiless = p.tsx.bodiless, false
+		if p.tok == Lt {
+			p.tsTypeParams()
+		}
+	}
 	lparen := p.start
 	p.parseParams(fn)
 	switch {
@@ -1189,6 +1227,11 @@ func (p *parser) parseFunctionRest(fn *Function, start int) {
 		p.fail(pos, "Setter function argument must not be a rest parameter")
 	case fn.Kind == FuncSetter && len(fn.Params) != 1:
 		p.fail(lparen, "Setter must have exactly one formal parameter.")
+	}
+	if p.ts && p.tsFunctionTail(bodiless) {
+		p.leaveFunction(fn, saved)
+		fn.Span = Span{start, p.prevEnd}
+		return
 	}
 	fn.Body = p.parseFunctionBody(fn, saved.strict)
 	p.leaveFunction(fn, saved)
@@ -1207,7 +1250,9 @@ func (p *parser) parseFunctionBody(fn *Function, outerStrict bool) *BlockStmt {
 			p.unexpected()
 		}
 		poll(p.stop, len(body))
-		body = append(body, p.parseStatementListItem())
+		if s := p.parseStatementListItem(); s != nil {
+			body = append(body, s)
+		}
 	}
 	p.strict = outerStrict
 	p.next()
@@ -1216,9 +1261,15 @@ func (p *parser) parseFunctionBody(fn *Function, outerStrict bool) *BlockStmt {
 
 func (p *parser) parseParams(fn *Function) {
 	p.expect(LParen)
+	if p.ts {
+		p.tsThisParam()
+	}
 	for p.tok != RParen {
 		if p.eat(Ellipsis) {
 			fn.Rest = p.parseBindingTarget()
+			if p.ts {
+				p.tsTypeAnnotation()
+			}
 			if p.tok == Assign {
 				p.fail(p.start, "Rest parameter may not have a default initializer")
 			}
@@ -1227,7 +1278,11 @@ func (p *parser) parseParams(fn *Function) {
 			}
 			break
 		}
-		fn.Params = append(fn.Params, p.parseBindingElement())
+		if p.ts {
+			fn.Params = append(fn.Params, p.tsParam())
+		} else {
+			fn.Params = append(fn.Params, p.parseBindingElement())
+		}
 		if p.tok != RParen {
 			p.expect(Comma)
 		}
@@ -1336,8 +1391,14 @@ func (p *parser) parseClass(requireName bool) *Class {
 	} else if requireName {
 		p.unexpected()
 	}
+	if p.ts {
+		p.tsClassTypeParams()
+	}
 	if p.eat(KwExtends) {
 		c.Super = p.parseLeftHandSide()
+	}
+	if p.ts {
+		p.tsClassHeritage()
 	}
 	p.expect(LBrace)
 	var privs map[string]*privateDecl
@@ -1345,7 +1406,14 @@ func (p *parser) parseClass(requireName bool) *Class {
 		if p.eat(Semicolon) {
 			continue
 		}
-		m := p.parseClassMember()
+		var m *ClassMember
+		if p.ts {
+			if m = p.tsClassMember(); m == nil {
+				continue
+			}
+		} else {
+			m = p.parseClassMember()
+		}
 		if fn, ok := m.Value.(*Function); ok && fn.Kind == FuncClassConstructor {
 			if c.Ctor != nil {
 				p.fail(m.Pos, "A class may only have one constructor")

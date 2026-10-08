@@ -846,3 +846,25 @@ func TestArrayReverseFillAtFlat(t *testing.T) {
 	assert.EqualError(t, jsCallErr(t, r, mkArray(t, r, 1), "flatMap"), "TypeError: flatMap mapper function is not callable")
 	assert.EqualError(t, jsCallErr(t, r, mkArray(t, r, 1), "flatMap", throwingFn(r, "fm")), "TypeError: fm")
 }
+
+// TestArrayCallbacksEnterFrames covers the callbacks of the iteration
+// methods and sort, which CallObject now enters through enterFrame
+// directly: every kind of callee, holes and length changes during the
+// iteration, a callback that throws, re-enters or is interrupted, and the
+// comparator's conversions of a result that is not a Number.
+func TestArrayCallbacksEnterFrames(t *testing.T) {
+	runProtoCases(t, []protoCase{
+		{"callees", `const a = [3, -1, 2]; const bound = function (x) { return this.k * x; }.bind({k: 10}); const p = new Proxy(x => x + 1, {}); return [a.map(x => x * 2), a.map(Math.abs), a.map(bound), a.map(p), a.map(function (x) { return this + x; }, "s"), a.map(function (x, i, o) { return arguments.length + i + (o === a ? 1 : 0); }), a.map((...r) => r.length)].join("|")`, "6,-2,4|3,1,2|30,-10,20|4,0,3|s3,s-1,s2|4,5,6|3,3,3"},
+		{"class constructor", `return [1].map(class C {})`, "!TypeError"},
+		{"holes and growth", `const a = [1, , 3]; const seen = []; a.forEach((x, i) => { seen.push(i + ":" + x); if (i === 0) a.push(9); }); const b = [1, 2, 3, 4]; const m = b.map((x, i) => { if (i === 1) b.length = 2; return x * 10; }); return [seen.join(" "), m.length, 2 in m, m.join(" ")].join("|")`, "0:1 2:3|4|false|10 20  "},
+		{"filter reduce find", `const a = [5, 1, 4, , 2]; return [a.filter(x => x > 1).join(), a.reduce((s, x) => s + x), a.reduce((s, x) => s + x, 100), a.reduceRight((s, x) => s + "" + x, ""), a.find(x => x < 3), a.findIndex(x => x === 4), a.findLast(x => x > 3), a.findLastIndex(x => x === undefined), a.some(x => x === 2), a.every(x => x > 0)].join("|")`, "5,4,2|12|112|2415|1|2|4|3|true|true"},
+		{"throw", `const a = [1, 2, 3]; let n = 0; let e; try { a.map(x => { n++; if (x === 2) throw new Error("at " + x); return x; }); } catch (x) { e = x.message; } return [e, n, a.map(x => x + 1).join()].join("|")`, "at 2|2|2,3,4"},
+		{"re-entry", `const a = [1, 2]; return a.map(x => a.map(y => a.filter(z => z <= y).length * x).join("+")).join(",")`, "1+2,2+4"},
+		{"deep re-entry", `function f(n) { return n === 0 ? 0 : [n].map(x => f(x - 1) + 1)[0]; } let e; try { f(1000); } catch (x) { e = x.name; } return [f(100), e].join()`, "100,RangeError"},
+		{"sort", `const a = [3, 1, 2, 10]; return [a.slice().sort((p, q) => p - q), a.slice().sort((p, q) => String(q - p)), a.slice().sort((p, q) => ({valueOf() { return p - q; }})), a.slice().sort(() => NaN), a.slice().sort((p, q) => q > p ? 1 : -0), a.slice().sort((p, q) => (p - q) * Infinity), a.slice().sort(Math.max === 1 ? null : undefined)].join("|")`, "1,2,3,10|10,3,2,1|1,2,3,10|3,1,2,10|10,3,2,1|1,2,3,10|1,10,2,3"},
+		{"sort comparator throws", `const a = [3, 1, 2]; let e; try { a.sort((p, q) => { throw new Error("cmp"); }); } catch (x) { e = x.message; } return [e, a.join()].join("|")`, "cmp|3,1,2"},
+		{"sort comparator symbol", `return [2, 1].sort(() => Symbol())`, "!TypeError"},
+		{"sort comparator bigint", `return [2, 1].sort(() => 1n)`, "!TypeError"},
+		{"sort holes", `const a = [3, , undefined, 1]; a.sort((p, q) => p - q); return [a.length, a[0], a[1], a[2], 3 in a].join()`, "4,1,3,,false"},
+	})
+}

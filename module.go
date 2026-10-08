@@ -16,8 +16,7 @@ import (
 // Module is a compiled ES module. It is immutable: any number of runtimes
 // may load it, concurrently.
 type Module struct {
-	name string
-	code *bytecode.Function
+	code *bytecode.Function // its Source.Name is the module's name
 	// graph is the graph of a module Link returned, nil for one Compile
 	// returned.
 	graph *linked
@@ -28,6 +27,7 @@ type Module struct {
 	// self is the graph of the module alone (selfGraph), for a module that
 	// requests none, once Load or an Importer needed it.
 	self atomic.Pointer[engine.ModuleGraph]
+	ts   bool // CompileTS compiled it
 }
 
 // linked is the graph of a module Link returned.
@@ -43,7 +43,24 @@ type linked struct {
 // the engine does not support yet, is a *SyntaxError. A module that imports
 // others is loaded once Link linked it with them.
 func Compile(name, source string) (*Module, error) {
-	mod, err := syntax.ParseModule(name, source, syntax.Options{})
+	return compile(name, source, syntax.Options{})
+}
+
+// CompileTS is Compile for TypeScript source. The parser erases the type
+// syntax as it reads it, so a *SyntaxError and a stack trace refer to the
+// TypeScript text, and Function.prototype.toString returns it. An import
+// specifier whose binding is only used as a type is dropped, and so is an
+// import declaration left without bindings, as tsc drops them; an export
+// of a type is dropped too. TypeScript that has run-time semantics (enum,
+// a namespace with values, parameter properties, import = require,
+// export =) is a *SyntaxError. The module links and loads like any other;
+// a Resolver or an Importer may return modules compiled either way.
+func CompileTS(name, source string) (*Module, error) {
+	return compile(name, source, syntax.Options{TypeScript: true})
+}
+
+func compile(name, source string, opts syntax.Options) (*Module, error) {
+	mod, err := syntax.ParseModule(name, source, opts)
 	if err != nil {
 		return nil, syntaxError(err)
 	}
@@ -51,7 +68,7 @@ func Compile(name, source string) (*Module, error) {
 	if err != nil {
 		return nil, syntaxError(err)
 	}
-	return &Module{name: name, code: code}, nil
+	return &Module{code: code, ts: opts.TypeScript}, nil
 }
 
 func syntaxError(err error) error {
@@ -67,7 +84,7 @@ func syntaxError(err error) error {
 }
 
 // Name returns the name given to Compile.
-func (m *Module) Name() string { return m.name }
+func (m *Module) Name() string { return m.code.Source.Name }
 
 // Exports returns the module's export names, sorted: for a module Link
 // returned, the names it re-exports too, without those its star exports
@@ -190,7 +207,7 @@ func Link(entry *Module, resolve Resolver) (*Module, error) {
 	for i, name := range l.exports {
 		l.bindings[i], _ = g.Binding(name)
 	}
-	return &Module{name: entry.name, code: entry.code, graph: l}, nil
+	return &Module{code: entry.code, graph: l, ts: entry.ts}, nil
 }
 
 // earlyExports returns the module compiled with its exported functions
@@ -200,7 +217,7 @@ func (m *Module) earlyExports() (*bytecode.Function, error) {
 	if code := m.early.Load(); code != nil {
 		return code, nil
 	}
-	mod, err := syntax.ParseModule(m.code.Source.Name, m.code.Source.Src, syntax.Options{EarlyExports: true})
+	mod, err := syntax.ParseModule(m.code.Source.Name, m.code.Source.Src, syntax.Options{EarlyExports: true, TypeScript: m.ts})
 	if err != nil {
 		return nil, syntaxError(err)
 	}

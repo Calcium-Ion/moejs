@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+	"unsafe"
 )
 
 func init() {
@@ -192,10 +193,14 @@ func textEncoderEncodeInto(r *Realm, this Value, args []Value) (Value, error) {
 // utf8Length returns the length of the UTF-8 encoding of s, lone surrogates
 // counted as U+FFFD, honouring the interrupt flag on long strings.
 func (r *Realm) utf8Length(s *String) (int, error) {
-	if s.IsASCII() {
-		return s.Len(), nil
+	f := s
+	if s.kind == strRope {
+		f = s.flat(new(String))
 	}
-	u, n := s.u, 0
+	if f.kind == strASCII {
+		return f.Len(), nil
+	}
+	u, n := f.units(), 0
 	for i := 0; i < len(u); {
 		stop := min(len(u), i+copyBytesChunk)
 		for ; i < stop; i++ {
@@ -225,7 +230,12 @@ func (r *Realm) utf8Length(s *String) (int, error) {
 // units it read and the bytes it wrote. It honours the interrupt flag on
 // long strings.
 func (r *Realm) encodeUTF8(dst []byte, s *String) (read, written int, err error) {
-	if a, ok := s.ASCII(); ok {
+	f := s
+	if s.kind == strRope {
+		f = s.flat(new(String))
+	}
+	if f.kind == strASCII {
+		a := f.s
 		n := min(len(a), len(dst))
 		for read < n {
 			end := min(n, read+copyBytesChunk)
@@ -238,7 +248,7 @@ func (r *Realm) encodeUTF8(dst []byte, s *String) (read, written int, err error)
 		}
 		return n, n, nil
 	}
-	u := s.u
+	u := f.units()
 	for read < len(u) {
 		stop := min(len(u), read+copyBytesChunk)
 		i, w := encodeUTF16Units(dst[written:], u, read, stop)
@@ -382,6 +392,7 @@ func textDecoderConstruct(r *Realm, args []Value, newTarget *Object) (Value, err
 	}
 	r.markPrototype(proto)
 	do := &textDecoderObject{dec: textDecoder{fatal: fatal, ignoreBOM: ignoreBOM}}
+	r.chargeObject(unsafe.Sizeof(textDecoderObject{}))
 	do.dec.resetSequence()
 	o := &do.obj
 	o.shape = r.rootShapeFor(proto)
@@ -521,6 +532,7 @@ func (r *Realm) decodeUTF8(d *textDecoder, in []byte, stream bool) (*String, err
 				return emptyString, nil
 			}
 			s, dst := newASCIIBuf(n)
+			r.chargeString(n)
 			if err := r.copyBytes(dst, in); err != nil {
 				return nil, err
 			}
@@ -534,6 +546,7 @@ func (r *Realm) decodeUTF8(d *textDecoder, in []byte, stream bool) (*String, err
 	// past it), so bounded by the room left, the check after it throws
 	// before a store can run past u. k counts the units stored.
 	u, k := make([]uint16, min(len(in), maxStringLength+1)+4), n
+	r.chargeString(2 * len(u))
 	for i := 0; i < n; {
 		end := min(n, i+copyBytesChunk)
 		for j, b := range in[i:end] {
@@ -674,7 +687,7 @@ func (r *Realm) decodeUTF8(d *textDecoder, in []byte, stream bool) (*String, err
 	if cap(u)-len(u) > len(u)/4+64 {
 		u = append([]uint16(nil), u...)
 	}
-	return &String{u: u, n: int32(len(u)), kind: strUTF16}, nil
+	return utf16String(u), nil
 }
 
 // putUTF16Rune stores the UTF-16 encoding of the scalar value c at u[k:]

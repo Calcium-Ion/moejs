@@ -89,6 +89,51 @@ func TestJSONScan(t *testing.T) {
 	}
 }
 
+// TestJSONASCII checks jsonASCII and isASCIILong against byte loops: each
+// special byte, and the fillers jsonMaybeSpecial also flags (' ', '!') or
+// sits next to, at every offset of strings around the 64-byte blocks, then
+// past a filler ending the plain prefix, and a second special after the
+// first (a borrow can flag the bytes above the first).
+func TestJSONASCII(t *testing.T) {
+	ref := func(s string) (ascii, plain bool) {
+		return isASCII(s), refJSONScan(s, 0, swarMSB) == len(s)
+	}
+	check := func(s string) {
+		t.Helper()
+		ascii, plain := jsonASCII(s)
+		wa, wp := ref(s)
+		require.Equal(t, [2]bool{wa, wp}, [2]bool{ascii, plain}, "%q", s)
+		require.Equal(t, wa, isASCIILong(s), "%q", s)
+	}
+	specials := []byte{0x00, 0x1f, '"', '\\', 0x80, 0xc3, 0xff}
+	fillers := []byte{0x20, 0x21, 0x23, 0x5b, 0x5d, 0x7f}
+	for _, n := range []int{0, 1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 200} {
+		base := strings.Repeat("QUJD+/==", n/8+1)[:n]
+		check(base)
+		for p := range n {
+			for _, c := range append(specials, fillers...) {
+				b := []byte(base)
+				b[p] = c
+				check(string(b))
+				for _, q := range []int{p + 1, p + 8, p + 64} {
+					if q < n {
+						b2 := append([]byte(nil), b...)
+						b2[q] = '"'
+						check(string(b2))
+					}
+				}
+			}
+		}
+	}
+	for _, c := range append(specials, fillers...) {
+		for _, p := range []int{0, jsonPlainMin / 2, jsonPlainMin - 1} {
+			b := []byte(strings.Repeat("QUJD+/==", jsonPlainMin/8))
+			b[p] = c
+			check(string(b))
+		}
+	}
+}
+
 func stringifyUnits(t *testing.T, r *Realm, s *String) []uint16 {
 	t.Helper()
 	out, err := r.JSONStringify(StringValue(s))
@@ -418,13 +463,19 @@ func TestFromGoLongStringJSON(t *testing.T) {
 				variants = append(variants, string(append(b, base[p+1:]...)))
 			}
 		}
-		for _, g := range variants {
+		for i, g := range variants {
 			want := refQuoteJSON(FromGoString(g).UTF16())
 			o, err := r.FromGo(map[string]any{"s": g})
 			require.NoError(t, err)
 			v, err := o.AsObject().GetProp(r, r.KeyFromGoString("s"))
 			require.NoError(t, err)
-			require.Equal(t, want, stringifyUnits(t, r, v.AsString()), "n=%d", n)
+			s := v.AsString()
+			deferred := n >= jsonPlainMin && s.kind == strASCII
+			require.Equal(t, deferred, s.json == jsonDeferred, "n=%d", n)
+			require.Equal(t, deferred, s.json != 0, "n=%d", n)
+			require.Equal(t, want, stringifyUnits(t, r, s), "n=%d", n)
+			require.Equal(t, deferred && i == 0, s.json == jsonPlain, "n=%d", n) // variants[0] has no escape
+			require.Equal(t, deferred && i == 0, s.json != 0, "n=%d", n)
 			out, ok, err := r.AppendJSON(nil, v)
 			require.NoError(t, err)
 			require.True(t, ok)

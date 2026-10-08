@@ -16,10 +16,15 @@ import (
 // then hands out one co-allocated string. Longer results spill into a heap
 // slice that the result aliases, as before.
 type StringBuilder struct {
-	b      []byte   // heap ASCII storage once the inline array overflowed; nil before
-	u      []uint16 // UTF-16 storage after the upgrade; nil before
-	n      int      // bytes used in inline while b == nil && u == nil
-	inline [smallASCIIMax]byte
+	b []byte   // heap ASCII storage once the inline array overflowed; nil before
+	u []uint16 // UTF-16 storage after the upgrade; nil before
+	n int32    // bytes used in inline while b == nil && u == nil
+	// checked is the length up to which checkLength has nothing to do: the
+	// capacity in code units it last saw (and charged to a memory limit,
+	// memlimit.go), at most maxStringLength. It shares n's word, so that
+	// the JSON stringifier holding a builder keeps its size class.
+	checked int32
+	inline  [smallASCIIMax]byte
 }
 
 // Grow reserves capacity for n more code units.
@@ -33,8 +38,8 @@ func (sb *StringBuilder) Grow(n int) {
 		return
 	}
 	if sb.b == nil {
-		if sb.n+n > len(sb.inline) {
-			sb.spill(sb.n + n)
+		if int(sb.n)+n > len(sb.inline) {
+			sb.spill(int(sb.n) + n)
 		}
 		return
 	}
@@ -56,10 +61,11 @@ func (sb *StringBuilder) spill(c int) {
 // growFor reserves n code units in the storage kind of s, so that copying
 // from a UTF-16 string never goes through the ASCII buffer and an upgrade.
 func (sb *StringBuilder) growFor(s *String, n int) {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strUTF16 && sb.u == nil && sb.b == nil && sb.n == 0 {
+	if f.kind == strUTF16 && sb.u == nil && sb.b == nil && sb.n == 0 {
 		sb.u = make([]uint16, 0, n)
 		return
 	}
@@ -70,25 +76,68 @@ func (sb *StringBuilder) growFor(s *String, n int) {
 // whose output can outgrow their inputs (join, replace, JSON.stringify, case
 // conversion) call it after each unbounded append, so the limit is raised
 // as RangeError: Invalid string length before String would build a *String
-// whose int32 length could not hold the result.
+// whose int32 length could not hold the result. It also charges the
+// builder's storage to a memory limit as it grows, and returns the
+// interrupt's error once that passes the limit.
 func (sb *StringBuilder) checkLength(r *Realm) error {
-	if sb.Len() > maxStringLength {
-		return r.stringTooLong()
+	// The inline bytes are short and on the stack: only heap storage that
+	// outgrew the last check's capacity needs the slow path.
+	if len(sb.b)+len(sb.u) > int(sb.checked) {
+		return r.checkBuilder(sb)
 	}
 	return nil
 }
 
-// stringTooLong is invalidStringLength kept out of line, so that
-// checkLength inlines into the loops that call it.
+// capBytes is the size of the builder's heap storage.
+func (sb *StringBuilder) capBytes() int { return cap(sb.b) + 2*cap(sb.u) }
+
+// checkBuilder is checkLength's slow path, kept out of line so that
+// checkLength inlines into the loops that call it: it runs at a builder's
+// first check past its inline bytes and when the builder outgrew the
+// capacity of the last check.
+// Growing allocates the whole new capacity, which it charges.
 //
 //go:noinline
-func (r *Realm) stringTooLong() error { return r.invalidStringLength() }
+func (r *Realm) checkBuilder(sb *StringBuilder) error {
+	if sb.Len() > maxStringLength {
+		return r.invalidStringLength()
+	}
+	sb.checked = int32(min(sb.capUnits(), maxStringLength))
+	if c := sb.capBytes(); c > 0 && r.mem() != nil {
+		return r.reserve(c)
+	}
+	return nil
+}
+
+// capUnits is the capacity of the builder's storage in code units.
+func (sb *StringBuilder) capUnits() int {
+	if sb.b == nil && sb.u == nil {
+		return len(sb.inline)
+	}
+	return cap(sb.b) + cap(sb.u)
+}
+
+// builtString is sb.String() for a producer's result, charging the
+// result's header and the storage checkLength has not charged.
+func (r *Realm) builtString(sb *StringBuilder) *String {
+	if r.mem() != nil {
+		n := int(sb.n)
+		if sb.b != nil || sb.u != nil {
+			n = 0
+			if int(sb.checked) != sb.capUnits() {
+				n = sb.capBytes()
+			}
+		}
+		r.chargeString(n)
+	}
+	return sb.String()
+}
 
 // Len returns the number of code units written so far. Only one of the
 // three stores holds them (spill and upgrade empty the one they leave), so
 // the sum is the length of that one, without branches.
 func (sb *StringBuilder) Len() int {
-	return len(sb.u) + len(sb.b) + sb.n
+	return len(sb.u) + len(sb.b) + int(sb.n)
 }
 
 // ascii returns the ASCII bytes written so far (valid only while u == nil;
@@ -133,7 +182,7 @@ func (sb *StringBuilder) WriteASCII(c byte) {
 		return
 	}
 	if sb.b == nil {
-		if sb.n < len(sb.inline) {
+		if int(sb.n) < len(sb.inline) {
 			sb.inline[sb.n] = c
 			sb.n++
 			return
@@ -155,11 +204,11 @@ func (sb *StringBuilder) writeASCIIBytes(s string) {
 		return
 	}
 	if sb.b == nil {
-		if sb.n+len(s) <= len(sb.inline) {
-			sb.n += copy(sb.inline[sb.n:], s)
+		if int(sb.n)+len(s) <= len(sb.inline) {
+			sb.n += int32(copy(sb.inline[sb.n:], s))
 			return
 		}
-		sb.spill(max(2*len(sb.inline), sb.n+len(s)))
+		sb.spill(max(2*len(sb.inline), int(sb.n)+len(s)))
 	}
 	sb.b = append(sb.b, s...)
 }
@@ -189,14 +238,29 @@ func (sb *StringBuilder) WriteGoString(s string) {
 // WriteString appends a JavaScript string.
 func (sb *StringBuilder) WriteString(s *String) {
 	if s.kind == strRope {
-		s.flatten()
+		sb.writeRope(s)
+		return
 	}
 	if s.kind == strASCII {
 		sb.writeASCIIBytes(s.s)
 		return
 	}
 	sb.upgrade()
-	sb.u = append(sb.u, s.u...)
+	sb.u = append(sb.u, s.units()...)
+}
+
+// writeRope is WriteString of a rope, out of line so that the view (flat)
+// does not grow WriteString's frame.
+//
+//go:noinline
+func (sb *StringBuilder) writeRope(s *String) {
+	f := s.flat(new(String))
+	if f.kind == strASCII {
+		sb.writeASCIIBytes(f.s)
+		return
+	}
+	sb.upgrade()
+	sb.u = append(sb.u, f.units()...)
 }
 
 // WriteUTF16 appends raw code units: one at a time until the first unit >=
@@ -238,7 +302,7 @@ func (sb *StringBuilder) truncate(n int) {
 	case sb.b != nil:
 		sb.b = sb.b[:n]
 	default:
-		sb.n = n
+		sb.n = int32(n)
 	}
 }
 
@@ -247,4 +311,5 @@ func (sb *StringBuilder) Reset() {
 	sb.b = nil
 	sb.u = nil
 	sb.n = 0
+	sb.checked = 0
 }

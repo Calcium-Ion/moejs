@@ -1,19 +1,14 @@
 package engine
 
 // Layout: the linker places functions in file order, each aligned to 32
-// bytes, and the interpreter's speed depends on the 64-byte phase of
-// (*Realm).run (propGetMono moves by about 8 %). This file's name links
-// ReleaseCallData after interp_run.go and object.go, so run, enterFrame,
-// CallObject, callValue and lookupNamed keep dev's phase whatever its size.
-// Its size, 997 bytes padded to 1024 (895 padded to 896, tuned by the
-// order of the RegExp reset's two statements, before the reset of the last
-// match), keeps the functions linked after it, the RegExp backtracker,
-// (*String).flatten and the moejs package's (*Runtime).Call among them, in
-// dev's phase too: its padded size may only change by a multiple of 64 (at
-// 901 bytes they moved by 32). After changing this function, or the size
-// of anything linked before run, build the bench test binary (go test -c
-// in bench) on both sides and compare these functions' addresses in go
-// tool nm -size -sort address, mod 64.
+// bytes by default, and the interpreter's speed depends on the 64-byte
+// phase of (*Realm).run (propGetMono moves by about 8 %). This file's name
+// and ReleaseCallData's size, and the places of a few functions elsewhere
+// in the package (escapeByte, proxy, sweepWeak, JobsPending, ownCap), were
+// tuned to keep the hot functions' phase in the test binaries. That tuning
+// is over: the gate's binaries link with -funcalign=64 (docs/DESIGN.md
+// §14.2), where every function starts a 64-byte line whatever comes before
+// it, so none of these sizes and places needs keeping.
 
 // Past these sizes ReleaseCallData lets a deep recursion's register stack
 // and frame table go instead of clearing them; the next call allocates the
@@ -31,7 +26,7 @@ const (
 // of their subjects; and the last match, which the legacy RegExp statics
 // (RegExp.$1, RegExp.input and the rest) describe: they read "" again, as
 // in a new realm. Values already returned stay valid: their nodes keep
-// their own storage.
+// their own storage. It also starts a new memory budget (ResetAllocation).
 //
 // It ends the host conversion's period, which otherwise ends at the next
 // top-level FromGo, so a host calls it where a request ends, after the
@@ -69,5 +64,8 @@ func (r *Realm) ReleaseCallData() {
 	}
 	if lz := r.lazy; lz != nil {
 		lz.statics = nil
+		if lz.mem != nil {
+			r.ResetAllocation()
+		}
 	}
 }

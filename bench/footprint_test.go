@@ -28,6 +28,7 @@ func footprintEngines() []engines.Engine {
 		engines.NewMoejsEngineWith(engines.MoejsOptions{MutableIntrinsics: true, Host: engines.DefaultHost}),
 		engines.NewSobekEngine(),
 		engines.NewQuickJSEngine(),
+		engines.NewQuickJSTunedEngine(),
 		engines.NewV8Engine(),
 	}
 }

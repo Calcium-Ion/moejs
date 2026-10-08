@@ -24,12 +24,13 @@ type parser struct {
 	isModule bool
 	awaitKw  bool // await is a keyword: in modules and async functions
 	yieldKw  bool // yield is a keyword in sloppy code: in generators
+	ts       bool // TypeScript (Options.TypeScript): tsx holds its state
 	prevEnd  int  // end offset of the previously consumed token
 	depth    int  // recursion units in flight (MaxNestingDepth)
 
 	// Statement context; saved and reset at every function boundary.
-	funcDepth     int // functions of any kind enclosing the current position
-	nonArrowDepth int // non-arrow functions enclosing the current position
+	funcDepth     int32 // functions of any kind enclosing the current position
+	nonArrowDepth int32 // non-arrow functions enclosing the current position
 	inLoop        int32
 	inSwitch      int32
 	labels        []label
@@ -44,6 +45,8 @@ type parser struct {
 	// spreadComma is the position of the last comma that followed a spread
 	// call argument: a trailing one rules out an async arrow's rest.
 	spreadComma int
+
+	tsx *tsShared // the TypeScript state (typescript.go), nil for JavaScript
 }
 
 type label struct {
@@ -56,8 +59,12 @@ type label struct {
 // tree. The error, when non-nil, is a *Error, or the error Options.Stop
 // returned.
 func ParseModule(name, src string, opts Options) (*Module, error) {
-	p := newParser(name, src, opts, true)
+	p := newParser(name, src, opts.Stop, true)
 	m := &Module{}
+	if opts.TypeScript {
+		p.ts, p.tsx = true, &tsShared{}
+		m.ts = &p.tsx.info
+	}
 	if err := p.run(func() { m.Program = p.parseProgram() }); err != nil {
 		return nil, err
 	}
@@ -72,7 +79,10 @@ func ParseModule(name, src string, opts Options) (*Module, error) {
 // Import and export declarations are rejected; HTML-like comments are
 // recognised.
 func ParseScript(name, src string, opts Options) (*Script, error) {
-	p := newParser(name, src, opts, false)
+	if opts.TypeScript {
+		return nil, newFile(name, src).errorAt(0, "TypeScript is only supported in modules")
+	}
+	p := newParser(name, src, opts.Stop, false)
 	s := &Script{}
 	if err := p.run(func() { s.Program = p.parseProgram(); s.Strict = p.strict }); err != nil {
 		return nil, err
@@ -83,8 +93,8 @@ func ParseScript(name, src string, opts Options) (*Script, error) {
 	return s, nil
 }
 
-func newParser(name, src string, opts Options, isModule bool) *parser {
-	p := &parser{stop: opts.Stop, isModule: isModule, awaitKw: isModule}
+func newParser(name, src string, stop func() error, isModule bool) *parser {
+	p := &parser{stop: stop, isModule: isModule, awaitKw: isModule}
 	p.html, p.strict = !isModule, isModule
 	p.lexer.init(newFile(name, src))
 	return p
@@ -353,7 +363,12 @@ func (p *parser) parseProgram() Program {
 	}
 	for p.tok != EOF {
 		poll(p.stop, len(prog.Body))
-		prog.Body = append(prog.Body, p.parseModuleItem())
+		if p.ts {
+			p.tsx.top = p.start + 1
+		}
+		if s := p.parseModuleItem(); s != nil {
+			prog.Body = append(prog.Body, s)
+		}
 	}
 	prog.End = len(p.src)
 	return prog
@@ -454,11 +469,25 @@ func (p *parser) parseModuleItem() Stmt {
 func (p *parser) parseStatementListItem() Stmt {
 	switch p.tok {
 	case KwFunction:
+		if p.ts {
+			return p.tsFunctionDecl(p.start, false, true)
+		}
 		return p.parseFunctionDecl(p.start, false, true)
 	case KwClass:
 		return p.parseClassDecl(true)
 	case KwConst:
+		if p.ts {
+			if s, kind := p.tsDeclaration(); kind != tsNoDecl {
+				return s
+			}
+		}
 		return p.parseVarDeclStmt(DeclConst)
+	case KwInterface, KwEnum:
+		if p.ts {
+			if s, kind := p.tsDeclaration(); kind != tsNoDecl {
+				return s
+			}
+		}
 	case KwLet:
 		if p.strict || p.isLetDecl(false) {
 			return p.parseVarDeclStmt(DeclLet)
@@ -474,7 +503,15 @@ func (p *parser) parseStatementListItem() Stmt {
 			if tok, nl, _ := p.peek(); tok == KwFunction && !nl {
 				start := p.start
 				p.next()
+				if p.ts {
+					return p.tsFunctionDecl(start, true, true)
+				}
 				return p.parseFunctionDecl(start, true, true)
+			}
+		}
+		if p.ts {
+			if s, kind := p.tsDeclaration(); kind != tsNoDecl {
+				return s
 			}
 		}
 	}
@@ -546,10 +583,21 @@ func (p *parser) parseStatement() Stmt {
 		p.fail(start, "Lexical declaration cannot appear in a single-statement context")
 	case KwConst:
 		p.fail(start, "Lexical declaration cannot appear in a single-statement context")
+	case KwInterface, KwEnum:
+		if p.ts {
+			if s := p.tsSingleDeclaration(start); s != nil {
+				return s
+			}
+		}
 	case Identifier:
 		if p.isIdent("async") {
 			if tok, nl, _ := p.peek(); tok == KwFunction && !nl {
 				p.fail(start, "Async functions can only be declared at the top level or inside a block.")
+			}
+		}
+		if p.ts {
+			if s := p.tsSingleDeclaration(start); s != nil {
+				return s
 			}
 		}
 		if tok, _, _ := p.peek(); tok == Colon {
@@ -596,7 +644,9 @@ func (p *parser) parseBlock() *BlockStmt {
 			p.unexpected()
 		}
 		poll(p.stop, len(body))
-		body = append(body, p.parseStatementListItem())
+		if s := p.parseStatementListItem(); s != nil {
+			body = append(body, s)
+		}
 	}
 	p.next()
 	return &BlockStmt{Span: Span{start, p.prevEnd}, Body: body}
@@ -618,6 +668,9 @@ func (p *parser) parseVarDecl(kind DeclKind, noIn, forHead bool) *VarDecl {
 	for {
 		d := &Declarator{Span: Span{p.start, 0}}
 		d.Target = p.parseBindingTarget()
+		if p.ts {
+			p.tsDeclaratorType(d.Target)
+		}
 		if kind != DeclVar && !p.strict {
 			p.checkLexicalLet(d.Target)
 		}
@@ -949,7 +1002,9 @@ func (p *parser) parseSwitch() Stmt {
 				p.unexpected()
 			}
 			poll(p.stop, len(c.Body))
-			c.Body = append(c.Body, p.parseStatementListItem())
+			if s := p.parseStatementListItem(); s != nil {
+				c.Body = append(c.Body, s)
+			}
 		}
 		c.End = p.prevEnd
 		sw.Cases = append(sw.Cases, c)
@@ -967,6 +1022,9 @@ func (p *parser) parseTry() Stmt {
 	if p.eat(KwCatch) {
 		if p.eat(LParen) {
 			t.Param = p.parseBindingTarget()
+			if p.ts {
+				p.tsTypeAnnotation()
+			}
 			p.expect(RParen)
 		}
 		t.Handler = p.parseBlock()
@@ -1031,6 +1089,9 @@ func (p *parser) parseIdentifierName() *Ident {
 func (p *parser) parseImport() Stmt {
 	start := p.start
 	p.next()
+	if p.ts {
+		return p.tsImport(start)
+	}
 	decl := &ImportDecl{}
 	if p.tok == String {
 		decl.Source = p.parseModuleSource()
@@ -1107,6 +1168,11 @@ func (p *parser) finishImport(start int, decl *ImportDecl) Stmt {
 func (p *parser) parseExport() Stmt {
 	start := p.start
 	p.next()
+	if p.ts {
+		if s, ok := p.tsExport(start); ok {
+			return s
+		}
+	}
 	switch p.tok {
 	case KwDefault:
 		return p.parseExportDefault(start)
@@ -1235,7 +1301,7 @@ func (p *parser) parseBindingIdent() *Ident {
 }
 
 func (p *parser) checkBindingName(id *Ident) {
-	if p.strict && (id.Name == "eval" || id.Name == "arguments") {
+	if p.strict && (id.Name == "eval" || id.Name == "arguments") && (!p.ts || p.tsx.ambient == 0) {
 		p.fail(id.Pos, "Unexpected eval or arguments in strict mode")
 	}
 }

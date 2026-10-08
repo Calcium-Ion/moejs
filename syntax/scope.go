@@ -188,11 +188,17 @@ func resolveModule(m *Module, opts Options) error {
 		m.Scope = root
 		r.scope = root
 		r.hoist(root, m.Body, nil, true)
+		if m.ts != nil {
+			r.declareAliases(root)
+		}
 		r.declareLexical(root, m.Body)
 		r.stmts(m.Body)
 		r.finishFrame(r.frames[0])
 		r.markEvalSites()
 		m.HasDirectEval = len(r.evalSites) > 0
+		if m.ts != nil {
+			r.elideTypeImports()
+		}
 	})
 }
 
@@ -727,6 +733,10 @@ func (r *resolver) stmt(s Stmt) {
 		for _, spec := range s.Specs {
 			b := r.module.Scope.Lookup(spec.Local.Name)
 			if b == nil {
+				if r.tsTypeExport(spec.Local.Name) {
+					r.tsDropNode(spec)
+					continue
+				}
 				r.fail(spec.Local.Pos, "Export '"+spec.Local.Name+"' is not defined")
 			}
 			spec.Local.Binding = b
@@ -1297,6 +1307,10 @@ func (r *resolver) exportDecl(s *ExportDecl) {
 }
 
 func (r *resolver) exportDefault(s *ExportDefault) {
+	if r.tsTypeDefault(s.Decl) {
+		r.tsDropNode(s)
+		return
+	}
 	local := "*default*"
 	switch d := s.Decl.(type) {
 	case *FuncDecl:

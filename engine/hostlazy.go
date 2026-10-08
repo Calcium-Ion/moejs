@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"encoding/json"
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Lazy host conversion. FromGo turns a non-empty JSON-shaped Go map
@@ -124,11 +126,13 @@ type hostCounts struct {
 	maps, arrays, values, strings int
 }
 
-// The Go slice types a host array node converts (ArrayData.host).
+// The Go slice types a host array node converts (ArrayData.host); a
+// json.RawMessage is the text of an array (hostraw.go).
 const (
 	hostSliceAny uint8 = 1 + iota
 	hostSliceString
 	hostSliceMaps
+	hostSliceRaw
 )
 
 // Chunk sizing: a chunk holds exactly what the recent periods predict the
@@ -257,7 +261,8 @@ func strSlot(g string) int {
 }
 
 // str is FromGoString with the String header carved from a chunk; an ASCII
-// Go string already converted this period yields the same String.
+// Go string already converted this period yields the same String. A long
+// one leaves its scan for JSON to its first use (jsonDeferred).
 func (h *hostHeap) str(g string) *String {
 	if len(g) == 0 {
 		return emptyString
@@ -275,8 +280,8 @@ func (h *hostHeap) str(g string) *String {
 	h.used.strings++
 	s := &h.strings[n]
 	if len(g) >= jsonPlainMin {
-		if ascii, plain := jsonASCII(g); ascii {
-			*s = String{s: g, n: int32(len(g)), kind: strASCII, jsonPlain: plain}
+		if isASCIILong(g) {
+			*s = String{s: g, n: int32(len(g)), kind: strASCII, json: jsonDeferred}
 			h.strs[slot] = s
 			return s
 		}
@@ -286,7 +291,8 @@ func (h *hostHeap) str(g string) *String {
 		return s
 	}
 	u := appendUTF16(make([]uint16, 0, len(g)), g)
-	*s = String{u: u, n: int32(len(u)), kind: strUTF16}
+	h.r.charge(2 * cap(u))
+	*s = String{p: unitsPtr(u), n: int32(len(u)), kind: strUTF16}
 	return s
 }
 
@@ -356,10 +362,15 @@ func (r *Realm) hostRoot(v any) (Value, bool) {
 	if h.touched && r.callDepth == 0 {
 		h.seal()
 	}
+	used := h.used
+	var root *Object
 	if slice != 0 {
-		return ObjectValue(h.sliceNode(h.rootArray(), v, slice, n)), true
+		root = h.sliceNode(h.rootArray(), v, slice, n)
+	} else {
+		root = h.mapNode(h.rootObject(), v)
 	}
-	return ObjectValue(h.mapNode(h.rootObject(), v)), true
+	h.chargeSince(used)
+	return ObjectValue(root), true
 }
 
 // child converts a value found inside a materializing container.
@@ -398,7 +409,7 @@ func (h *hostHeap) child(v any) (Value, error) {
 	case []map[string]any:
 		return h.sliceChild(v, hostSliceMaps, len(x)), nil
 	}
-	return h.r.fromGoOther(v)
+	return h.r.fromGoOther(v, h)
 }
 
 // mapChild converts a map[string]any child; boxing the map (a pointer) into
@@ -483,13 +494,19 @@ func (o *Object) resolveHost(key PropertyKey) bool {
 }
 
 // HostValue returns the Go map or slice o was converted from by FromGo when
-// JavaScript has not modified o (see the file comment); ok is false for
-// every other object.
+// JavaScript has not modified o (see the file comment), and for a
+// json.RawMessage JavaScript has not read a new RawMessage with its text;
+// ok is false for every other object.
 func (o *Object) HostValue() (v any, ok bool) {
-	if o.flags&flagHostNode == 0 || !o.hostUnchanged(0) {
+	// A placeholder is unchanged: no call of hostUnchanged for it.
+	if o.flags&flagHostNode == 0 || o.shape.key != hostSentinelKey && !o.hostUnchanged(0) {
 		return nil, false
 	}
-	return o.hostSrc(), true
+	src := o.hostSrc()
+	if t, ok := src.(rawText); ok {
+		return json.RawMessage(t), true // a copy, which the host may keep and change
+	}
+	return src, true
 }
 
 // hostSrc is the Go value of the host node o; nil for an array node whose
@@ -507,6 +524,7 @@ func (o *Object) hostSrc() any {
 
 // materialize converts one level of the placeholder o in place.
 func (h *hostHeap) materialize(o *Object) {
+	used := h.used
 	o.flags &^= flagDict | flagHasLazy
 	h.touched = true
 	if o.class == ClassArray {
@@ -519,9 +537,27 @@ func (h *hostHeap) materialize(o *Object) {
 			materializeMap(h, o, m, &h.strPairs, hostConvString{})
 		case map[string][]string:
 			materializeMap(h, o, m, &h.listPairs, hostConvList{})
+		case rawText: // a json.RawMessage (hostraw.go)
+			h.materializeRaw(o)
 		}
 	}
 	h.r.bumpEpoch(o)
+	h.chargeSince(used)
+}
+
+// chargeSince charges the storage the heap handed out since its usage was
+// used to the realm's memory limit: the objects, arrays, values and
+// strings of the chunks, by what a conversion takes, not by chunk.
+func (h *hostHeap) chargeSince(used hostCounts) {
+	if h.r.mem() == nil {
+		return
+	}
+	d := h.used
+	n := (d.maps-used.maps)*int(unsafe.Sizeof(Object{})) + (d.arrays-used.arrays)*int(unsafe.Sizeof(arrayObject{})) +
+		(d.values-used.values)*valueSize + (d.strings-used.strings)*stringHeaderSize
+	if n > 0 {
+		h.r.chargeMany(n, memObject, d.maps-used.maps+d.arrays-used.arrays)
+	}
 }
 
 func (h *hostHeap) materializeArray(o *Object) {
@@ -555,6 +591,8 @@ func (h *hostHeap) materializeArray(o *Object) {
 			items[i] = StringValue(h.str(s))
 		}
 		o.elements = items
+	default: // a json.RawMessage
+		h.materializeRaw(o)
 	}
 }
 
@@ -979,13 +1017,14 @@ func hostLen(src any) int {
 // string's Go form; like it, it is false for a g that is not valid UTF-8
 // (materialization replaced its bad bytes).
 func hostStringEquals(s *String, g string) bool {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return s.s == g
+	if f.kind == strASCII {
+		return f.s == g
 	}
-	u, i := s.u, 0
+	u, i := f.units(), 0
 	for _, c := range g {
 		if c < 0x10000 {
 			if i >= len(u) || u[i] != uint16(c) {

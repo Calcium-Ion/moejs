@@ -85,13 +85,17 @@ func uriEncode(r *Realm, v Value, unescaped *uriSet) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
+	f := s // s is returned, f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		str := s.s
+	if f.kind == strASCII {
+		str := f.s
 		extra := 0
 		for i := range len(str) {
+			if err := interruptEvery(r, int64(i)); err != nil {
+				return Undefined(), err
+			}
 			if !unescaped.has(str[i]) {
 				extra += 2
 			}
@@ -99,11 +103,15 @@ func uriEncode(r *Realm, v Value, unescaped *uriSet) (Value, error) {
 		if extra == 0 {
 			return StringValue(s), nil
 		}
-		if len(str)+extra > maxStringLength {
+		if len(str)+extra > maxStringLength || r.overBudget(len(str)+extra) {
 			return Undefined(), r.invalidStringLength()
 		}
+		r.chargeString(len(str) + extra)
 		b := make([]byte, 0, len(str)+extra)
 		for i := range len(str) {
+			if err := interruptEvery(r, int64(i)); err != nil {
+				return Undefined(), err
+			}
 			c := str[i]
 			if unescaped.has(c) {
 				b = append(b, c)
@@ -113,10 +121,13 @@ func uriEncode(r *Realm, v Value, unescaped *uriSet) (Value, error) {
 		}
 		return StringValue(asciiString(bytesToString(b))), nil
 	}
-	u := s.u
+	u := f.units()
 	b := make([]byte, 0, len(u)*3)
 	var tmp [4]byte
 	for i := 0; i < len(u); i++ {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		c := u[i]
 		if c < 0x80 {
 			if unescaped.has(byte(c)) {
@@ -139,9 +150,10 @@ func uriEncode(r *Realm, v Value, unescaped *uriSet) (Value, error) {
 			b = append(b, '%', upperHex[octet>>4], upperHex[octet&15])
 		}
 	}
-	if len(b) > maxStringLength {
+	if len(b) > maxStringLength || r.overBudget(cap(b)) {
 		return Undefined(), r.invalidStringLength()
 	}
+	r.chargeString(cap(b))
 	return StringValue(asciiString(bytesToString(b))), nil
 }
 
@@ -154,6 +166,9 @@ func uriDecode(r *Realm, v Value, reserved *uriSet) (Value, error) {
 	n := s.Len()
 	first := -1
 	for i := range n {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		if s.At(i) == '%' {
 			first = i
 			break
@@ -166,6 +181,9 @@ func uriDecode(r *Realm, v Value, reserved *uriSet) (Value, error) {
 	sb.Grow(n)
 	sb.WriteString(s.Substring(0, first))
 	for k := first; k < n; k++ {
+		if err := interruptEvery(r, int64(k)); err != nil {
+			return Undefined(), err
+		}
 		c := s.At(k)
 		if c != '%' {
 			sb.WriteUnit(c)
@@ -223,7 +241,7 @@ func uriDecode(r *Realm, v Value, reserved *uriSet) (Value, error) {
 		}
 		sb.WriteRune(cp)
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // hexOctetAt parses the two hex digits after the '%' at s[k].
@@ -268,9 +286,10 @@ func globalEscape(r *Realm, this Value, args []Value) (Value, error) {
 	if size == n {
 		return StringValue(s), nil
 	}
-	if size > maxStringLength {
+	if size > maxStringLength || r.overBudget(size) {
 		return Undefined(), r.invalidStringLength()
 	}
+	r.chargeString(size)
 	b := make([]byte, 0, size)
 	for i := range n {
 		switch c := s.At(i); {
@@ -295,6 +314,9 @@ func globalUnescape(r *Realm, this Value, args []Value) (Value, error) {
 	n := s.Len()
 	first := -1
 	for i := range n {
+		if err := interruptEvery(r, int64(i)); err != nil {
+			return Undefined(), err
+		}
 		if s.At(i) == '%' {
 			first = i
 			break
@@ -324,7 +346,7 @@ func globalUnescape(r *Realm, this Value, args []Value) (Value, error) {
 		}
 		sb.WriteUnit(c)
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // hexUnitsAt parses the n hex digits at s[k:], which may run past the end.
@@ -449,9 +471,10 @@ func globalBtoa(r *Realm, this Value, args []Value) (Value, error) {
 	}
 	n := s.Len()
 	size := (n + 2) / 3 * 4
-	if size > maxStringLength {
+	if size > maxStringLength || r.overBudget(size) {
 		return Undefined(), r.invalidStringLength()
 	}
+	r.chargeString(size)
 	out := make([]byte, 0, size)
 	for i := 0; i < n; i += 3 {
 		if err := interruptEvery(r, int64(i)); err != nil {

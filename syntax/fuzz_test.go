@@ -73,6 +73,37 @@ func FuzzParse(f *testing.F) {
 	})
 }
 
+// FuzzParseTS parses as TypeScript: no input panics or hangs, an error is
+// a *Error at a valid position, and a tree has a consistent scope
+// annotation and parses again to the same tree.
+func FuzzParseTS(f *testing.F) {
+	for _, s := range fuzzSeeds {
+		f.Add(s)
+	}
+	for _, p := range tsPairs {
+		f.Add(p.ts)
+	}
+	f.Fuzz(func(t *testing.T, src string) {
+		m, err := ParseModule("fuzz.js", src, Options{TypeScript: true})
+		if err != nil {
+			se, ok := err.(*Error)
+			if !ok {
+				t.Fatalf("error is %T, want *syntax.Error: %v", err, err)
+			}
+			fuzzCheckError(t, src, se)
+			return
+		}
+		fuzzCheckScopes(t, m, m.Scope)
+		again, err := ParseModule("fuzz.js", src, Options{TypeScript: true, AllowUnsupported: true})
+		if err != nil {
+			t.Fatalf("parses once but not twice: %v", err)
+		}
+		if d1, d2 := Dump(m), Dump(again); d1 != d2 {
+			t.Fatalf("a second parse gave another tree:\n%s\n---\n%s", d1, d2)
+		}
+	})
+}
+
 // fuzzCheckParse checks one parse outcome: an error is a *Error at a valid
 // position; a tree has a consistent scope annotation, dumps identically on a
 // second parse, and parses to the same tree with AllowUnsupported (which
@@ -138,7 +169,8 @@ func fuzzPosition(src string, pos int) (line, col int) {
 }
 
 // fuzzCheckScopes checks the scope pass: every scope's bindings name their
-// scope and slot and are unique by name, children point at their parent,
+// scope and slot and are unique by name (but the hidden keys of computed
+// fields), children point at their parent,
 // and every identifier bound to a binding matches its name and belongs to
 // a scope of this tree.
 func fuzzCheckScopes(t *testing.T, prog Node, root *Scope) {
@@ -154,7 +186,9 @@ func fuzzCheckScopes(t *testing.T, prog Node, root *Scope) {
 			if b.Scope != s || b.Slot != i {
 				t.Fatalf("binding %q: scope/slot (%p, %d), want (%p, %d)", b.Name, b.Scope, b.Slot, s, i)
 			}
-			if got := s.Lookup(b.Name); got != b {
+			// Each computed field key has a hidden binding of its own,
+			// all named %key and reached through ClassMember.KeyBinding.
+			if got := s.Lookup(b.Name); got != b && b.Name != hiddenKey {
 				t.Fatalf("binding %q is declared twice in one %s scope", b.Name, s.Kind)
 			}
 		}

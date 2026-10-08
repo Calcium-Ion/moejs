@@ -219,9 +219,12 @@ func TestToGoIntoInvalidTargets(t *testing.T) {
 	r := NewRealm()
 	v := evalValue(t, r, `({a: 1})`)
 	var m map[string]any
-	for _, target := range []any{nil, m, (*map[string]any)(nil), tgTarget{}, new(json.RawMessage)} {
+	for _, target := range []any{nil, m, (*map[string]any)(nil), tgTarget{}} {
 		require.False(t, r.ToGoInto(v, target))
 	}
+	raw := new(json.RawMessage) // the text of the value, json.Marshal's
+	require.True(t, r.ToGoInto(v, raw))
+	require.Equal(t, `{"a":1}`, string(*raw))
 }
 
 // tgDump writes v down to its last pointer, -0 apart from 0, interfaces

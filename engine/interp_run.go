@@ -32,13 +32,21 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 	// A call starts at 0, a resumed generator at its saved pc with the
 	// environment depth in the high byte (generator.go).
 	pc := int(fr.pc)
-	envDepth := pc >> genDepthShift
+	// The environment and its depth stay in memory: as registers carried
+	// around the loop they would be spilled at every dispatch.
+	ev := &frameEnv{env: env, depth: pc >> genDepthShift}
 	pc &= 1<<genDepthShift - 1
-	var (
-		err    error
-		thrown Value
-	)
+	// A case that finishes its instruction continues the loop; only one
+	// that may have failed reaches the err check after the switch. err and
+	// thrown live for one instruction: carried around the loop, every case
+	// would reload them for that check and the back-edge store them again.
+	// For the same reason the fast paths make no calls where they can
+	// avoid one: a value live across any call is spilled at every dispatch.
 	for {
+		var (
+			err    error
+			thrown Value
+		)
 		w := insns[pc]
 		ipc := pc
 		fr.pc = uint32(ipc)
@@ -48,101 +56,63 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		// --- loads and moves ---
 		case bytecode.LoadConst:
 			regs[a] = consts[w>>16]
+			continue
 		case bytecode.LoadInt:
 			regs[a] = IntValue(int(int16(w >> 16)))
+			continue
 		case bytecode.LoadUndef:
 			regs[a] = Undefined()
+			continue
 		case bytecode.LoadNull:
 			regs[a] = Null()
+			continue
 		case bytecode.LoadTrue:
 			regs[a] = True()
+			continue
 		case bytecode.LoadFalse:
 			regs[a] = False()
+			continue
 		case bytecode.LoadHole:
 			regs[a] = Hole()
+			continue
 		case bytecode.LoadThis:
 			regs[a] = this
+			continue
 		case bytecode.LoadCallee:
 			regs[a] = ObjectValue(callee)
+			continue
 		case bytecode.Move:
 			regs[a] = regs[uint8(w>>16)]
+			continue
 		case bytecode.UndefRange:
 			u := Undefined()
 			for i := range int(uint8(w >> 16)) {
 				regs[a+i] = u
 			}
+			continue
 
 		// --- closure environments ---
 		case bytecode.GetEnv:
-			e := env.up(uint8(w >> 16))
+			e := ev.env.up(uint8(w >> 16))
 			regs[a] = e.slots[uint8(w>>24)]
-		case bytecode.GetEnvChk:
-			e := env.up(uint8(w >> 16))
-			v := e.slots[uint8(w>>24)]
-			x := insns[pc]
-			pc++
-			if v.IsHole() {
-				err = r.tdzError(meta, x)
-				break
-			}
-			regs[a] = v
+			continue
 		case bytecode.SetEnv:
-			e := env.up(uint8(w >> 16))
+			e := ev.env.up(uint8(w >> 16))
 			e.slots[uint8(w>>24)] = regs[a]
-		case bytecode.GetEnvW:
-			e := env.up(uint8(w >> 16))
-			regs[a] = e.slots[insns[pc]]
-			pc++
-		case bytecode.GetEnvChkW:
-			e := env.up(uint8(w >> 16))
-			v := e.slots[insns[pc]]
-			x := insns[pc+1]
-			pc += 2
-			if v.IsHole() {
-				err = r.tdzError(meta, x)
-				break
-			}
-			regs[a] = v
-		case bytecode.GetImport:
-			e := env.up(uint8(w >> 16))
-			v := *e.slots[uint8(w>>24)].importTarget()
-			x := insns[pc]
-			pc++
-			if v.IsHole() {
-				err = r.tdzError(meta, x)
-				break
-			}
-			regs[a] = v
-		case bytecode.GetImportW:
-			e := env.up(uint8(w >> 16))
-			v := *e.slots[insns[pc]].importTarget()
-			x := insns[pc+1]
-			pc += 2
-			if v.IsHole() {
-				err = r.tdzError(meta, x)
-				break
-			}
-			regs[a] = v
-		case bytecode.SetEnvW:
-			e := env.up(uint8(w >> 16))
-			e.slots[insns[pc]] = regs[a]
-			pc++
+			continue
 		case bytecode.PushEnv:
-			env = newEnvSized(env, int(w>>16))
-			envDepth++
+			ev.env = newEnvSized(ev.env, int(w>>16))
+			ev.depth++
+			continue
 		case bytecode.PopEnv:
-			env = env.parent
-			envDepth--
+			ev.env = ev.env.parent
+			ev.depth--
+			continue
 		case bytecode.CopyEnv:
-			ne := newEnvSized(env.parent, len(env.slots))
-			copy(ne.slots, env.slots)
-			env = ne
-		case bytecode.CheckTDZ:
-			x := insns[pc]
-			pc++
-			if regs[a].IsHole() {
-				err = r.tdzError(meta, x)
-			}
+			ne := newEnvSized(ev.env.parent, len(ev.env.slots))
+			copy(ne.slots, ev.env.slots)
+			ev.env = ne
+			continue
 
 		// --- globals ---
 		case bytecode.GetGlobal, bytecode.GetGlobalOrUndef:
@@ -155,7 +125,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					censusHit(code, bytecode.Op(w), x, ipc, g.shape)
 				}
 				regs[a] = e.Holder(g).slots[e.Slot()]
-				break
+				continue
 			}
 			if icCensus {
 				censusMiss(code, bytecode.Op(w), x, ipc, e, g.shape)
@@ -176,7 +146,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					censusHit(code, bytecode.Op(w), x, ipc, g.shape)
 				}
 				g.slots[e.Slot()] = regs[a]
-				break
+				continue
 			}
 			if icCensus {
 				censusMiss(code, bytecode.Op(w), x, ipc, e, g.shape)
@@ -197,7 +167,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 						censusHit(code, bytecode.Op(w), x, ipc, o.shape)
 					}
 					regs[a] = e.Holder(o).slots[e.Slot()]
-					break
+					continue
 				}
 				if icCensus {
 					censusMiss(code, bytecode.Op(w), x, ipc, e, o.shape)
@@ -220,7 +190,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 						censusHit(code, bytecode.Op(w), x, ipc, sp.shape)
 					}
 					regs[a] = e.Holder(sp).slots[e.Slot()]
-					break
+					continue
 				}
 				if icCensus {
 					censusMiss(code, bytecode.Op(w), x, ipc, e, sp.shape)
@@ -247,7 +217,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				o := v.AsObject()
 				if o.class == ClassArray {
 					regs[a] = Uint32Value(o.internal.(*ArrayData).length)
-					break
+					continue
 				}
 				e := &r.ic[icBase+x>>16]
 				if o.shape == e.Shape && r.protoEpoch == e.Epoch {
@@ -255,7 +225,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 						censusHit(code, bytecode.Op(w), x, ipc, o.shape)
 					}
 					regs[a] = e.Holder(o).slots[e.Slot()]
-					break
+					continue
 				}
 				if icCensus {
 					censusMiss(code, bytecode.Op(w), x, ipc, e, o.shape)
@@ -270,7 +240,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			if v.IsString() {
 				regs[a] = IntValue(v.AsString().Len())
-				break
+				continue
 			}
 			var res Value
 			res, err = r.getPrimitiveProp(v, lengthKey)
@@ -291,7 +261,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 						censusHit(code, bytecode.Op(w), x, ipc, o.shape)
 					}
 					o.slots[e.Slot()] = v
-					break
+					continue
 				}
 				if icCensus {
 					censusMiss(code, bytecode.Op(w), x, ipc, e, o.shape)
@@ -310,8 +280,18 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				if i := int(f); float64(i) == f && i >= 0 && i < len(obj.elements) && obj.class != ClassString {
 					if v := obj.elements[i]; !v.IsHole() {
 						regs[a] = v
-						break
+						continue
 					}
+				}
+				if obj.class == ClassTypedArray {
+					// What getElemSlow does first, without its call.
+					ta := obj.internal.(*typedArray)
+					if x, ok := ta.float64At(f); ok {
+						regs[a] = NumberValue(x)
+						continue
+					}
+					regs[a] = typedArrayGetNumber(obj, f)
+					continue
 				}
 			}
 			var res Value
@@ -330,48 +310,29 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				if i := int(f); float64(i) == f && i >= 0 && i < len(obj.elements) && obj.class == ClassArray && obj.flags&(flagFrozen|flagShared) == 0 {
 					if !obj.elements[i].IsHole() {
 						obj.elements[i] = v
-						break
+						continue
 					}
+				}
+				if obj.class == ClassTypedArray {
+					// What setElemSlow does first, without its call.
+					if v.IsNumber() && obj.internal.(*typedArray).setFloat64(f, v.AsNumber()) {
+						continue
+					}
+					err = r.typedArraySetNumber(obj, f, v)
+					regs, fr = st.stack[base:top:top], &st.frames[fi]
+					break
 				}
 			}
 			err = r.setElemSlow(o, k, v)
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.DelProp:
-			x := insns[pc]
-			pc++
-			var res bool
-			res, err = r.deleteSlow(regs[uint8(w>>16)], meta.keys[x].Value())
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = Bool(res)
-			}
-		case bytecode.DelElem:
-			var res bool
-			res, err = r.deleteSlow(regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = Bool(res)
-			}
-		case bytecode.In:
-			var res bool
-			res, err = r.HasPropertyIn(regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = Bool(res)
-			}
-		case bytecode.InstanceOf:
-			var res bool
-			res, err = r.InstanceOf(regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = Bool(res)
-			}
 
 		// --- literals ---
 		case bytecode.NewObject:
 			regs[a] = ObjectValue(r.NewObjectCap(int(w >> 16)))
+			continue
 		case bytecode.NewArray:
 			regs[a] = ObjectValue(r.NewArrayCap(int(w >> 16)))
+			continue
 		case bytecode.DefineField:
 			x := insns[pc]
 			pc++
@@ -384,72 +345,35 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				}
 				o.shape = after
 				o.slots = append(o.slots, v)
-				break
+				continue
 			}
 			if icCensus {
 				censusMiss(code, bytecode.Op(w), x, ipc, e, o.shape)
 			}
 			err = r.defineFieldSlow(o, meta.keys[uint16(x)], v, e)
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.DefineElem:
-			err = r.defineElemSlow(regs[a].AsObject(), regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.DefineMethod:
-			err = r.defineMethodSlow(regs[a].AsObject(), regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.DefineAccessor:
-			x := insns[pc]
-			pc++
-			err = r.defineAccessor(regs[a].AsObject(), regs[uint8(w>>16)], regs[uint8(w>>24)].AsObject(), x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.SetProto:
-			o := regs[a].AsObject()
-			v := regs[uint8(w>>16)]
-			if v.IsObject() {
-				o.SetPrototypeOf(r, v.AsObject())
-			} else if v.IsNull() {
-				o.SetPrototypeOf(r, nil)
-			}
-		case bytecode.CopyDataProps:
-			err = r.copyDataProps(regs[a].AsObject(), regs[uint8(w>>16)], Undefined())
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-		case bytecode.CopyDataPropsEx:
-			err = r.copyDataProps(regs[a].AsObject(), regs[uint8(w>>16)], regs[uint8(w>>24)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
 		case bytecode.ArrayPush:
 			arr := regs[a].AsObject()
 			arr.Push(r, regs[uint8(w>>16)])
-		case bytecode.ArrayHole:
-			arr := regs[a].AsObject()
-			arr.elements = growWithHoles(arr.elements, len(arr.elements)+1)
-			arr.internal.(*ArrayData).length = uint32(len(arr.elements))
-		case bytecode.AppendSpread:
-			err = r.appendSpread(regs[a].AsObject(), regs[uint8(w>>16)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			continue
 		case bytecode.Closure:
-			o, _ := r.newClosure(code.Children[w>>16], meta.children[w>>16], env, this)
+			o, _ := r.newClosure(code.Children[w>>16], meta.children[w>>16], ev.env, this)
 			regs[a] = ObjectValue(o)
-		case bytecode.NewRegExp:
-			// RegExpCreate with %RegExp.prototype% (the constructor's
-			// prototype property is immutable, so this equals constructing
-			// through %RegExp%).
-			var rx *Object
-			rx, err = r.NewRegExp(consts[w>>16].AsString(), meta.names[w>>16])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = ObjectValue(rx)
-			}
-		case bytecode.GetTemplate:
-			x := insns[pc]
-			pc++
-			regs[a] = ObjectValue(r.templateObject(&code.Consts[uint16(x)], &r.ic[icBase+x>>16]))
+			continue
 
 		// --- arithmetic ---
+		// These cases, the comparisons and the property reads (and In,
+		// InstanceOf, GetPrivate and InPrivate off the loop) write R[A]
+		// only once they have a result: the compiler computes an
+		// assignment's value straight into the variable's register when
+		// one of them is its last op (compiler/expr.go lastOpWrites), and
+		// a handler that catches the op's throw must find the variable's
+		// old value there (engine TestAssignIntoRegisterThrows).
 		case bytecode.Add:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
 				regs[a] = NumberValue(x.AsNumber() + y.AsNumber())
-				break
+				continue
 			}
 			if x.IsString() && y.IsString() {
 				var res Value
@@ -467,8 +391,12 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.Sub, bytecode.Mul, bytecode.Div, bytecode.Mod, bytecode.Exp:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
+				if f, ok := numberOp(bytecode.Op(w), x.AsNumber(), y.AsNumber()); ok {
+					regs[a] = NumberValue(f)
+					continue
+				}
 				regs[a] = NumberValue(numericOp(bytecode.Op(w), x.AsNumber(), y.AsNumber()))
-				break
+				continue
 			}
 			var res Value
 			res, err = r.arithSlow(bytecode.Op(w), x, y)
@@ -481,7 +409,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			imm := float64(int8(w >> 24))
 			if x.IsNumber() {
 				regs[a] = NumberValue(x.AsNumber() + imm)
-				break
+				continue
 			}
 			var res Value
 			res, err = r.Add(x, NumberValue(imm))
@@ -494,7 +422,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			imm := float64(int8(w >> 24))
 			if x.IsNumber() {
 				regs[a] = NumberValue(x.AsNumber() - imm)
-				break
+				continue
 			}
 			var res Value
 			res, err = r.arithSlow(bytecode.Sub, x, NumberValue(imm))
@@ -510,7 +438,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			if x.IsNumber() {
 				regs[a] = NumberValue(x.AsNumber() + d)
-				break
+				continue
 			}
 			var res Value
 			res, err = r.incSlow(x, d)
@@ -522,7 +450,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
 				regs[a] = NumberValue(-x.AsNumber())
-				break
+				continue
 			}
 			var res Value
 			res, err = r.negSlow(x)
@@ -534,7 +462,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
 				regs[a] = x
-				break
+				continue
 			}
 			var f float64
 			f, err = r.ToNumber(x)
@@ -543,12 +471,17 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				regs[a] = NumberValue(f)
 			}
 		case bytecode.Not:
-			regs[a] = Bool(!ToBoolean(regs[uint8(w>>16)]))
+			if x := regs[uint8(w>>16)]; x.IsBool() {
+				regs[a] = Bool(!x.AsBool())
+			} else {
+				regs[a] = Bool(!ToBoolean(x))
+			}
+			continue
 		case bytecode.BitNot:
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
 				regs[a] = IntValue(int(^ToInt32Float(x.AsNumber())))
-				break
+				continue
 			}
 			var res Value
 			res, err = r.bitNotSlow(x)
@@ -560,7 +493,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
 				regs[a] = x
-				break
+				continue
 			}
 			var res Value
 			res, err = r.ToNumeric(x)
@@ -572,7 +505,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			if x.IsString() {
 				regs[a] = x
-				break
+				continue
 			}
 			var s *String
 			s, err = r.ToString(x)
@@ -597,13 +530,21 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 		case bytecode.Typeof:
 			regs[a] = StringValue(TypeOf(regs[uint8(w>>16)]))
+			continue
 		case bytecode.TypeofIs:
 			regs[a] = Bool(typeIndex(regs[uint8(w>>16)]) == uint8(w>>24))
+			continue
 		case bytecode.BitAnd, bytecode.BitOr, bytecode.BitXor, bytecode.Shl, bytecode.Shr, bytecode.UShr:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
-				regs[a] = bitwiseOp(bytecode.Op(w), x.AsNumber(), y.AsNumber())
-				break
+				// Operands that are int32 already: ToInt32 is the identity.
+				fx, fy := x.AsNumber(), y.AsNumber()
+				if ix, iy := int32(fx), int32(fy); float64(ix) == fx && float64(iy) == fy {
+					regs[a] = Int64Value(bitwiseInt32(bytecode.Op(w), ix, iy))
+					continue
+				}
+				regs[a] = bitwiseOp(bytecode.Op(w), fx, fy)
+				continue
 			}
 			var res Value
 			res, err = r.bitwiseSlow(bytecode.Op(w), x, y)
@@ -613,10 +554,20 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 
 		// --- comparison ---
-		case bytecode.StrictEq:
-			regs[a] = Bool(StrictEquals(regs[uint8(w>>16)], regs[uint8(w>>24)]))
-		case bytecode.StrictNe:
-			regs[a] = Bool(!StrictEquals(regs[uint8(w>>16)], regs[uint8(w>>24)]))
+		case bytecode.StrictEq, bytecode.StrictNe:
+			// Numbers by value, other values by identity; strings and
+			// BigInts with different storage compare by content.
+			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
+			var eq bool
+			if x.IsNumber() && y.IsNumber() {
+				eq = x.AsNumber() == y.AsNumber()
+			} else if x.bits != y.bits || x.ptr == y.ptr {
+				eq = x.bits == y.bits
+			} else {
+				eq = sameNonNumber(x, y)
+			}
+			regs[a] = Bool(eq == (bytecode.Op(w) == bytecode.StrictEq))
+			continue
 		case bytecode.Eq, bytecode.Ne:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			var res bool
@@ -633,20 +584,8 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.Lt, bytecode.Le, bytecode.Gt, bytecode.Ge:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
-				fx, fy := x.AsNumber(), y.AsNumber()
-				var res bool
-				switch bytecode.Op(w) {
-				case bytecode.Lt:
-					res = fx < fy
-				case bytecode.Le:
-					res = fx <= fy
-				case bytecode.Gt:
-					res = fx > fy
-				default:
-					res = fx >= fy
-				}
-				regs[a] = Bool(res)
-				break
+				regs[a] = Bool(compareNumbers(bytecode.Op(w), x.AsNumber(), y.AsNumber()))
+				continue
 			}
 			var res bool
 			res, err = r.compareSlow(bytecode.Op(w), x, y)
@@ -662,47 +601,75 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				return Undefined(), r.interruptError()
 			}
 			pc += off
-		case bytecode.JmpT:
-			if ToBoolean(regs[a]) {
+			continue
+		case bytecode.JmpT, bytecode.JmpF:
+			v := regs[a]
+			t := v.IsTrue()
+			if !t && !v.IsFalse() {
+				t = ToBoolean(v)
+			}
+			if t == (bytecode.Op(w) == bytecode.JmpT) {
 				pc += int(int16(w >> 16))
 			}
-		case bytecode.JmpF:
-			if !ToBoolean(regs[a]) {
-				pc += int(int16(w >> 16))
-			}
+			continue
 		case bytecode.JmpNullish:
 			if regs[a].IsNullish() {
 				pc += int(int16(w >> 16))
 			}
+			continue
 		case bytecode.JmpNotNullish:
 			if !regs[a].IsNullish() {
 				pc += int(int16(w >> 16))
 			}
+			continue
 		case bytecode.JmpNotUndef:
 			if !regs[a].IsUndefined() {
 				pc += int(int16(w >> 16))
 			}
+			continue
+		case bytecode.JmpLt, bytecode.JmpLe, bytecode.JmpGt, bytecode.JmpGe, bytecode.JmpNLt, bytecode.JmpNLe, bytecode.JmpNGt, bytecode.JmpNGe:
+			// Lt .. Ge of R[A] and R[X] deciding the jump: the first four
+			// jump when it holds, the N forms when it does not (NaN).
+			k := bytecode.Op(w) - bytecode.JmpLt
+			x, y := regs[a], regs[uint8(insns[pc])]
+			var res bool
+			if x.IsNumber() && y.IsNumber() {
+				res = compareNumbers(bytecode.Lt+k&3, x.AsNumber(), y.AsNumber())
+			} else {
+				res, err = r.compareSlow(bytecode.Lt+k&3, x, y)
+				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				if err != nil {
+					break
+				}
+			}
+			if res == (k < 4) {
+				pc += int(int16(w >> 16)) // relative to the X word
+			} else {
+				pc++
+			}
+			continue
+		case bytecode.JmpStrictEq, bytecode.JmpStrictNe:
+			x, y := regs[a], regs[uint8(insns[pc])]
+			var eq bool
+			if x.IsNumber() && y.IsNumber() {
+				eq = x.AsNumber() == y.AsNumber()
+			} else if x.bits != y.bits || x.ptr == y.ptr {
+				eq = x.bits == y.bits
+			} else {
+				eq = sameNonNumber(x, y)
+			}
+			if eq == (bytecode.Op(w) == bytecode.JmpStrictEq) {
+				pc += int(int16(w >> 16))
+			} else {
+				pc++
+			}
+			continue
 
 		// --- calls ---
 		case bytecode.Call:
 			argc := int(uint8(w >> 16))
 			var res Value
 			res, err = r.callValue(regs[a], regs[a+1], st.stack[base+a+2:base+a+2+argc:base+a+2+argc])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = res
-			}
-		case bytecode.CallSpread:
-			var argv []Value
-			argv, err = r.spreadArgs(top, regs[a+2])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err != nil {
-				break
-			}
-			var res Value
-			st.sp = top + len(argv) // keep the callee's window above the argument list
-			res, err = r.callValue(regs[a], regs[a+1], argv)
-			st.sp = top
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
 			if err == nil {
 				regs[a] = res
@@ -715,21 +682,6 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			if err == nil {
 				regs[a] = res
 			}
-		case bytecode.NewSpread:
-			var argv []Value
-			argv, err = r.spreadArgs(top, regs[a+2])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err != nil {
-				break
-			}
-			var res Value
-			st.sp = top + len(argv)
-			res, err = r.constructValue(regs[a], argv)
-			st.sp = top
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = res
-			}
 		case bytecode.Ret:
 			return regs[a], nil
 		case bytecode.RetUndef:
@@ -737,13 +689,6 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.Throw:
 			thrown = regs[a]
 			err = errThrown
-		case bytecode.ThrowConstAssign:
-			pc++
-			err = r.TypeError("Assignment to constant variable.")
-		case bytecode.RequireObjectCoercible:
-			if v := regs[a]; v.IsNullish() {
-				err = r.TypeError("Cannot destructure '%s' as it is %s.", v.String(), v.String())
-			}
 
 		// --- iteration ---
 		// Only the index fast paths run inline; iterOp takes the rest.
@@ -751,7 +696,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			if v := regs[uint8(w>>16)]; r.fastIterable(v) {
 				regs[a] = v
 				regs[a+1] = IntValue(0)
-				break
+				continue
 			}
 			pc, err = r.iterOp(fd, base, w, pc)
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
@@ -762,7 +707,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					if v := o.elements[i]; !v.IsHole() {
 						regs[a+1] = IntValue(i + 1)
 						regs[a+2] = v
-						break
+						continue
 					}
 				}
 			}
@@ -778,26 +723,18 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			if err == nil {
 				err = errThrown
 			}
-		case bytecode.ForInInit:
-			var keys, obj Value
-			keys, obj, err = r.forInInit(regs[uint8(w>>16)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
-			if err == nil {
-				regs[a] = keys
-				regs[a+1] = IntValue(0)
-				regs[a+2] = obj
-			}
 		case bytecode.ForInNext:
 			k, ok := forInNext(&regs[a], &regs[a+1], regs[a+2])
 			if !ok {
 				pc += int(int16(w >> 16))
-				break
+				continue
 			}
 			regs[a+3] = k
+			continue
 		case bytecode.GetElemRef:
 			// GetElem whose key stays in R[C] for the SetElem of a compound
 			// assignment or update. A dense element read needs no
-			// conversion; classOp reads any other. The read continues the
+			// conversion; coldOp reads any other. The read continues the
 			// loop (err is nil): a break to the code after the switch
 			// changes the register allocation of every case's back-edge.
 			k := regs[uint8(insns[pc])]
@@ -815,7 +752,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			fallthrough
 		default:
-			pc, err = r.classOp(fd, base, w, pc) // class ops, off the jump table (class.go)
+			pc, err = r.coldOp(fd, base, ev.env, w, pc) // rare ops, then class ops (interp_cold.go)
 			regs, fr = st.stack[base:top:top], &st.frames[fi]
 		}
 
@@ -830,16 +767,16 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			case *Exception:
 				thrown = e.Value
 			case *genFrame:
-				return e.suspend(env, envDepth), nil // a generator suspends
+				return e.suspend(ev.env, ev.depth), nil // a generator suspends
 			case frameOpMarker: // CoerceThis, MapArguments, CallEval (sloppy.go)
 				var coerced Value
-				if coerced, err = r.frameOp(insns[ipc], code, regs, env, this, callee); err == errFrameOp {
+				if coerced, err = r.frameOp(insns[st.frames[fi].pc], code, regs, ev.env, this, callee); err == errFrameOp {
 					// The loop never assigns this (a loop-carried this
 					// slows every instruction) and does not reload regs
 					// and fr after a direct eval: the frame reruns from
 					// the next instruction, as a generator resumes.
-					st.frames[fi].pc = uint32(pc | envDepth<<genDepthShift)
-					return r.run(fi, fd, base, env, coerced, callee)
+					st.frames[fi].pc = uint32(pc | ev.depth<<genDepthShift)
+					return r.run(fi, fd, base, ev.env, coerced, callee)
 				}
 				if err == nil {
 					continue
@@ -855,7 +792,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				thrown = r.hostErrorValue(err)
 			}
 		}
-		h := findHandler(code.Handlers, uint32(ipc))
+		h := findHandler(code.Handlers, st.frames[fi].pc)
 		if h == nil {
 			if err == errThrown {
 				return Undefined(), &Exception{Value: thrown}
@@ -865,9 +802,9 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			return Undefined(), &Exception{Value: thrown}
 		}
-		for envDepth > int(h.StackDepth) {
-			env = env.parent
-			envDepth--
+		for ev.depth > int(h.StackDepth) {
+			ev.env = ev.env.parent
+			ev.depth--
 		}
 		regs, fr = st.stack[base:top:top], &st.frames[fi]
 		if h.Kind == bytecode.HandlerCatch {
@@ -877,7 +814,6 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			regs[h.Reg+1] = thrown
 		}
 		pc = int(h.Handler)
-		err = nil
 	}
 }
 
@@ -895,6 +831,13 @@ func (r *Realm) getElemRef(o, k Value) (Value, Value, error) {
 	}
 	res, err := r.getElemSlow(o, k)
 	return k, res, err
+}
+
+// frameEnv is the environment of a running frame and the number of
+// PushEnv scopes above the one it started with.
+type frameEnv struct {
+	env   *Env
+	depth int
 }
 
 // findHandler returns the innermost handler row covering pc, or nil.
@@ -934,6 +877,41 @@ func typeIndex(v Value) uint8 {
 	return bytecode.TypeUndefined
 }
 
+// compareNumbers applies a relational operator (Lt .. Ge) to two numbers.
+func compareNumbers(op bytecode.Op, x, y float64) bool {
+	switch op {
+	case bytecode.Lt:
+		return x < y
+	case bytecode.Le:
+		return x <= y
+	case bytecode.Gt:
+		return x > y
+	}
+	return x >= y
+}
+
+// numberOp applies -, * and / to two numbers, and % when both are positive
+// integers up to 2^53 (the remainder is exact in int64 and has the
+// dividend's sign). It reports false for the rest, which numericOp
+// computes with a call.
+func numberOp(op bytecode.Op, x, y float64) (float64, bool) {
+	switch op {
+	case bytecode.Sub:
+		return x - y, true
+	case bytecode.Mul:
+		return x * y, true
+	case bytecode.Div:
+		return x / y, true
+	case bytecode.Mod:
+		if x >= 1 && x <= 1<<53 && y >= 1 && y <= 1<<53 {
+			if xi, yi := int64(x), int64(y); float64(xi) == x && float64(yi) == y {
+				return float64(xi % yi), true
+			}
+		}
+	}
+	return 0, false
+}
+
 // numericOp applies a binary arithmetic operator to two numbers.
 func numericOp(op bytecode.Op, x, y float64) float64 {
 	switch op {
@@ -944,11 +922,27 @@ func numericOp(op bytecode.Op, x, y float64) float64 {
 	case bytecode.Div:
 		return x / y
 	case bytecode.Mod:
-		return math.Mod(x, y)
+		return jsMod(x, y)
 	case bytecode.Exp:
 		return jsPow(x, y)
 	}
 	return x + y
+}
+
+// jsMod implements Number::remainder. Integral operands of magnitude up to
+// 2^53 take an exact int64 remainder instead of math.Mod's frexp/ldexp loop;
+// a zero remainder has the dividend's sign (-7 % 7 and -0 % 3 are -0).
+func jsMod(x, y float64) float64 {
+	const lim = 1 << 53
+	if x >= -lim && x <= lim && y >= -lim && y <= lim {
+		if xi, yi := int64(x), int64(y); float64(xi) == x && float64(yi) == y && yi != 0 {
+			if r := xi % yi; r != 0 {
+				return float64(r)
+			}
+			return math.Copysign(0, x)
+		}
+	}
+	return math.Mod(x, y)
 }
 
 // jsPow implements Number::exponentiate, which differs from math.Pow for
@@ -968,18 +962,23 @@ func jsPow(x, y float64) float64 {
 
 // bitwiseOp applies a bitwise or shift operator to two numbers.
 func bitwiseOp(op bytecode.Op, x, y float64) Value {
-	a, b := ToInt32Float(x), ToInt32Float(y)
+	return Int64Value(bitwiseInt32(op, ToInt32Float(x), ToInt32Float(y)))
+}
+
+// bitwiseInt32 applies a bitwise or shift operator to two int32 operands.
+// Every result is exact as a number (>>> gives a uint32).
+func bitwiseInt32(op bytecode.Op, a, b int32) int64 {
 	switch op {
 	case bytecode.BitAnd:
-		return IntValue(int(a & b))
+		return int64(a & b)
 	case bytecode.BitOr:
-		return IntValue(int(a | b))
+		return int64(a | b)
 	case bytecode.BitXor:
-		return IntValue(int(a ^ b))
+		return int64(a ^ b)
 	case bytecode.Shl:
-		return IntValue(int(a << (uint32(b) & 31)))
+		return int64(a << (b & 31))
 	case bytecode.Shr:
-		return IntValue(int(a >> (uint32(b) & 31)))
+		return int64(a >> (b & 31))
 	}
-	return NumberValue(float64(uint32(a) >> (uint32(b) & 31)))
+	return int64(uint32(a) >> (b & 31))
 }

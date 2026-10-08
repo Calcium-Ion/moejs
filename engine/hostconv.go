@@ -65,16 +65,26 @@ const (
 // and share a Shape per key set, slices become dense arrays); the Go value is
 // read later, node by node, and must not change while the result is in use.
 // A []byte becomes an ArrayBuffer over its bytes (NewArrayBuffer: not a copy,
-// so the bytes must not change while JavaScript may read them), and any
-// other type is an error. A Value or *Object that is a function or generator
-// of another realm is ErrForeign, and so is one inside a container: there the
-// read of its member throws a TypeError with ErrForeign's text, as for a
-// member of a type FromGo does not convert.
+// so the bytes must not change while JavaScript may read them). A
+// json.RawMessage converts as JSONParse of a copy of its text, the text of
+// an object or an array on its first touch (hostraw.go). A named type
+// whose underlying type is one of these converts as that type (a named map
+// or slice lazily), and any other type encoding/json writes (a struct, a
+// pointer, a map or slice of other element types, a type with a MarshalJSON
+// or MarshalText method) converts from its json.Marshal text, parsed by
+// JSONParse: a snapshot of the value (hostconv_types.go). A channel, a
+// function that is not a NativeFunc, a complex number, an unsafe.Pointer,
+// and without a MarshalJSON or MarshalText method an error and a struct
+// none of whose fields json.Marshal writes, are an error, and so is a value
+// json.Marshal fails on. A Value or *Object
+// that is a function or generator of another realm is ErrForeign, and so is
+// one inside a container: there the read of its member throws a TypeError
+// with ErrForeign's text, as for a member of a type FromGo does not convert.
 func (r *Realm) FromGo(v any) (Value, error) {
 	if res, ok := r.hostRoot(v); ok {
 		return res, nil
 	}
-	return r.fromGoOther(v)
+	return r.fromGoOther(v, nil)
 }
 
 // fromGoState is the realm's host-conversion state (Realm.fromGo).
@@ -83,8 +93,10 @@ type fromGoState struct {
 }
 
 // fromGoOther converts a value that is not a JSON-shaped container: a
-// scalar, an engine value, a native function, a *big.Int or a []byte.
-func (r *Realm) fromGoOther(v any) (Value, error) {
+// scalar, an engine value, a native function, a *big.Int or a []byte, and
+// through fromGoTyped any other type. h is the heap of the container being
+// materialized, nil for a top-level FromGo.
+func (r *Realm) fromGoOther(v any, h *hostHeap) (Value, error) {
 	if res, ok, err := scalarFromGo(v); ok {
 		if res.IsObject() && res.AsObject().HoldsCode() && r.IsForeign(res) {
 			return Undefined(), ErrForeign
@@ -115,7 +127,7 @@ func (r *Realm) fromGoOther(v any) (Value, error) {
 		}
 		return ObjectValue(o), nil
 	}
-	return Undefined(), fmt.Errorf("engine: FromGo: unsupported Go type %T", v)
+	return r.fromGoTyped(v, h)
 }
 
 // scalarFromGo converts the Go values whose conversion allocates nothing and

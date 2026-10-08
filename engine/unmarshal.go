@@ -62,8 +62,10 @@ import (
 // string length limit (an upper bound of six bytes a code unit, one for a
 // string known plain), an object that is not a plain
 // object, dense array or host placeholder, a host placeholder anywhere but in
-// an empty interface, a target type that unmarshals itself (json.Unmarshaler,
-// encoding.TextUnmarshaler) or has an embedded or ",string" field, a
+// an empty interface (but in a json.RawMessage, which receives the text of
+// its value, rawInto), a target type that unmarshals itself
+// (json.Unmarshaler, encoding.TextUnmarshaler; not json.RawMessage) or has
+// an embedded or ",string" field, a
 // non-empty interface, an interface holding a pointer, a []byte from a
 // string, and any value the target's type rejects. Strings are not copied:
 // the Go string of an ASCII string is the one v holds. err is an interrupt,
@@ -108,7 +110,8 @@ func (r *Realm) Unmarshal(v Value, target any) (complete bool, err error) {
 // a Map, a typed array, a boxed primitive, a proxy), an accessor, a hole,
 // a value whose text could pass the string length limit (plain's bound,
 // kept as a bound of the walk), a host placeholder anywhere but in an
-// empty interface, and what Unmarshal does not complete for on the
+// empty interface or a json.RawMessage, and what Unmarshal does not
+// complete for on the
 // target's side. Strings are not copied. No interrupt is observed, as ToGo
 // observes none for such a value.
 func (r *Realm) ToGoInto(v Value, target any) (complete bool) {
@@ -122,6 +125,23 @@ func (r *Realm) ToGoInto(v Value, target any) (complete bool) {
 	}
 	d.size, d.left = 0, 4096
 	return d.value(v, rv.Elem(), 0)
+}
+
+// CanUnmarshalDirect reports whether all of v is plain, as Unmarshal checks
+// it before writing: AppendJSON writes its text without running JavaScript
+// or failing, and Unmarshal stores it without the text when the target's
+// type allows. It writes nothing and copies no host value; a pending
+// interrupt makes it false.
+func (r *Realm) CanUnmarshalDirect(v Value) bool {
+	d := jsonDecoder{r: r, left: 4096}
+	return d.plain(v, 0) && d.within(0)
+}
+
+// CanToGoIntoDirect is CanUnmarshalDirect for ToGoInto: ToGo reads v without
+// running JavaScript and json.Marshal does not fail on what it gives.
+func (r *Realm) CanToGoIntoDirect(v Value) bool {
+	d := jsonDecoder{r: r, left: 4096, togo: true}
+	return d.plain(v, 0) && d.within(0)
 }
 
 type jsonDecoder struct {
@@ -216,10 +236,8 @@ func (d *jsonDecoder) kind(v Value) (k int, ok bool) {
 // member that stays), and a symbol, a bigint and a number json.Marshal
 // fails on (NaN, ±Infinity) are not handled.
 func togoKind(o *Object) (k int, ok bool) {
-	if o.flags&flagHostNode != 0 {
-		if _, ok := o.HostValue(); ok {
-			return jkHost, true
-		}
+	if o.flags&flagHostNode != 0 && o.hostUnchanged(0) { // HostValue without its copy of a RawMessage
+		return jkHost, true
 	}
 	switch {
 	case o.flags&flagHasLazy != 0: // ToGo materializes it
@@ -244,7 +262,7 @@ func (d *jsonDecoder) value(v Value, rv reflect.Value, depth int) bool {
 	t := rv.Type()
 	jt := jsonTypeOf(t)
 	if jt.custom {
-		return false
+		return jt.raw && d.rawInto(v, k, rv)
 	}
 	if rv.Kind() == reflect.Interface && !rv.IsNil() {
 		if e := rv.Elem(); e.Kind() == reflect.Pointer && !e.IsNil() {
@@ -309,6 +327,47 @@ func (d *jsonDecoder) value(v Value, rv reflect.Value, depth int) bool {
 	default: // jkHost: only into an empty interface
 		return false
 	}
+	return true
+}
+
+// rawInto stores in the json.RawMessage rv the text the round trip gives
+// it, which is the text of v in the round trip's text: AppendJSON's text of
+// v for Unmarshal, json.Marshal's text of ToGo's value of v for ToGoInto
+// (sorted keys, <, > and & escaped), null for null and for an undefined
+// element. Like RawMessage.UnmarshalJSON, it writes into rv's array when the
+// text fits. plain has checked v: AppendJSON runs no code for it and ToGo
+// reads no getter, so the text is v's whatever v is part of.
+func (d *jsonDecoder) rawInto(v Value, k int, rv reflect.Value) bool {
+	dst := rv.Bytes()[:0]
+	switch {
+	case k == jkNull || k == jkOmitted:
+		dst = append(dst, "null"...)
+	case d.togo:
+		var text []byte
+		if t, ok := unreadRawText(v); ok {
+			// ToGo's copy of the text, compacted by json.Marshal, without
+			// the copy.
+			text, _ = json.Marshal(json.RawMessage(rawBytes(t)))
+		} else {
+			g, err := d.r.ToGoStrict(v)
+			if err != nil {
+				return false
+			}
+			if text, err = json.Marshal(g); err != nil {
+				return false
+			}
+		}
+		dst = append(dst, text...)
+	default:
+		js := jsonStringifier{r: d.r, raw: true, inDst: true}
+		js.sb.b = slices.Grow(dst, 64) // not nil: a nil b is the builder's inline array
+		if ok, err := js.serialize(v); !ok {
+			d.err = err // an interrupt: AppendJSON observes it too
+			return false
+		}
+		dst = js.sb.b
+	}
+	rv.SetBytes(dst)
 	return true
 }
 
@@ -611,7 +670,11 @@ func (d *jsonDecoder) plain(v Value, depth int) bool {
 			}
 		}
 	case k == jkString:
-		d.size += jsonQuotedMax(v.AsString())
+		s := v.AsString()
+		if int8(s.json) < 0 { // jsonDeferred: the bound asks first
+			s.scanJSON()
+		}
+		d.size += jsonQuotedMax(s)
 	case k == jkHost && !d.copyHosts:
 		return d.hostPlain(v.AsObject().hostSrc(), depth)
 	case k == jkHost:
@@ -679,7 +742,7 @@ const jsonScalarMax = 25
 // jsonQuotedMax is the most bytes AppendJSON writes for s quoted: six a code
 // unit (\uXXXX), one for a string known plain.
 func jsonQuotedMax(s *String) int64 {
-	if s.jsonPlain {
+	if s.json == jsonPlain {
 		return int64(s.n) + 2
 	}
 	return 6*int64(s.n) + 2
@@ -1015,10 +1078,31 @@ func (d *jsonDecoder) hostPlain(v any, depth int) bool {
 				return false
 			}
 		}
+	case json.RawMessage:
+		return d.rawPlain(x)
+	case rawText: // a RawMessage placeholder's text, checked when it was made
+		d.size += 6*int64(len(x)) + 4
 	default:
 		return false
 	}
 	return true
+}
+
+// rawPlain is hostPlain of a json.RawMessage: plain when the parser accepts
+// it (or it is nil, null), so that AppendJSON writes the value JSON.parse
+// gives for it and json.Marshal compacts it without failing. Its text is at
+// most six times as long either way: an escape of six bytes stands for one
+// byte or more (a <, an invalid byte, which is U+FFFD), and the longest
+// rewriting of a number (1e20, 21 digits) is less than six times as long.
+func (d *jsonDecoder) rawPlain(raw json.RawMessage) bool {
+	d.size += 6*int64(len(raw)) + 4
+	if raw == nil {
+		return true
+	}
+	if len(raw) >= 4096 && !d.tick(len(raw)>>12-1) { // a node per 4096 bytes scanned (tick)
+		return false
+	}
+	return jsonValidRaw(raw)
 }
 
 // jsonHostMap copies m for hostCopy, its values converted by conv.
@@ -1079,8 +1163,12 @@ func (d *jsonDecoder) stringsPlain(list []string) bool {
 
 // jsonType is what the walk needs of a target type.
 type jsonType struct {
-	// custom: the type or a pointer to it unmarshals itself.
+	// custom: the type or a pointer to it unmarshals itself, but for a
+	// pointer to a json.RawMessage, which the walk follows.
 	custom bool
+	// raw: the type is json.RawMessage (custom too, so that the walk's
+	// check of custom finds it): it receives the text of its value.
+	raw bool
 	// mapKeys: a map whose key type is not a string kind or unmarshals
 	// itself from text (Unmarshal parses or decodes such keys).
 	mapKeys bool
@@ -1102,7 +1190,13 @@ func jsonTypeOf(t reflect.Type) *jsonType {
 	jt := &jsonType{}
 	pt := reflect.PointerTo(t)
 	u, tu := reflect.TypeFor[json.Unmarshaler](), reflect.TypeFor[encoding.TextUnmarshaler]()
-	jt.custom = t.Implements(u) || t.Implements(tu) || pt.Implements(u) || pt.Implements(tu)
+	switch t {
+	case reflect.TypeFor[json.RawMessage]():
+		jt.custom, jt.raw = true, true
+	case reflect.TypeFor[*json.RawMessage]():
+	default:
+		jt.custom = t.Implements(u) || t.Implements(tu) || pt.Implements(u) || pt.Implements(tu)
+	}
 	switch t.Kind() {
 	case reflect.Map:
 		kt := t.Key()

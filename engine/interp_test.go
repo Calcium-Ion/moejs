@@ -1295,3 +1295,75 @@ func TestInterpUnsupportedSurfaces(t *testing.T) {
 	_, err = r.RunScript(&bytecodeStubFunction)
 	require.Error(t, err)
 }
+
+// TestInterpCallEntry covers the entries of a JavaScript call: the frame
+// callValue sets up itself (every parameter passed, nothing else to bind)
+// and enterFrame's (missing parameters, rest parameter, arguments object,
+// captured bindings, the first call), the register stack and frame table
+// growing under them, and the state a throwing, overflowing or interrupted
+// callee leaves behind.
+func TestInterpCallEntry(t *testing.T) {
+	f := evalModule(t, `
+function two(a, b) { return [a, b]; }
+function count() { return arguments.length + ":" + Array.prototype.join.call(arguments, ","); }
+function extra(a) { return arguments.length + ":" + arguments[1]; }
+function rest(a, ...r) { return a + "|" + r.join(","); }
+function capture(a) { return () => a; }
+function self() { return this; }
+const lexical = () => typeof this;
+function wide(n) {
+  const a = n + 1, b = a + 1, c = b + 1, d = c + 1, e = d + 1, g = e + 1, h = g + 1, i = h + 1;
+  return n === 0 ? a - b + c - d + e - g + h - i : 1 + wide(n - 1);
+}
+function thrower(n) { if (n === 0) throw new Error("bottom"); return thrower(n - 1); }
+export function entries() {
+  return [
+    two(1, 2).join(), two(1).join(), String(two(1)[1]), two(1, 2, 3).join(),
+    count(), count(1, 2, 3), extra(1), extra(1, 2),
+    rest(1), rest(1, 2, 3), capture(7)(), capture(8)(),
+    String(self()), self.call(5), typeof self.call("s"), lexical(),
+    ({ v: 4, m() { return this.v; } }).m(),
+  ].join(";");
+}
+export function deep(n) { return wide(n); }
+export function throwThenCall() {
+  try { thrower(100); } catch (e) { return e.message + ":" + two(3, 4).join(); }
+}
+export function overflow() {
+  function f(x) { return f(x + 1) + 1; }
+  try { f(0); } catch (e) { return e.name + ":" + two(5, 6).join() + ":" + wide(200); }
+}
+export function noNew() { class C {} try { C(); return "called"; } catch (e) { return e.name; } }
+export function loop(n) { let s = 0; for (let i = 0; i < n; i++) s += two(i, 0)[0]; return s; }
+export function callsWhile(stop) { function leaf(x) { return x; } let s = leaf(1); stop(); s += leaf(2); return s; }
+export function deepWhile(stop, n) { return n === 0 ? stop() : deepWhile(stop, n - 1); }
+`)
+	r := f.r
+	assert.Equal(t, "1,2;1,;undefined;1,2;0:;3:1,2,3;1:undefined;2:2;1|;1|2,3;7;8;undefined;5;string;undefined;4", f.call("entries"))
+	// 400 frames of a dozen registers grow the register stack (64 at
+	// first) and the frame table (16) several times, on callValue's path.
+	assert.Equal(t, int64(400-4), f.call("deep", 400))
+	assert.Equal(t, "bottom:3,4", f.call("throwThenCall"))
+	assert.Equal(t, "RangeError:5,6:196", f.call("overflow"))
+	assert.Equal(t, "TypeError", f.call("noNew"))
+	assert.Equal(t, int64(4950), f.call("loop", 100))
+	st := &r.interp
+	assert.Zero(t, st.sp, "register stack released")
+	assert.Zero(t, st.nframes, "frames released")
+	assert.Zero(t, r.callDepth, "call depth released")
+
+	// An interrupt raised by a native is seen by the next JavaScript call,
+	// which callValue sets up itself.
+	stop := nativeFn(r, func(Value, []Value) (Value, error) { r.Interrupt("stop"); return Undefined(), nil })
+	_, err := f.callErr("callsWhile", stop)
+	var ie *InterruptedError
+	require.True(t, errors.As(err, &ie), "the call after the interrupt ran: %v", err)
+	r.ClearInterrupt()
+	_, err = f.callErr("deepWhile", stop, 50)
+	require.NoError(t, err, "stop() is the last call: nothing is left to see the interrupt")
+	r.ClearInterrupt()
+	assert.Zero(t, st.sp)
+	assert.Zero(t, st.nframes)
+	assert.Zero(t, r.callDepth)
+	assert.Equal(t, int64(4950), f.call("loop", 100), "the realm runs again")
+}

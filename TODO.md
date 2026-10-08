@@ -15,6 +15,23 @@ when it is used; none of them runs silently with the wrong result.
   `Symbol.dispose`
 - Decorators
 
+## TypeScript
+
+`CompileTS` erases TypeScript's type syntax and runs what is left (see
+docs/guide.md). It does not check types. TypeScript that has run-time
+semantics fails with a `SyntaxError` that names it:
+
+- `enum` and `const enum` declarations, outside `declare`
+- Namespaces and modules with values (a namespace that holds only types is
+  erased, as tsc erases it)
+- Constructor parameter properties (`constructor(private x: T)`)
+- `import x = require("m")`, `export import x = A.B`, and an alias
+  `import x = A.B` used as a value
+- `export =` and `export as namespace`
+- `accessor` fields (part of the decorators proposal; decorators are listed
+  under Language)
+- TSX
+
 ## Builtins
 
 - Iterator helpers (`Iterator.from`, `Iterator.prototype.map` and friends)
@@ -28,7 +45,12 @@ when it is used; none of them runs silently with the wrong result.
 - `Intl`, and locale-tailored `localeCompare` and `toLocale*` methods
   (`localeCompare` uses the CLDR root collation order)
 - `FinalizationRegistry`
-- Timers (`setTimeout` and friends)
+- Timers on a bare `Runtime`, which has none: `setTimeout` is a
+  ReferenceError there. The `eventloop` package installs Node.js's
+  `setTimeout`, `setInterval`, `setImmediate` and their clear functions,
+  without `timers/promises`, the `AbortSignal` options, `util.promisify`
+  of the timer functions, the `Symbol.dispose` method of a `Timeout`, and
+  Node's warning for a delay above 2147483647 ms
 
 ## Known wrong results
 
@@ -65,6 +87,17 @@ These run, with a result that differs from the specification:
   host, while a browser passes the script or module that called `then`
   (HostMakeJobCallback).
 
+- `Function.prototype.toString` of a function compiled by `CompileTS`
+  returns its TypeScript source, types included. Node replaces the types
+  with blanks before it runs the code, so its `toString` returns the text
+  with blanks where the types were.
+- `CompileTS` decides which imports are types without type information, as
+  esbuild and tsc with `isolatedModules` do: `export { X }` of an imported
+  `X` keeps the import even when the exporting module declares `X` as a type
+  only (write `export { type X }`), and a name that a computed property key
+  in a type reads (`{ [k.x]: T }`) does not keep its import, where tsc keeps
+  it.
+
 ## Limits
 
 - One realm per runtime: JavaScript cannot create another realm, so the
@@ -80,6 +113,10 @@ These run, with a result that differs from the specification:
 
 - `ParseJSON` straight from the bytes (it copies them into a string first)
 - Source maps
+- The outcome of a module's top-level `await` that settles after `Load`
+  returned `ErrModulePending`, as with the `eventloop` package: the
+  module's exports show its progress, and a rejection reaches the host only
+  through the rejection tracker
 - A per-realm heap or allocation budget, which would also bound what a
   result costs the host: a value that repeats one object many times, whose
   text and `Unmarshal` copies are as large as if it did not, and the buffer

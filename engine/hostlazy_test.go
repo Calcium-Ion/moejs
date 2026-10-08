@@ -737,8 +737,8 @@ export function probe(x) {
 	return out.join("\n");
 }
 `, RealmOptions{})
-	type opaque struct{ n int }
-	in := map[string]any{"ok": 1, "bad": opaque{1}, "list": []any{"fine", opaque{2}}}
+	type opaque chan int // a type FromGo does not convert, nor encoding/json
+	in := map[string]any{"ok": 1, "bad": make(opaque), "list": []any{"fine", make(opaque)}}
 	x := mustFromGo(t, f.r, in)
 	msg := "TypeError: engine: FromGo: unsupported Go type engine.opaque"
 	assert.Equal(t, strings.Join([]string{

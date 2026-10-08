@@ -411,6 +411,7 @@ func (r *Realm) normalizeString(s *String, f normForm) (*String, error) {
 	if slices.Equal(out, u) {
 		return s, nil
 	}
+	r.chargeString(2 * cap(out))
 	return FromUTF16(out), nil
 }
 

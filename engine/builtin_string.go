@@ -96,21 +96,33 @@ func stringProtoValueOf(r *Realm, this Value, args []Value) (Value, error) {
 }
 
 // singleCharStrings are the 128 one-character ASCII strings, shared by all
-// realms so charAt/split("") on ASCII input allocate nothing per character.
+// realms so charAt/split("")/str[i] on ASCII input allocate nothing per
+// character. Their hashes are computed here: Hash would otherwise store
+// them from every goroutine that hashes one.
 var singleCharStrings = func() [128]*String {
 	var a [128]*String
 	for i := range a {
 		a[i] = asciiString(string(rune(i)))
+		a[i].Hash()
 	}
 	return a
 }()
 
-// charString returns the one-unit string for c.
+// unitString is a one-unit UTF-16 string allocated with its unit.
+type unitString struct {
+	String
+	u [1]uint16
+}
+
+// charString returns the one-unit string for c: a shared one for ASCII, one
+// allocation otherwise.
 func charString(c uint16) *String {
 	if c < 0x80 {
 		return singleCharStrings[c]
 	}
-	return &String{u: []uint16{c}, n: 1, kind: strUTF16}
+	x := &unitString{u: [1]uint16{c}}
+	x.String = String{p: unitsPtr(x.u[:]), n: 1, kind: strUTF16}
+	return &x.String
 }
 
 // writeSlice appends s[start:end) to sb without materializing a *String.
@@ -119,14 +131,29 @@ func writeSlice(sb *StringBuilder, s *String, start, end int) {
 		return
 	}
 	if s.kind == strRope {
-		s.flatten()
+		writeRopeSlice(sb, s, start, end)
+		return
 	}
 	if s.kind == strASCII {
 		writeASCIIString(sb, s.s[start:end])
 		return
 	}
 	sb.upgrade()
-	sb.u = append(sb.u, s.u[start:end]...)
+	sb.u = append(sb.u, s.units()[start:end]...)
+}
+
+// writeRopeSlice is writeSlice of a rope, out of line so that the view
+// (flat) does not grow writeSlice's frame.
+//
+//go:noinline
+func writeRopeSlice(sb *StringBuilder, s *String, start, end int) {
+	f := s.flat(new(String))
+	if f.kind == strASCII {
+		writeASCIIString(sb, f.s[start:end])
+		return
+	}
+	sb.upgrade()
+	sb.u = append(sb.u, f.units()[start:end]...)
 }
 
 // writeASCIIString appends a Go string known to be ASCII.
@@ -187,17 +214,35 @@ func hasSubstringAt(s, sub *String, at int) bool {
 	if at < 0 || at+n > s.Len() {
 		return false
 	}
+	if s.kind == strRope || sub.kind == strRope {
+		return ropeSubstringAt(s, sub, at)
+	}
+	return substringAt(s, sub, at)
+}
+
+// ropeSubstringAt is hasSubstringAt with a rope, out of line so that the
+// views (flat) do not grow hasSubstringAt's frame.
+//
+//go:noinline
+func ropeSubstringAt(s, sub *String, at int) bool {
+	a, b := s, sub
 	if s.kind == strRope {
-		s.flatten()
+		a = s.flat(new(String))
 	}
 	if sub.kind == strRope {
-		sub.flatten()
+		b = sub.flat(new(String))
 	}
+	return substringAt(a, b, at)
+}
+
+// substringAt is hasSubstringAt of flat strings, sub fitting at at.
+func substringAt(s, sub *String, at int) bool {
+	n := sub.Len()
 	if s.kind == strASCII && sub.kind == strASCII {
 		return s.s[at:at+n] == sub.s
 	}
 	for i := range n {
-		if s.At(at+i) != sub.At(i) {
+		if s.at(at+i) != sub.at(i) {
 			return false
 		}
 	}
@@ -211,17 +256,19 @@ func lastIndexOfString(s, sub *String, start int) int {
 	if start < 0 {
 		return -1
 	}
+	a := s
 	if s.kind == strRope {
-		s.flatten()
+		a = s.flat(new(String))
 	}
+	b := sub
 	if sub.kind == strRope {
-		sub.flatten()
+		b = sub.flat(new(String))
 	}
-	if s.kind == strASCII && sub.kind == strASCII {
-		return strings.LastIndex(s.s[:start+m], sub.s)
+	if a.kind == strASCII && b.kind == strASCII {
+		return strings.LastIndex(a.s[:start+m], b.s)
 	}
 	for i := start; i >= 0; i-- {
-		if hasSubstringAt(s, sub, i) {
+		if substringAt(a, b, i) {
 			return i
 		}
 	}
@@ -246,6 +293,7 @@ func stringFromCharCode(r *Realm, this Value, args []Value) (Value, error) {
 		}
 		units[i] = uint16(u)
 	}
+	r.chargeString(2 * len(units))
 	return StringValue(FromUTF16(units)), nil
 }
 
@@ -448,7 +496,7 @@ func stringProtoSlice(r *Realm, this Value, args []Value) (Value, error) {
 	if from >= to {
 		return StringValue(emptyString), nil
 	}
-	return StringValue(s.Substring(from, to)), nil
+	return StringValue(r.substring(s, from, to)), nil
 }
 
 func stringProtoSubstring(r *Realm, this Value, args []Value) (Value, error) {
@@ -469,7 +517,7 @@ func stringProtoSubstring(r *Realm, this Value, args []Value) (Value, error) {
 	if a > b {
 		a, b = b, a
 	}
-	return StringValue(s.Substring(a, b)), nil
+	return StringValue(r.substring(s, a, b)), nil
 }
 
 func stringProtoSubstr(r *Realm, this Value, args []Value) (Value, error) {
@@ -491,7 +539,7 @@ func stringProtoSubstr(r *Realm, this Value, args []Value) (Value, error) {
 	if from >= to {
 		return StringValue(emptyString), nil
 	}
-	return StringValue(s.Substring(from, to)), nil
+	return StringValue(r.substring(s, from, to)), nil
 }
 
 // --- case conversion -------------------------------------------------------------------
@@ -531,19 +579,21 @@ func stringProtoToUpperCase(r *Realm, this Value, args []Value) (Value, error) {
 // from the Unicode tables plus the unconditional special casings (U+0130)
 // and the Final_Sigma context rule.
 func stringToLower(r *Realm, s *String) (*String, error) {
+	f := s // s is returned, f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
+	if f.kind == strASCII {
 		i := 0
-		for i < len(s.s) && (s.s[i] < 'A' || s.s[i] > 'Z') {
+		for i < len(f.s) && (f.s[i] < 'A' || f.s[i] > 'Z') {
 			i++
 		}
-		if i == len(s.s) {
+		if i == len(f.s) {
 			return s, nil
 		}
-		out, b := newASCIIBuf(len(s.s))
-		copy(b, s.s)
+		out, b := newASCIIBuf(len(f.s))
+		r.chargeString(len(b))
+		copy(b, f.s)
 		for ; i < len(b); i++ {
 			if c := b[i]; c >= 'A' && c <= 'Z' {
 				b[i] = c + 'a' - 'A'
@@ -551,7 +601,7 @@ func stringToLower(r *Realm, s *String) (*String, error) {
 		}
 		return out, nil
 	}
-	u := s.u
+	u := f.units()
 	var sb StringBuilder
 	sb.Grow(len(u))
 	for i := 0; i < len(u); i++ {
@@ -582,26 +632,28 @@ func stringToLower(r *Realm, s *String) (*String, error) {
 		}
 		i += w - 1
 	}
-	return sb.String(), nil
+	return r.builtString(&sb), nil
 }
 
 // stringToUpper implements String.prototype.toUpperCase with the
 // unconditional SpecialCasing expansions (ß -> SS, ligatures, Greek with
 // ypogegrammeni, ...).
 func stringToUpper(r *Realm, s *String) (*String, error) {
+	f := s // s is returned, f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
+	if f.kind == strASCII {
 		i := 0
-		for i < len(s.s) && (s.s[i] < 'a' || s.s[i] > 'z') {
+		for i < len(f.s) && (f.s[i] < 'a' || f.s[i] > 'z') {
 			i++
 		}
-		if i == len(s.s) {
+		if i == len(f.s) {
 			return s, nil
 		}
-		out, b := newASCIIBuf(len(s.s))
-		copy(b, s.s)
+		out, b := newASCIIBuf(len(f.s))
+		r.chargeString(len(b))
+		copy(b, f.s)
 		for ; i < len(b); i++ {
 			if c := b[i]; c >= 'a' && c <= 'z' {
 				b[i] = c - ('a' - 'A')
@@ -609,7 +661,7 @@ func stringToUpper(r *Realm, s *String) (*String, error) {
 		}
 		return out, nil
 	}
-	u := s.u
+	u := f.units()
 	var sb StringBuilder
 	sb.Grow(len(u) + 4)
 	for i := 0; i < len(u); i++ {
@@ -632,7 +684,7 @@ func stringToUpper(r *Realm, s *String) (*String, error) {
 		}
 		i += w - 1
 	}
-	return sb.String(), nil
+	return r.builtString(&sb), nil
 }
 
 // decodeUnitAt returns the code point at u[i] (a lone surrogate is returned
@@ -731,13 +783,14 @@ var specialUpperTable = map[rune]string{
 
 // trimString implements the TrimString abstract operation.
 func trimString(s *String, start, end bool) *String {
+	f := s // s is returned (Substring), f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
 	n := s.Len()
 	a, b := 0, n
-	if s.kind == strASCII {
-		str := s.s
+	if f.kind == strASCII {
+		str := f.s
 		if start {
 			for a < b && isASCIIWhitespace(str[a]) {
 				a++
@@ -749,7 +802,7 @@ func trimString(s *String, start, end bool) *String {
 			}
 		}
 	} else {
-		u := s.u
+		u := f.units()
 		if start {
 			for a < b && isJSWhitespace(u[a]) {
 				a++
@@ -824,7 +877,7 @@ func stringProtoRepeat(r *Realm, this Value, args []Value) (Value, error) {
 	if n == 0 || s.Len() == 0 {
 		return StringValue(emptyString), nil
 	}
-	if float64(s.Len())*n > float64(maxStringLength) {
+	if float64(s.Len())*n > float64(maxStringLength) || r.overBudget(s.Len()*int(n)) {
 		return Undefined(), r.invalidStringLength()
 	}
 	res, err := repeatString(r, s, int(n))
@@ -840,22 +893,28 @@ func repeatString(r *Realm, s *String, count int) (*String, error) {
 	if count == 1 {
 		return s, nil
 	}
+	f := s // s is returned above, f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
 	total := s.Len() * count
+	if f.kind == strASCII {
+		r.chargeString(total)
+	} else {
+		r.chargeString(2 * total)
+	}
 	if total <= 1<<16 {
-		if s.kind == strASCII {
-			return asciiString(strings.Repeat(s.s, count)), nil
+		if f.kind == strASCII {
+			return asciiString(strings.Repeat(f.s, count)), nil
 		}
-		return &String{u: slices.Repeat(s.u, count), n: int32(total), kind: strUTF16}, nil
+		return utf16String(slices.Repeat(f.units(), count)), nil
 	}
 	chunk := max(1, (1<<16)/s.Len())
-	if s.kind == strASCII {
+	if f.kind == strASCII {
 		b := make([]byte, 0, total)
 		for done := 0; done < count; done += chunk {
 			for range min(chunk, count-done) {
-				b = append(b, s.s...)
+				b = append(b, f.s...)
 			}
 			if err := r.CheckInterrupt(); err != nil {
 				return nil, err
@@ -866,13 +925,13 @@ func repeatString(r *Realm, s *String, count int) (*String, error) {
 	u := make([]uint16, 0, total)
 	for done := 0; done < count; done += chunk {
 		for range min(chunk, count-done) {
-			u = append(u, s.u...)
+			u = append(u, f.units()...)
 		}
 		if err := r.CheckInterrupt(); err != nil {
 			return nil, err
 		}
 	}
-	return &String{u: u, n: int32(total), kind: strUTF16}, nil
+	return utf16String(u), nil
 }
 
 func stringProtoPadStart(r *Realm, this Value, args []Value) (Value, error) {
@@ -910,7 +969,7 @@ func stringPad(r *Realm, this Value, args []Value, atStart bool) (Value, error) 
 	if filler.Len() == 0 {
 		return StringValue(s), nil
 	}
-	if maxLen > int64(maxStringLength) {
+	if maxLen > int64(maxStringLength) || r.overBudget(int(maxLen)) {
 		return Undefined(), r.invalidStringLength()
 	}
 	fillLen := int(maxLen) - n
@@ -934,7 +993,7 @@ func stringPad(r *Realm, this Value, args []Value, atStart bool) (Value, error) 
 	if atStart {
 		sb.WriteString(s)
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // --- comparison and unsupported ----------------------------------------------------------
@@ -1105,14 +1164,16 @@ func stringProtoSplit(r *Realm, this Value, args []Value) (Value, error) {
 // splitByString splits s at every occurrence of the non-empty sep, checking
 // the interrupt flag every interruptStride pieces.
 func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
+	f := s // s's pieces may be s itself (Substring), f's never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
+	fsep := sep // IndexOf takes sep: a view stays on the stack
 	if sep.kind == strRope {
-		sep.flatten()
+		fsep = sep.flat(new(String))
 	}
-	if s.kind == strASCII && sep.kind == strASCII {
-		str, sp := s.s, sep.s
+	if f.kind == strASCII && fsep.kind == strASCII {
+		str, sp := f.s, fsep.s
 		count := strings.Count(str, sp) + 1
 		if uint32(count) > lim {
 			count = int(lim)
@@ -1149,7 +1210,7 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 		if q < 0 {
 			break
 		}
-		items = append(items, StringValue(s.Substring(p, q)))
+		items = append(items, StringValue(r.substring(s, p, q)))
 		if uint32(len(items)) == lim {
 			return r.NewArrayFromSlice(items), nil
 		}
@@ -1158,7 +1219,7 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 		}
 		p = q + sep.Len()
 	}
-	items = append(items, StringValue(s.Substring(p, s.Len())))
+	items = append(items, StringValue(r.substring(s, p, s.Len())))
 	return r.NewArrayFromSlice(items), nil
 }
 
@@ -1262,7 +1323,7 @@ func stringReplace(r *Realm, this Value, args []Value, all bool) (Value, error) 
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // --- match ---------------------------------------------------------------------------------

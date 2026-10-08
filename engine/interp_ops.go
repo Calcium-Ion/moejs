@@ -144,16 +144,71 @@ func (r *Realm) getPrimitiveProp(v Value, key PropertyKey) (Value, error) {
 }
 
 // setNamedSlow is strict [[Set]] of an interned key with IC fill for own
-// writable data properties and for setters, own or inherited.
+// writable data properties, for setters, own or inherited, and for adds.
 func (r *Realm) setNamedSlow(o *Object, key PropertyKey, v Value, e *ICEntry) error {
 	if a := r.accessorIC(e, o); a != nil {
 		return r.callSetter(a, ObjectValue(o), key, v)
+	}
+	if r.setNamedAdd(o, key, v, e) {
+		return nil
 	}
 	if err := o.SetProp(r, key, v); err != nil {
 		return err
 	}
 	r.fillSetIC(e, o, key)
 	return nil
+}
+
+// icAdd is the holder depth of a set entry filled by setNamedAdd. Its shape
+// is the one after the add, so objects that already have the property hit
+// the data path of the run loop like any set entry (which ignores the
+// depth); objects with the shape before the add take the transition in
+// setNamedAdd. The other set entries have depth 0 or are accessor entries
+// (odd epoch), which setNamedAdd never takes.
+const icAdd = 0xFF
+
+// setNamedAdd performs OrdinarySet of key on o when it adds key as a data
+// property of o, an ordinary extensible shape-mode object that is no
+// prototype: o has no property key, and nothing on the prototype chain has
+// it or could answer it (a proxy, a typed array, a pending lazy property).
+// It reports whether it did. The add from o's shape that e records skips the
+// checks: the epoch proves that no prototype changed since the add e
+// records, and the shape that o has the same prototype and lacks key.
+func (r *Realm) setNamedAdd(o *Object, key PropertyKey, v Value, e *ICEntry) bool {
+	if o.flags&(flagExtensible|flagDict|flagHasLazy|flagIsPrototype|flagShared) != flagExtensible ||
+		o.class == ClassArray || o.class == ClassString || o.class == ClassTypedArray || o.class == ClassProxy {
+		return false
+	}
+	before := o.shape
+	if s := e.Shape; s != nil && s.parent == before && e.Epoch == r.protoEpoch && e.HolderDepth() == icAdd && s.key == key {
+		o.shape = s
+		o.slots = append(o.slots, v)
+		return true
+	}
+	if before.noFill != 0 || before.has(key) || !protoChainLacks(o.proto, key) {
+		return false
+	}
+	o.addNamed(r, key, propCell{value: v, attrs: attrDefault})
+	if s := o.shape; s.parent == before {
+		*e = newICEntry(s, r.protoEpoch, s.slot, icAdd)
+	}
+	return true
+}
+
+// protoChainLacks reports whether no object on the prototype chain from p
+// has key or could answer it other than with an own property: a proxy runs
+// its trap, a typed array answers numeric keys, a pending lazy definition
+// of key would define it.
+func protoChainLacks(p *Object, key PropertyKey) bool {
+	for ; p != nil; p = p.proto {
+		if p.class == ClassProxy || p.class == ClassTypedArray || p.flags&flagHasLazy != 0 && p.lazyPending(key) {
+			return false
+		}
+		if _, ok := p.getOwnCell(key); ok {
+			return false
+		}
+	}
+	return true
 }
 
 // fillSetIC records where a successful [[Set]] of key on o wrote, if the
@@ -344,6 +399,9 @@ func (r *Realm) defineElemSlow(o *Object, k, v Value) error {
 
 // getElemSlow is the generic computed property read.
 func (r *Realm) getElemSlow(o, k Value) (Value, error) {
+	if o.IsObject() && k.IsNumber() && o.AsObject().class == ClassTypedArray {
+		return typedArrayGetNumber(o.AsObject(), k.AsNumber()), nil
+	}
 	if o.IsNullish() {
 		return Undefined(), r.TypeError("Cannot read properties of %s (reading '%s')", o.String(), k.String())
 	}
@@ -351,13 +409,10 @@ func (r *Realm) getElemSlow(o, k Value) (Value, error) {
 		s := o.AsString()
 		if i, ok := k.IsArrayIndex(); ok {
 			if int(i) < s.Len() {
-				return StringValue(s.Substring(int(i), int(i)+1)), nil
+				return StringValue(charString(s.At(int(i)))), nil
 			}
 			return Undefined(), nil
 		}
-	}
-	if o.IsObject() && k.IsNumber() && o.AsObject().class == ClassTypedArray {
-		return typedArrayGetNumber(o.AsObject(), k.AsNumber()), nil
 	}
 	key, err := r.ToPropertyKey(k)
 	if err != nil {
@@ -502,7 +557,11 @@ func (r *Realm) compareSlow(op bytecode.Op, x, y Value) (bool, error) {
 
 // callValue calls fn with this and args (which may alias the register
 // stack). Bytecode callees enter a new frame directly; natives are invoked
-// in place.
+// in place. The frame of an ordinary call (every parameter passed, no rest
+// parameter, arguments object or captured binding, room in the register
+// stack and frame table, its inline caches bound, no interrupt pending) is
+// set up here, one call fewer per JavaScript call; enterFrame takes the
+// others.
 func (r *Realm) callValue(fn Value, this Value, args []Value) (Value, error) {
 	if !fn.IsObject() || fn.AsObject().class != ClassFunction {
 		if IsCallable(fn) { // a callable proxy
@@ -522,7 +581,30 @@ func (r *Realm) callValue(fn Value, this Value, args []Value) (Value, error) {
 	)
 	switch fd.kind {
 	case FuncBytecode:
-		res, err = r.enterFrame(o, fd, this, args)
+		code := fd.code
+		st := &r.interp
+		base := st.sp
+		top := base + int(code.NumRegs)
+		np := int(code.NumParams)
+		fi := st.nframes
+		if !fd.plain || r.interruptFlag.Load() != 0 || fd.icBase == icUnbound || top > len(st.stack) || len(args) < np || fi == len(st.frames) {
+			res, err = r.enterFrame(o, fd, this, args)
+			break
+		}
+		regs := st.stack[base:top:top]
+		dst, src := regs[:np], args[:np]
+		for i := range src {
+			dst[i] = src[i]
+		}
+		if code.Kind == bytecode.KindArrow {
+			this = fd.thisValue
+		}
+		st.frames[fi] = frameInfo{fn: o, base: uint32(base)}
+		st.nframes = fi + 1
+		st.sp = top
+		res, err = r.run(fi, fd, base, fd.env, this, o)
+		st.sp = base
+		st.nframes = fi
 	case FuncNative:
 		res, err = fd.native(r, this, args)
 	default:
