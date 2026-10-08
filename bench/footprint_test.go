@@ -34,15 +34,32 @@ func footprintEngines() []engines.Engine {
 	}
 }
 
+// rssBytes returns the process's resident set size, or 0 where
+// /proc/self/statm is missing.
+func rssBytes() uint64 {
+	b, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	var size, resident uint64
+	if _, err := fmt.Sscan(string(b), &size, &resident); err != nil {
+		return 0
+	}
+	return resident * uint64(os.Getpagesize())
+}
+
 // footprintRow measures N live runtimes of one engine with one plugin
 // instantiated: Go heap retained per runtime, plus the engine's own heap
 // where it lives outside Go (quickjs malloc_size, V8 total/used heap).
+// modernc.org/quickjs allocates through its own allocator, which keeps no
+// in-use count, so its row adds how much the resident set grew per runtime.
 func footprintRow(t *testing.T, e engines.Engine, key string, n int) string {
 	runner, err := NewRunner(e, key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := heapInuse()
+	rss0 := rssBytes()
 	rts := make([]engines.Runtime, n)
 	var cHeap, v8Total, v8Used uint64
 	for i := range rts {
@@ -53,6 +70,8 @@ func footprintRow(t *testing.T, e engines.Engine, key string, n int) string {
 		rts[i] = rt
 	}
 	after := heapInuse()
+	rss1 := rssBytes()
+	_, modernc := e.(*engines.ModerncQuickJSEngine)
 	for _, rt := range rts {
 		switch r := rt.(type) {
 		case *engines.QuickJSRuntime:
@@ -67,6 +86,9 @@ func footprintRow(t *testing.T, e engines.Engine, key string, n int) string {
 	row := fmt.Sprintf("%-22s %-10s N=%-4d Go heap %8.1f KiB/runtime", e.Name(), key, n, goPer)
 	if cHeap > 0 {
 		row += fmt.Sprintf("   C heap (malloc_size) %8.1f KiB/runtime", float64(cHeap)/float64(n)/1024)
+	}
+	if modernc && rss0 > 0 {
+		row += fmt.Sprintf("   RSS +%8.1f KiB/runtime", (float64(rss1)-float64(rss0))/float64(n)/1024)
 	}
 	if v8Total > 0 {
 		row += fmt.Sprintf("   V8 heap total %8.1f KiB, used %8.1f KiB/isolate", float64(v8Total)/float64(n)/1024, float64(v8Used)/float64(n)/1024)
