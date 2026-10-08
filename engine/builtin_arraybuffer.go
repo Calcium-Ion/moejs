@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"sync"
+	"unsafe"
 )
 
 // ArrayBuffer and SharedArrayBuffer (ECMA-262 §25.1, §25.2). Both classes
@@ -97,6 +98,7 @@ type bufferObject struct {
 func (r *Realm) newBufferObject(proto *Object, class Class, data []byte, maxLen int) *Object {
 	r.markPrototype(proto)
 	bo := &bufferObject{buf: arrayBuffer{data: data, max: maxLen}}
+	r.chargeObject(unsafe.Sizeof(bufferObject{}))
 	o := &bo.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -128,10 +130,10 @@ func (r *Realm) allocateBuffer(newTarget, ctor, defaultProto *Object, class Clas
 	if err != nil {
 		return nil, err
 	}
-	if length > maxBufferLength || maxLen > maxBufferLength {
+	if length > maxBufferLength || maxLen > maxBufferLength || r.overBudget(int(length)) {
 		return nil, r.RangeError("Array buffer allocation failed")
 	}
-	return r.newBufferObject(proto, class, newBytes(int(length), int(length)), int(maxLen)), nil
+	return r.newBufferObject(proto, class, r.newBytes(int(length), int(length)), int(maxLen)), nil
 }
 
 // newBytes returns a zeroed data block of length n and capacity c, aligned
@@ -148,6 +150,12 @@ func newBytes(n, c int) []byte {
 		c = (c + 7) &^ 7
 	}
 	return make([]byte, n, c)
+}
+
+// newBytes is newBytes charging the block to r's memory limit.
+func (r *Realm) newBytes(n, c int) []byte {
+	r.charge(c)
+	return newBytes(n, c)
 }
 
 // maxByteLengthOption implements GetArrayBufferMaxByteLengthOption: -1 when
@@ -251,7 +259,7 @@ func (r *Realm) resizeBytes(data []byte, n, maxLen int) ([]byte, error) {
 	if maxLen >= 0 && n > c {
 		size = min(max(n, 2*c), maxLen)
 	}
-	moved := newBytes(n, size)
+	moved := r.newBytes(n, size)
 	if err := r.copyBytes(moved, data); err != nil {
 		return nil, err
 	}

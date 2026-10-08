@@ -29,6 +29,7 @@ func footprintEngines() []engines.Engine {
 		engines.NewSobekEngine(),
 		engines.NewModerncQuickJSEngine(),
 		engines.NewQuickJSEngine(),
+		engines.NewQuickJSTunedEngine(),
 		engines.NewV8Engine(),
 	}
 }

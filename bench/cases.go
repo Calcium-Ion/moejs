@@ -98,7 +98,7 @@ func (h *HookCase) Check(out any, err error) string {
 // FullCheck runs the complete JSON-normalized comparison against the oracle.
 // lenient drops null-valued object members on both sides for engines whose
 // results crossed a JSON.stringify boundary (undefined members vanish there):
-// quickjs-go and v8go, see JSONBoundary.
+// both quickjs-go configurations and v8go, see JSONBoundary.
 func (h *HookCase) FullCheck(out any, err error, lenient bool) string {
 	if h.Case.ExpectedError != "" {
 		return h.Check(out, err)
@@ -118,9 +118,13 @@ func (h *HookCase) FullCheck(out any, err error, lenient bool) string {
 }
 
 // JSONBoundary reports whether the engine moves values as JSON text, so that
-// `undefined` object members are dropped on the way back.
+// `undefined` object members are dropped on the way back: the cgo engines and
+// modernc.org/quickjs.
 func JSONBoundary(e engines.Engine) bool {
-	return e.Name() == "quickjs-go" || e.Name() == "modernc-quickjs" || e.Name() == "v8go"
+	if _, ok := e.(*engines.ModerncQuickJSEngine); ok {
+		return true
+	}
+	return engines.Cgo(e)
 }
 
 // Run invokes the case on rt and returns the raw outcome.
@@ -156,8 +160,8 @@ var LoadCases = sync.OnceValues(func() ([]HookCase, error) {
 // "<engine>/<plugin>/<case>". Every entry needs a justification. Benchmarks
 // skip the full oracle comparison for these cases and keep the shape check.
 var AcceptedDifferences = map[string]string{
-	"sobek/sora/build submit multipart with file":    "Sobek exposes Go map iteration order through Object.keys on host maps (ToValue wraps map[string]any as a live proxy), so the multipart parts[] order is random between Sobek runs; the recording captured one order. moejs, quickjs-go and v8go see the keys in sorted (JSON) order and always match.",
-	"modernc-quickjs/sunoapi/parse batch result": "modernc.org/quickjs drops explicit-null object members during its internal JSON round-trip (Object.Into), identical to quickjs-go's JSON boundary behaviour.",
+	"sobek/sora/build submit multipart with file": "Sobek exposes Go map iteration order through Object.keys on host maps (ToValue wraps map[string]any as a live proxy), so the multipart parts[] order is random between Sobek runs; the recording captured one order. moejs, quickjs-go and v8go see the keys in sorted (JSON) order and always match.",
+	"modernc-quickjs/sunoapi/parse batch result":  "modernc.org/quickjs drops explicit-null object members during its internal JSON round-trip (Object.Into), identical to quickjs-go's JSON boundary behaviour.",
 }
 
 // Accepted reports whether the case is an accepted difference for the engine.

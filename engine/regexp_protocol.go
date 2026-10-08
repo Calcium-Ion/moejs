@@ -1,6 +1,9 @@
 package engine
 
-import "math/bits"
+import (
+	"math/bits"
+	"unsafe"
+)
 
 // The RegExp Symbol protocol (ES2025 §22.2.6): RegExp.prototype[@@match],
 // [@@matchAll], [@@replace], [@@search] and [@@split], RegExpExec,
@@ -547,7 +550,7 @@ func regexpSymReplace(r *Realm, rx *Object, str, replaceValue Value) (Value, err
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // --- RegExp.prototype[@@search] -------------------------------------------------------
@@ -806,6 +809,7 @@ type regexpStringIterObject struct {
 
 func (r *Realm) newRegExpStringIterator(matcher *Object, s *String, global, fullUnicode bool) *Object {
 	it := &regexpStringIterObject{data: regexpStringIter{matcher: matcher, s: s, global: global, fullUnicode: fullUnicode}}
+	r.chargeObject(unsafe.Sizeof(regexpStringIterObject{}))
 	o := &it.obj
 	proto := r.RegExpStringIteratorPrototype
 	o.shape = r.rootShapeFor(proto)

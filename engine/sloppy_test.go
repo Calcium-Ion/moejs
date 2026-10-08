@@ -211,7 +211,7 @@ func TestOffTableDispatch(t *testing.T) {
 		g = 3; with (o) { out.push(x + g); } function f() { return typeof this; } out.push(f());`, `out.join()`)
 	assert.Equal(t, "true,5,object,1,2", got)
 	bad := bytecode.Function{Name: "bad", Strict: true, Kind: bytecode.KindNormal,
-		Code: []uint32{bytecode.EncodeABC(bytecode.CallEval+1, 0, 0, 0)}}
+		Code: []uint32{bytecode.EncodeABC(bytecode.Op(bytecode.OpCount), 0, 0, 0)}}
 	f, _ := testClosure(r, &bad)
 	_, err := r.CallObject(f, Undefined(), nil)
 	assert.Equal(t, "TypeError: internal: unknown opcode", errorString(err))

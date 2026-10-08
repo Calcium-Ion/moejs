@@ -136,9 +136,10 @@ func BenchmarkNewRuntime(b *testing.B) {
 
 // ---------------------------------------------------------------- 2. Compile
 
-// BenchmarkCompile measures parse+compile (moejs) / parse+link (Sobek) of
-// each plugin. The cgo engines compile per context; that cost is inside
-// BenchmarkInstantiate for them.
+// BenchmarkCompile measures parse+compile (moejs) / parse+link (Sobek) /
+// bytecode compilation (quickjs-go-tuned) of each plugin. Default quickjs-go
+// and v8go compile per context; that cost is inside BenchmarkInstantiate for
+// them.
 func BenchmarkCompile(b *testing.B) {
 	skipWithoutPlugins(b)
 	for _, e := range benchEngines() {
@@ -167,7 +168,8 @@ func BenchmarkCompile(b *testing.B) {
 
 // BenchmarkInstantiate measures NewRuntime (with host globals) plus module
 // instantiation per plugin: what new-api pays to grow a plugin's pool by one
-// runtime. For quickjs-go and v8go this includes compiling the script.
+// runtime. For default quickjs-go and v8go this includes compiling the
+// script; quickjs-go-tuned loads the bytecode Compile produced.
 func BenchmarkInstantiate(b *testing.B) {
 	for _, e := range benchEngines() {
 		runner := mustRunner(b, e)
@@ -191,8 +193,8 @@ func BenchmarkInstantiate(b *testing.B) {
 // BenchmarkHook replays every recorded fixture case as its own sub-benchmark
 // (<engine>/<plugin>/<case>), validating the result on every iteration. The
 // runtime is created inside the sub-benchmark (outside the timer): testing
-// runs every b.Run on a new goroutine and quickjs-go v0.7.7 only accepts
-// calls from the goroutine that created the runtime.
+// runs every b.Run on a new goroutine and default quickjs-go v0.7.7 only
+// accepts calls from the goroutine that created the runtime.
 func BenchmarkHook(b *testing.B) {
 	cases := allCases(b)
 	for _, e := range benchEngines() {
@@ -428,7 +430,7 @@ func BenchmarkHookSuiteParallel(b *testing.B) {
 			continue
 		}
 		configs := gcConfigs
-		if e.Name() == "quickjs-go" || e.Name() == "v8go" {
+		if engines.Cgo(e) {
 			configs = gcConfigs[:1]
 		}
 		for _, cfg := range configs {

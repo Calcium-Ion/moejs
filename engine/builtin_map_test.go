@@ -45,7 +45,7 @@ func TestCollectionTableAgainstList(t *testing.T) {
 			k := rng.IntN(keyRange)
 			switch x := rng.IntN(100); {
 			case x < 45:
-				c.set(IntValue(k), IntValue(op))
+				c.set(nil, IntValue(k), IntValue(op))
 				if ref.find(k) < 0 {
 					ref.keys = append(ref.keys, k)
 					ref.alive = append(ref.alive, true)
@@ -106,11 +106,11 @@ func TestCollectionKeys(t *testing.T) {
 	s2 := StringValue(rope)
 	u1 := StringValue(FromGoString("é"))
 	u2 := StringValue(FromGoString("é"))
-	c.set(s1, IntValue(1))
-	c.set(u1, IntValue(2))
-	c.set(NumberValue(math.Copysign(0, -1)), IntValue(3))
-	c.set(NumberValue(math.NaN()), IntValue(4))
-	c.set(IntValue(1), IntValue(5))
+	c.set(nil, s1, IntValue(1))
+	c.set(nil, u1, IntValue(2))
+	c.set(nil, NumberValue(math.Copysign(0, -1)), IntValue(3))
+	c.set(nil, NumberValue(math.NaN()), IntValue(4))
+	c.set(nil, IntValue(1), IntValue(5))
 	for _, tc := range []struct {
 		k    Value
 		want float64

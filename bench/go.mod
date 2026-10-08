@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/Calcium-Ion/moejs v0.0.0-00010101000000-000000000000
 	github.com/buke/quickjs-go v0.7.7
+	github.com/evanw/esbuild v0.28.2
 	github.com/grafana/sobek v0.0.0-20260708062710-267a0e055bb4
 	github.com/stretchr/testify v1.12.1
 	modernc.org/quickjs v0.25.0

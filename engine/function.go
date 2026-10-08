@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 )
@@ -51,6 +52,13 @@ type FunctionData struct {
 	dataFn NativeDataFunc // behaviour of a data native
 	icBase uint32         // interpreter: base of this function's inline caches in realm.ic
 	kind   FuncKind       // after icBase so the two share a word
+	// plain is set on a closure whose entry binds only its parameters: no
+	// rest parameter, arguments object or captured binding (enterFrame).
+	plain bool
+	// ctorSlots is the most named properties (up to smallObjectMax) an
+	// object constructed with this function as new.target ended its
+	// construction with: the next one is allocated with room for them.
+	ctorSlots uint8
 }
 
 // boundFunc is the state of a bound function beyond its bound this.
@@ -310,18 +318,12 @@ func (m *ModuleEnv) ExportNames() []string {
 	return names
 }
 
-// ErrNoInterpreter is returned by Call/Construct on bytecode functions until
-// the interpreter sets runFunction/constructFunction in its init().
+// ErrNoInterpreter is returned by Construct on bytecode functions until the
+// interpreter sets constructFunction in its init().
 var ErrNoInterpreter = errors.New("engine: bytecode interpreter is not linked")
 
-// runFunction executes a bytecode function. The interpreter (engine/interp_*.go)
-// replaces this stub in init().
-var runFunction = func(r *Realm, fn *Object, fd *FunctionData, this Value, args []Value) (Value, error) {
-	return Undefined(), ErrNoInterpreter
-}
-
-// constructFunction runs [[Construct]] of a bytecode function. Same contract
-// as runFunction.
+// constructFunction runs [[Construct]] of a bytecode function. The
+// interpreter (engine/interp_*.go) replaces this stub in init().
 var constructFunction = func(r *Realm, fn *Object, fd *FunctionData, args []Value, newTarget *Object) (Value, error) {
 	return Undefined(), ErrNoInterpreter
 }
@@ -403,7 +405,7 @@ func (r *Realm) CallObject(fn *Object, this Value, args []Value) (Value, error) 
 	case FuncNative:
 		res, err = fd.native(r, this, args)
 	case FuncBytecode:
-		res, err = runFunction(r, fn, fd, this, args)
+		res, err = r.enterFrame(fn, fd, this, args)
 	default:
 		res, err = r.callOther(fd, this, args)
 	}
@@ -478,6 +480,7 @@ func appendArgs(bound, args []Value) []Value {
 // function shape (length, name) and room for a third property.
 func (r *Realm) newFunctionObject(name *String, length int, kind FuncKind) (*Object, *FunctionData) {
 	fo := &funcObject{}
+	r.chargeObject(unsafe.Sizeof(funcObject{}))
 	r.initFunction(&fo.obj, &fo.fd, fo.slots[:2:3], name, length, kind)
 	return &fo.obj, &fo.fd
 }
@@ -493,6 +496,7 @@ func (r *Realm) newNativeFunctionObject(name *String, length int, kind FuncKind)
 		fo = &b.funcs[n]
 	} else {
 		fo = &nativeFuncObject{}
+		r.chargeObject(unsafe.Sizeof(nativeFuncObject{}))
 	}
 	r.initFunction(&fo.obj, &fo.fd, fo.slots[:], name, length, kind)
 	return &fo.obj, &fo.fd
@@ -616,6 +620,7 @@ func (r *Realm) NewBoundFunction(target *Object, boundThis Value, boundArgs []Va
 		return nil, err
 	}
 	bo := &boundFuncObject{}
+	r.chargeObject(unsafe.Sizeof(boundFuncObject{}))
 	o, fd := &bo.obj, &bo.fd
 	r.initFunction(o, fd, bo.slots[:], name, 0, FuncBound)
 	o.slots[0] = length
@@ -641,6 +646,34 @@ func (r *Realm) OrdinaryCreateFromConstructor(newTarget *Object, defaultProto *O
 	}
 	r.markPrototype(proto)
 	return r.newObject(class, r.rootShapeFor(proto)), nil
+}
+
+// constructThis is OrdinaryCreateFromConstructor(newTarget,
+// "%Object.prototype%") for the [[Construct]] of a bytecode function: the
+// object has room for the named properties the last objects constructed
+// with newTarget ended up with (FunctionData.ctorSlots, noteCtorSlots), so
+// a constructor that assigns them one by one does not grow its slots.
+func (r *Realm) constructThis(newTarget *Object) (*Object, error) {
+	proto, err := r.GetPrototypeFromConstructor(newTarget, nil, r.ObjectPrototype)
+	if err != nil {
+		return nil, err
+	}
+	r.markPrototype(proto)
+	if fd := newTarget.FunctionData(); fd != nil && fd.ctorSlots != 0 {
+		return initObject(r.NewObjectCap(int(fd.ctorSlots)), ClassObject, r.rootShapeFor(proto)), nil
+	}
+	return r.newObject(ClassObject, r.rootShapeFor(proto)), nil
+}
+
+// noteCtorSlots records in fd, the new.target of a [[Construct]] that
+// returned v, how many named properties v has.
+func noteCtorSlots(fd *FunctionData, v Value) {
+	if !v.IsObject() {
+		return
+	}
+	if n := len(v.AsObject().slots); n > int(fd.ctorSlots) && n <= smallObjectMax {
+		fd.ctorSlots = uint8(n)
+	}
 }
 
 // GetPrototypeFromConstructor implements GetPrototypeFromConstructor

@@ -42,9 +42,18 @@ const unsupportedSuffix = " is not supported yet (see TODO.md)"
 // those slots and lists what the module imports. A module with top-level
 // await compiles as an async function body (Function.Async): the call
 // returns the promise of its evaluation.
-func CompileModule(m *syntax.Module) (fn *bytecode.Function, err error) {
-	c := &compiler{file: m.File}
+func CompileModule(m *syntax.Module) (*bytecode.Function, error) {
+	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
+		return compileModuleWith(m, noHoist)
+	})
+}
+
+// compileModuleWith is CompileModule without hoisting in the functions of
+// noHoist.
+func compileModuleWith(m *syntax.Module, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
+	c := newCompiler(m.File, nil, noHoist)
 	defer c.recover(&err)
+	defer c.release()
 	f := c.newFuncState(nil, nil, bytecode.KindModule, m.Scope)
 	f.out.Name = ""
 	f.out.Source = &bytecode.SourceInfo{Name: m.File.Name, Src: m.File.Src, Start: m.Pos, End: m.End}
@@ -124,9 +133,18 @@ func CompileScript(s *syntax.Script) (*bytecode.Function, error) {
 }
 
 // compileScriptStop is CompileScript, calling stop as scriptState.stop.
-func compileScriptStop(s *syntax.Script, stop func() error) (fn *bytecode.Function, err error) {
-	c := &compiler{file: s.File, script: &scriptState{stop: stop}}
+func compileScriptStop(s *syntax.Script, stop func() error) (*bytecode.Function, error) {
+	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
+		return compileScriptWith(s, stop, noHoist)
+	})
+}
+
+// compileScriptWith is compileScriptStop without hoisting in the functions of
+// noHoist.
+func compileScriptWith(s *syntax.Script, stop func() error, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
+	c := newCompiler(s.File, &scriptState{stop: stop}, noHoist)
 	defer c.recover(&err)
+	defer c.release()
 	f := c.newFuncState(nil, nil, bytecode.KindScript, s.Scope)
 	f.out.Strict = s.Strict
 	f.out.ScriptOrModule = s.HasDirectEval // for its eval code's import()
@@ -201,12 +219,24 @@ func (f *funcState) extra() *bytecode.Extra {
 type compiler struct {
 	file *syntax.File
 	locs map[*syntax.Binding]location
-	err  *Error
 
 	classOf map[*syntax.Function]*syntax.Class    // class constructor -> its class
 	bodies  map[*syntax.Function]func(*funcState) // synthetic member initializers (class.go)
 
 	script *scriptState // CompileScript only
+	hoist  *hoistState  // constants out of loops (hoist.go)
+}
+
+// newCompiler returns the compiler of one compilation of file, which
+// hoists no constants in the functions of noHoist. The compilation ends
+// with release.
+func newCompiler(file *syntax.File, script *scriptState, noHoist map[*syntax.Function]bool) *compiler {
+	c := &compiler{file: file, script: script}
+	if noHoist != nil {
+		c.hoist = getHoistState()
+		c.hoist.noHoist = noHoist
+	}
+	return c
 }
 
 // scriptState is the compiler state only scripts (and code with direct
@@ -219,7 +249,9 @@ type scriptState struct {
 	evals   *evalMemo         // the direct eval call sites' scopes (eval.go)
 }
 
-type bailout struct{}
+// bailout is the panic that ends a compile fail stopped, carrying its
+// error.
+type bailout struct{ err *Error }
 
 // stopped is the panic that ends a compile scriptState.stop stopped,
 // carrying its error.
@@ -233,9 +265,11 @@ func (c *compiler) recover(err *error) {
 	if r := recover(); r != nil {
 		switch r := r.(type) {
 		case bailout:
-			*err = c.err
+			*err = r.err
 		case stopped:
 			*err = r.err
+		case *hoistRetry:
+			*err = r
 		default:
 			panic(r)
 		}
@@ -260,8 +294,7 @@ func (c *compiler) stopNow() {
 // fail aborts compilation with a positioned error.
 func (c *compiler) fail(pos int, msg string) {
 	line, col := c.file.Position(pos)
-	c.err = &Error{Name: c.file.Name, Pos: pos, Line: line, Col: col, Msg: msg}
-	panic(bailout{})
+	panic(bailout{&Error{Name: c.file.Name, Pos: pos, Line: line, Col: col, Msg: msg}})
 }
 
 // location says where a binding lives: a register of its function, a slot
@@ -344,6 +377,10 @@ type funcState struct {
 	fn     *syntax.Function // nil at top level
 	out    *bytecode.Function
 	kind   bytecode.Kind
+	// hoisted is set once a loop of the function keeps constants in
+	// registers, scanned while the loop nest that looked for them compiles
+	// (hoist.go).
+	hoisted, scanned bool
 
 	code     []uint32
 	consts   []bytecode.Const
@@ -435,6 +472,9 @@ func (f *funcState) alloc() int {
 		f.maxRegs = f.nregs
 	}
 	if r > bytecode.MaxRegister {
+		if f.hoisted {
+			panic(&hoistRetry{fn: f.fn})
+		}
 		f.c.fail(f.curPos, "SyntaxError: function needs more than 256 registers"+unsupportedSuffix)
 	}
 	return r
@@ -1105,10 +1145,7 @@ func (f *funcState) compileBody() {
 		return
 	}
 	f.setPosNode(fn.ExprBody)
-	mark := f.nregs
-	r := f.exprReg(fn.ExprBody)
-	f.emitReturn(r)
-	f.free(mark)
+	f.returnExpr(fn.ExprBody)
 	if f.retLbl != nil {
 		f.endBody() // an async arrow's epilogue
 	}

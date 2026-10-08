@@ -150,13 +150,14 @@ func (r *Realm) Intern(s *String) *String {
 	if s.atom != 0 {
 		return s
 	}
+	f := s // s is returned above, f never: a view stays on the stack
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return r.internASCII(s.s)
+	if f.kind == strASCII {
+		return r.internASCII(f.s)
 	}
-	return r.internUTF16(s)
+	return r.internUTF16(f)
 }
 
 // InternGoString interns a Go string.
@@ -221,9 +222,13 @@ func globalUTF16Atom(key string, s *String) *String {
 		// Fresh header and code units for the table, as in globalASCIIAtom:
 		// a substring shares its string's units (Substring). key is the
 		// caller's own copy (utf16Key).
-		u := make([]uint16, len(s.u))
-		copy(u, s.u)
-		a = globalInternUTF16.intern(key, &String{u: u, n: s.n, hash: s.Hash(), kind: strUTF16})
+		// Hashed here, not through s: a caller's string is not written (it
+		// may be shared, or a rope's view).
+		u := make([]uint16, s.n)
+		copy(u, s.units())
+		x := &String{p: unitsPtr(u), n: s.n, kind: strUTF16}
+		x.Hash()
+		a = globalInternUTF16.intern(key, x)
 	}
 	return a
 }
@@ -241,7 +246,7 @@ func InternKey(g string) PropertyKey {
 	}
 	if !isASCII(g) {
 		s := FromGoString(g)
-		return StringKey(globalUTF16Atom(utf16Key(s.u), s))
+		return StringKey(globalUTF16Atom(utf16Key(s.units()), s))
 	}
 	return StringKey(globalASCIIAtom(g))
 }
@@ -271,7 +276,7 @@ func (r *Realm) cacheInterning() bool {
 }
 
 func (r *Realm) internUTF16(s *String) *String {
-	key := utf16Key(s.u)
+	key := utf16Key(s.units())
 	if a, ok := r.internCacheUTF16[key]; ok {
 		return a
 	}

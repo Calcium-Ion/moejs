@@ -227,7 +227,7 @@ func (a *eagerArena) str(g string) *String {
 		return s
 	}
 	u := appendUTF16(make([]uint16, 0, len(g)), g)
-	*s = String{u: u, n: int32(len(u)), kind: strUTF16}
+	*s = String{p: unitsPtr(u), n: int32(len(u)), kind: strUTF16}
 	return s
 }
 

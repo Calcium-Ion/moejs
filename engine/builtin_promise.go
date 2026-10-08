@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // Promise (ES2025 §27.2). A promise is a ClassPromise object whose internal
 // is its promiseData: state, result, the pending reactions and
 // [[PromiseIsHandled]]. Its jobs run from the realm's job queue (jobs.go).
@@ -116,6 +118,7 @@ func isPromise(v Value) bool { return v.IsObject() && v.AsObject().class == Clas
 func (r *Realm) allocPromise(proto *Object) *Object {
 	r.markPrototype(proto)
 	po := &promiseObject{data: promiseData{result: Undefined()}}
+	r.chargeObject(unsafe.Sizeof(promiseObject{}))
 	o := &po.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto

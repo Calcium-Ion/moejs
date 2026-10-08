@@ -1,0 +1,6 @@
+pi-mono 021eae60a7f99a51612b5054818ee5ebfb75dc48 https://github.com/badlogic/pi-mono.git
+TypeScript 050880ce59e30b356b686bd3144efe24f875ebc8 https://github.com/microsoft/TypeScript.git src
+typebox 3837e51080d0f8e7ac19412bbbfe9b2fa1c289a0 https://github.com/sinclairzx81/typebox.git
+# name, commit, remote and, optionally, the one directory to check out.
+# pi-mono and TypeBox main and TypeScript release-6.0 as of 2026-10-05
+# (TypeScript's main holds its Go port); fetch.sh checks out these commits.

@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // %IteratorPrototype%, %ArrayIteratorPrototype% and %StringIteratorPrototype%
 // (ES2025 §27.1.2, §23.1.5, §22.1.5), Array.prototype[@@iterator] and
 // [@@unscopables], and String.prototype[@@iterator].
@@ -65,6 +67,7 @@ type arrayIteratorObject struct {
 // newIteratorObject co-allocates an engine iterator object over target.
 func (r *Realm) newIteratorObject(proto *Object, class Class, target Value, kind IterKind) *Object {
 	it := &arrayIteratorObject{}
+	r.chargeObject(unsafe.Sizeof(arrayIteratorObject{}))
 	o := &it.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -101,6 +104,7 @@ func (r *Realm) iterResultShape() *Shape {
 // createIterResult implements CreateIterResultObject in one allocation.
 func (r *Realm) createIterResult(value Value, done bool) Value {
 	res := &iterResultObject{}
+	r.chargeObject(unsafe.Sizeof(iterResultObject{}))
 	o := &res.obj
 	o.shape = r.iterResultShape()
 	o.proto = r.ObjectPrototype

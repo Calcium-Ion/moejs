@@ -257,6 +257,42 @@ func (r *Realm) concatValues(a, b *String) (Value, error) {
 	return StringValue(s), nil
 }
 
+// concatNumber is a + b for a string and a number, either way round, when
+// the string is ASCII and the result short enough to be flat: the digits go
+// straight into the result instead of into the string ToString of the
+// number would make first. ok is false otherwise.
+func concatNumber(a, b Value) (Value, bool) {
+	var (
+		s     *String
+		f     float64
+		first bool
+	)
+	switch {
+	case a.IsString() && b.IsNumber():
+		s, f = a.AsString(), b.AsNumber()
+	case a.IsNumber() && b.IsString():
+		s, f, first = b.AsString(), a.AsNumber(), true
+	default:
+		return Value{}, false
+	}
+	if s.kind != strASCII || s.n == 0 {
+		return Value{}, false
+	}
+	var buf [32]byte
+	num := AppendNumber(buf[:0], f)
+	n := int(s.n) + len(num)
+	if n >= ropeThreshold {
+		return Value{}, false
+	}
+	z, dst := newASCIIBuf(n)
+	if first {
+		copy(dst[copy(dst, num):], s.s)
+	} else {
+		copy(dst[copy(dst, s.s):], num)
+	}
+	return StringValue(z), true
+}
+
 // Add implements the `+` operator.
 func (r *Realm) Add(a, b Value) (Value, error) {
 	if a.IsNumber() && b.IsNumber() {
@@ -264,6 +300,10 @@ func (r *Realm) Add(a, b Value) (Value, error) {
 	}
 	if a.IsString() && b.IsString() {
 		return r.concatValues(a.AsString(), b.AsString())
+	}
+	if v, ok := concatNumber(a, b); ok {
+		r.chargeString(v.AsString().Len())
+		return v, nil
 	}
 	pa, err := r.ToPrimitive(a, HintDefault)
 	if err != nil {

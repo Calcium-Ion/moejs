@@ -19,17 +19,23 @@ moejs 支持 ES 模块、类、async/await、Proxy、BigInt 等现代 JavaScript
 
 ## 性能
 
-测试负载是 new-api 的 10 个任务插件和 269 个录制下来的调用。计时在 Go 调用方进行，包括参数和结果的转换。
+<p align="center">
+  <img src="docs/assets/plugin-bench.zh.png" alt="moejs 插件场景基准：小请求、10 万 token agent 请求和 8 MiB 图片请求的吞吐，以及 32 并发时真正占用的内存">
+</p>
 
-| | moejs | Sobek | QuickJS（modernc） | QuickJS（quickjs-go） |
+这张图在 Go 程序能嵌入的几个引擎上跑 new-api 的插件负载：任务插件的小请求、插件改写后发往上游的 10 万 token 编码 agent 请求，以及带一张 8 MiB 图片的请求。灰底里是 C 直接调用 QuickJS 的结果，作为参考。测量方法见 [docs/performance.zh_CN.md](docs/performance.zh_CN.md#插件场景)。
+
+下表是单次调用的耗时：测试负载是 new-api 的 10 个任务插件和 269 个录制下来的调用，计时在 Go 调用方进行，包括参数和结果的转换。
+
+| | moejs | Sobek | QuickJS（quickjs-go 默认配置） | V8（v8go） |
 |---|--:|--:|--:|--:|
-| 一次插件调用 | 21.4 µs | 45.8 µs | 111.6 µs | 316 µs |
-| 新建运行时 | 4.3 µs | 6.2 µs | 556 µs | 1,126 µs |
-| 加载最大的插件后，每个运行时的内存 | 76 KiB | 264 KiB | 456 KiB ¹ | 348 KiB ² |
+| 一次插件调用 | 6.9 µs | 14.3 µs | 104.5 µs | 56.6 µs ¹ |
+| 新建运行时 | 1.4 µs | 2.2 µs | 382 µs | 1,153 µs ¹ |
+| 加载最大的插件后，每个运行时的内存 | 81 KiB | 264 KiB | 348 KiB ² | 1,544 KiB ² |
 
-¹ RSS 增量；modernc 的分配器不走 Go 堆。² 引擎自己的堆。
+¹ V8 的耗时在测试机上波动很大。² 引擎自己的堆。
 
-Sobek 和 QuickJS（modernc）与 moejs 一样是纯 Go 引擎，QuickJS（quickjs-go）通过 cgo 调用。资源允许时也会对比 V8（v8go）。测试机器、完整结果和复现方法见
+Sobek 和 moejs 一样是纯 Go 引擎，QuickJS 和 V8 通过 cgo 调用。测试机器、完整结果和复现方法见
 [docs/performance.zh_CN.md](docs/performance.zh_CN.md)。
 
 ## 功能
@@ -40,15 +46,27 @@ Sobek 和 QuickJS（modernc）与 moejs 一样是纯 Go 引擎，QuickJS（quick
 
 ### 和 Go 之间传值
 
-插件函数直接接收 Go 的 map、切片或 JSON。插件读到 map 的哪一层，moejs 才转换哪一层。返回值可以读成 Go 值或 JSON，也可以直接写进你自己的结构体，结果和 `json.Unmarshal` 相同。宿主函数就是普通的 Go 函数，也可以返回 promise，之后在 Go 里兑现。
+插件函数直接接收 Go 的 map、切片、结构体和自定义类型，或者 JSON。插件读到 map 的哪一层，moejs 才转换哪一层，`json.RawMessage` 里的 JSON 文本也一样。返回值可以读成 Go 值或 JSON，也可以直接写进你自己的结构体，结果和 `json.Unmarshal` 相同。`json.RawMessage` 字段收到结果中对应部分的 JSON 文本，`DecodeOptions` 在解码之前限制结果的大小。宿主函数就是普通的 Go 函数，也可以返回 promise，之后在 Go 里兑现。
 
 ### 插件能接触到什么
 
-插件能用的是 JavaScript 标准库和你装进去的全局变量。每个 `import` 和 `import()` 都交给你提供的 Go 函数解析，`eval` 和 `new Function` 可以限制源码长度，也可以关掉。内建对象是冻结的，所有运行时共用一份，所以每个插件看到的 `Array.prototype` 都一样。每个运行时有自己的全局变量。
+插件能用的是 JavaScript 标准库和你装进去的全局变量。每个 `import` 和 `import()` 都交给你提供的 Go 函数解析，`eval` 和 `new Function` 可以限制源码长度，也可以关掉。内建对象是冻结的，所有运行时共用一份，所以每个插件看到的 `Array.prototype` 都一样。每个运行时有自己的全局变量和时区。插件需要修改内建对象时，宿主可以给运行时单独建一份可修改的内建对象。
+
+### TypeScript
+
+`CompileTS` 直接运行 TypeScript 模块，做法和 Node 的类型剥离一样：解析器丢掉类型语法，所以错误和调用栈指向 TypeScript 源码。enum、带值的 namespace 和其他会改变运行时行为的 TypeScript 写法会返回 `*SyntaxError`。
+
+### 定时器和事件循环
+
+单独的运行时没有定时器。`eventloop` 包提供 `setTimeout`、`setInterval` 和 `setImmediate`，以及一个事件循环，宿主函数可以在别的 goroutine 里干活，再回到循环上兑现 promise。
 
 ### 超时和错误
 
 任意 goroutine 都可以中断正在运行的插件，死循环也能停下。JavaScript 异常、语法错误、中断和宿主函数里的 panic 各自以不同的 Go 错误类型返回，抛出的 `Error` 能取到 V8 格式的调用栈。宿主函数 panic 之后，运行时还能继续使用。
+
+### 内存上限
+
+`Options.MemoryLimit` 限制一次请求的 JavaScript 最多能分配多少内存。超过上限的插件会带着 JavaScript 调用栈停下，脚本捕获不到这个错误。`Stats` 报告运行时的分配量和其他计数。
 
 ## 快速上手
 
@@ -110,9 +128,10 @@ func NewPlugin(name, source string, size int) (*Plugin, error) {
 	return &Plugin{mod: mod, idle: make(chan *moejs.Runtime, size)}, nil
 }
 
-// Call runs hook on a runtime from the pool and decodes the result into out.
-// Any number of goroutines can call it at once.
-func (p *Plugin) Call(ctx context.Context, hook moejs.Hook, args map[string]any, out any) error {
+// Call runs hook with body, a JSON text such as a request body, on a runtime
+// from the pool and decodes the result into out. Any number of goroutines can
+// call it at once.
+func (p *Plugin) Call(ctx context.Context, hook moejs.Hook, body string, out any) error {
 	rt, err := p.get()
 	if err != nil {
 		return err
@@ -131,8 +150,9 @@ func (p *Plugin) Call(ctx context.Context, hook moejs.Hook, args map[string]any,
 		}
 	}()
 
-	// FromGo converts the map as the plugin reads it, one level at a time.
-	arg, err := rt.FromGo(args)
+	// ParseJSONString parses the text without copying it: strings in the
+	// arguments share body's memory.
+	arg, err := rt.ParseJSONString(body)
 	if err != nil {
 		return err
 	}
@@ -207,8 +227,8 @@ func main() {
 	var wg sync.WaitGroup
 	for i := range reqs {
 		wg.Go(func() {
-			task := map[string]any{"prompt": fmt.Sprintf(" cat %d ", i), "n": i + 1}
-			if err := p.Call(context.Background(), build, task, &reqs[i]); err != nil {
+			body := fmt.Sprintf(`{"prompt": " cat %d ", "n": %d}`, i, i+1)
+			if err := p.Call(context.Background(), build, body, &reqs[i]); err != nil {
 				panic(err)
 			}
 		})
@@ -222,7 +242,7 @@ func main() {
 	// POST https://api.example.com/v1/tasks Bearer test-key cat 2 3
 
 	// A JavaScript throw comes back as *moejs.Exception.
-	err = p.Call(context.Background(), build, map[string]any{}, &Request{})
+	err = p.Call(context.Background(), build, "{}", &Request{})
 	var exc *moejs.Exception
 	fmt.Println(errors.As(err, &exc), exc.Name(), exc.Message())
 	// true TypeError Cannot read properties of undefined (reading 'trim')
@@ -230,15 +250,17 @@ func main() {
 	// A hook still running when ctx ends stops with *moejs.InterruptedError.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	err = p.Call(ctx, spin, nil, nil)
+	err = p.Call(ctx, spin, "null", nil)
 	var interrupted *moejs.InterruptedError
 	fmt.Println(errors.As(err, &interrupted), interrupted.Value)
 	// true context deadline exceeded
 }
 ```
 
+`Call` 直接接收 JSON 文本，因为请求带来的参数通常就是这样。`ParseJSONString` 把文本交给插件时不拷贝，也就是上面图里"moejs（不拷贝）"那条路径。HTTP 处理函数可以把请求体读进 `strings.Builder`，知道 `r.ContentLength` 时先按它预留空间，再传 `b.String()`，这个字符串和 builder 共用同一块内存。`ParseJSON` 接收 `[]byte`，会先拷贝一份。`FromGo` 接收 Go 的 map、切片和结构体。
+
 服务端照 `Plugin` 这样调用插件，每个请求的开销最小。从池里取一个运行时只是一次 channel 接收，新建运行时并加载最大的插件约需 71 µs。
-运行时池、模块图、值的转换、Promise 和错误的细节见[使用指南](docs/guide.zh_CN.md)，每个函数的说明见[包文档](https://pkg.go.dev/github.com/Calcium-Ion/moejs)。
+运行时池、模块图、TypeScript、值的转换、Promise、错误和事件循环的细节见[使用指南](docs/guide.zh_CN.md)，每个函数的说明见[包文档](https://pkg.go.dev/github.com/Calcium-Ion/moejs)。
 
 moejs 仓库里有一份按插件负载录制的 `default.pgo`。Go 只自动使用 main 包目录下的 profile，所以构建时要手动传入：
 
@@ -258,7 +280,8 @@ Unicode 17 属性，`Date` 的时区数据来自 Go。
 测试时跳过。按目录统计的结果见 [bench/test262/RESULTS.md](bench/test262/RESULTS.md)。
 
 未实现的特性有：导入属性和 JSON 模块、`using` 声明和 `DisposableStack`、装饰器、迭代器辅助方法、`Intl`、`Temporal`、
-`ShadowRealm`、`FinalizationRegistry`、定时器和 `JSON.rawJSON`。完整列表、已知的错误结果和各项限制见 [TODO.md](TODO.md)。
+`ShadowRealm`、`FinalizationRegistry` 和 `JSON.rawJSON`。单独的 `Runtime` 没有定时器，`eventloop` 包会安装它们。
+完整列表、已知的错误结果和各项限制见 [TODO.md](TODO.md)。
 
 ## 状态
 
@@ -267,14 +290,16 @@ moejs 目前是 alpha 版本，API 在版本之间可能会变。
 ## 测试
 
 ```sh
-# 测试输入需要单独下载：new-api 的插件和固定版本的 test262。没下载时，依赖它们的测试会跳过。
+# 测试输入需要单独下载：new-api 的插件、固定版本的 test262 和固定版本的 TypeScript 源码（pi-mono、TypeScript、TypeBox）。
+# 没下载时，依赖它们的测试会跳过。
 bench/testdata/plugins/fetch.sh
 bench/test262/fetch.sh
+bench/tscorpus/fetch.sh
 
 # 引擎的单元测试、审计测试和模糊测试语料。
 go test ./...
 
-# 和 Sobek 的差分测试、表达式语料、基准测试和 test262。
+# 和 Sobek、esbuild 的差分测试、表达式语料、基准测试和 test262。
 # bench/ 是单独的 Go module，Sobek 和 cgo 引擎只出现在它的依赖里。V8 和 QuickJS 基线需要 cgo。
 cd bench && go test -timeout 30m ./...
 ```
@@ -290,10 +315,10 @@ moejs 的设计参考了下面这些项目，代码是独立编写的。
   `Date.parse` 和 `Error.prototype.stack` 的格式。
 - [Lua 5.x](https://www.lua.org/)：定宽寄存器指令编码。
 - [JavaScriptCore](https://webkit.org/) 和 [SpiderMonkey](https://spidermonkey.dev/)：NaN-boxing。
+- [TypeScript](https://github.com/microsoft/TypeScript)：`CompileTS` 遵循的语法和消歧规则。
 - [esbuild](https://github.com/evanw/esbuild)：用 Go 写快速 JavaScript 解析器的做法。
 - [Hardened JavaScript / SES](https://github.com/endojs/endo/tree/master/packages/ses)：共享冻结内建对象所用的
   `lockdown()` 模型。
-- [modernc.org/quickjs](https://pkg.go.dev/modernc.org/quickjs)：基准测试里的纯 Go QuickJS 转译对照。
 - [quickjs-go](https://github.com/buke/quickjs-go) 和 [v8go](https://github.com/rogchap/v8go)：基准测试里的 cgo 对照。
 - [test262](https://github.com/tc39/test262)：一致性测试集。
 - [new-api](https://github.com/QuantumNous/new-api)：插件宿主，它的 `pkg/jsplugin` 决定了 moejs 要支持哪些 API。

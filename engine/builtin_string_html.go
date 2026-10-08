@@ -39,7 +39,7 @@ func createHTML(r *Realm, this Value, method, tag, attr string, value Value) (Va
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 func stringProtoAnchor(r *Realm, this Value, args []Value) (Value, error) {

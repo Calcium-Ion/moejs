@@ -1,6 +1,9 @@
 package engine
 
-import "slices"
+import (
+	"slices"
+	"unsafe"
+)
 
 // Proxy exotic objects (ECMA-262 §10.5).
 //
@@ -61,12 +64,14 @@ func (r *Realm) newProxy(target, handler *Object) *Object {
 	var o *Object
 	if target.IsCallable() {
 		p := &callableProxyObject{}
+		r.chargeObject(unsafe.Sizeof(callableProxyObject{}))
 		p.pd = proxyData{target: target, handler: handler, ctor: target.internal.(*FunctionData).IsConstructor()}
 		p.fd = FunctionData{kind: FuncProxy, realm: r, data: &p.pd, dataFn: proxyCall}
 		o = &p.obj
 		o.internal = &p.fd
 	} else {
 		p := &proxyObject{pd: proxyData{target: target, handler: handler}}
+		r.chargeObject(unsafe.Sizeof(proxyObject{}))
 		o = &p.obj
 		o.internal = &p.pd
 	}
@@ -1088,7 +1093,7 @@ func (r *Realm) receiverSet(recv *Object, key PropertyKey, v Value) (bool, error
 		return false, err
 	}
 	if !ok {
-		return recv.DefineOwnProperty(r, key, DataDescriptor(v, attrDefault))
+		return recv.createAbsent(r, key, v)
 	}
 	if existing.IsAccessorDescriptor() || !existing.Writable() {
 		return false, nil

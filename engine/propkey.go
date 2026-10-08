@@ -106,15 +106,16 @@ func parseArrayIndex(s string) (uint32, bool) {
 // become index keys, everything else is interned.
 func (r *Realm) KeyFromString(s *String) PropertyKey {
 	if s.atom == 0 {
+		f := s // s is interned below, f never: a view stays on the stack
 		if s.kind == strRope {
-			s.flatten()
+			f = s.flat(new(String))
 		}
-		if s.kind == strASCII {
-			if i, ok := parseArrayIndex(s.s); ok {
+		if f.kind == strASCII {
+			if i, ok := parseArrayIndex(f.s); ok {
 				return IndexKey(i)
 			}
 		}
-		return StringKey(r.Intern(s))
+		return StringKey(r.Intern(s)) // Intern may return what it is given
 	}
 	// indexString interns the small index strings (so for-in and
 	// Object.keys hand out atoms like "0"), and the intern table is global,

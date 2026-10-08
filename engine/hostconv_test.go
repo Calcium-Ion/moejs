@@ -47,8 +47,8 @@ func TestFromGoScalars(t *testing.T) {
 	assert.Equal(t, "héllo", s.AsString().GoString())
 	_, err = r.FromGo(json.Number("abc"))
 	assert.Error(t, err)
-	_, err = r.FromGo(struct{}{})
-	assert.ErrorContains(t, err, "unsupported Go type struct {}")
+	_, err = r.FromGo(make(chan int))
+	assert.ErrorContains(t, err, "unsupported Go type chan int")
 	o := r.NewObject()
 	ov, _ := r.FromGo(o)
 	assert.Same(t, o, ov.AsObject())
@@ -397,7 +397,7 @@ func TestFromGoPlanMirrorsBuild(t *testing.T) {
 	}
 	// A value that cannot be converted fails where it is read, not at the
 	// call; the rest of the argument is usable and the scratch is reset.
-	bad := mustFromGo(t, r, map[string]any{"a": map[string]any{"bad": struct{}{}, "ok": 1}, "b": "x"})
+	bad := mustFromGo(t, r, map[string]any{"a": map[string]any{"bad": complex(1, 2), "ok": 1}, "b": "x"})
 	a, err := bad.AsObject().GetProp(r, key(r, "a"))
 	require.NoError(t, err)
 	okv, err := a.AsObject().GetProp(r, key(r, "ok"))

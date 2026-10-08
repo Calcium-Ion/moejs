@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -127,4 +128,180 @@ func utf16Bytes(u []uint16) []byte {
 		return nil
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(u))), 2*len(u))
+}
+
+// units returns the code units of a strUTF16 string. Their capacity is
+// their length, so appending to them copies.
+//
+// GC safety: p is an unsafe.Pointer field, which the collector traces like
+// any pointer; for a strUTF16 string it holds the address of the first of
+// n code units in one allocation (unitsPtr), so the slice covers memory
+// that p keeps alive.
+func (s *String) units() []uint16 { return unsafe.Slice((*uint16)(s.p), s.n) }
+
+// The words of a rope that flattening writes (flatten), which are only
+// ever read and written with atomic operations: the children, p and right,
+// which it releases, and the data pointer and length of s, which a rope
+// does not use otherwise, in which it publishes the contents.
+//
+// GC safety: the data pointer of a string is traced like any pointer, and
+// a rope stores in it the address of its contents, bytes or units, which
+// keeps them alive. s stays a valid Go string: "" or, for ASCII contents,
+// their bytes.
+func (s *String) leftWord() *unsafe.Pointer  { return &s.p }
+func (s *String) rightWord() *unsafe.Pointer { return (*unsafe.Pointer)(unsafe.Pointer(&s.right)) }
+func (s *String) flatData() *unsafe.Pointer  { return (*unsafe.Pointer)(unsafe.Pointer(&s.s)) }
+func (s *String) flatLen() *uintptr {
+	return (*uintptr)(unsafe.Add(unsafe.Pointer(&s.s), unsafe.Sizeof(uintptr(0))))
+}
+
+// published returns the flat string of the contents a flattening of the
+// rope s published, and false before one did: s.n bytes when the length
+// word of s holds s.n, units when it holds 0.
+func (s *String) published() (String, bool) {
+	d := atomic.LoadPointer(s.flatData())
+	if d == nil {
+		return String{}, false
+	}
+	if atomic.LoadUintptr(s.flatLen()) != 0 {
+		return String{s: unsafe.String((*byte)(d), s.n), n: s.n, kind: strASCII}, true
+	}
+	return String{p: d, n: s.n, kind: strUTF16}, true
+}
+
+// unitsPtr is what a strUTF16 String keeps of u in p: the address of its
+// first unit. The String covers u[:len(u)] only.
+func unitsPtr(u []uint16) unsafe.Pointer { return unsafe.Pointer(unsafe.SliceData(u)) }
+
+// utf16String wraps code units of which one at least is >= 0x80. It keeps
+// u, which the caller must not modify afterwards.
+func utf16String(u []uint16) *String {
+	return &String{p: unitsPtr(u), n: int32(len(u)), kind: strUTF16}
+}
+
+// appendBuf heads an append buffer (string_append.go); its code units, ASCII
+// bytes or UTF-16 units, follow it directly.
+type appendBuf struct {
+	used atomic.Int32 // units written; only the string this long writes past them
+	cap  int32        // units the buffer holds
+}
+
+const appendBufSize = int(unsafe.Sizeof(appendBuf{}))
+
+// appendBuf returns the buffer an inBuf string's units start.
+//
+// GC safety: those units start appendBufSize bytes into the allocation
+// that holds the buffer (newAppendBuf), so stepping back from them stays
+// inside that allocation, which the string's own pointer keeps alive.
+func (s *String) appendBuf() *appendBuf {
+	d := s.p
+	if s.kind == strASCII {
+		d = unsafe.Pointer(unsafe.StringData(s.s))
+	}
+	return (*appendBuf)(unsafe.Add(d, -appendBufSize))
+}
+
+func (h *appendBuf) data() unsafe.Pointer { return unsafe.Add(unsafe.Pointer(h), appendBufSize) }
+
+// bytes and units return the whole buffer. Only the caller that moved used
+// past a range writes it, before any string covers it.
+func (h *appendBuf) bytes() []byte   { return unsafe.Slice((*byte)(h.data()), h.cap) }
+func (h *appendBuf) units() []uint16 { return unsafe.Slice((*uint16)(h.data()), h.cap) }
+
+// ascii returns the first n bytes of an ASCII buffer as a Go string. They
+// are written once and for all, before any string covers them.
+func (h *appendBuf) ascii(n int) string { return unsafe.String((*byte)(h.data()), n) }
+
+// strBlock is a String allocated with an append buffer of D's size, the
+// buffer its units start. Only the String has pointers: the collector
+// scans its first 32 bytes, not the units.
+type strBlock[D any] struct {
+	s   String
+	buf appendBuf
+	d   D
+}
+
+func allocStrBlock[D any]() (*String, *appendBuf) {
+	x := new(strBlock[D])
+	return &x.s, &x.buf
+}
+
+// strBlocks are the block sizes, about 1.5x apart, each filling the size
+// class in the comment (above 512 bytes an object with pointers holds an
+// 8-byte type header besides: 56 + bytes + 8).
+var strBlocks = [...]struct {
+	bytes int
+	alloc func() (*String, *appendBuf)
+}{
+	{72, allocStrBlock[[72]byte]},                         // 128
+	{136, allocStrBlock[[136]byte]},                       // 192
+	{200, allocStrBlock[[200]byte]},                       // 256
+	{328, allocStrBlock[[328]byte]},                       // 384
+	{456, allocStrBlock[[456]byte]},                       // 512
+	{704, allocStrBlock[[704]byte]},                       // 768
+	{960, allocStrBlock[[960]byte]},                       // 1024
+	{1472, allocStrBlock[[1472]byte]},                     // 1536
+	{1984, allocStrBlock[[1984]byte]},                     // 2048
+	{3008, allocStrBlock[[3008]byte]},                     // 3072
+	{4032, allocStrBlock[[4032]byte]},                     // 4096
+	{6080, allocStrBlock[[6080]byte]},                     // 6144
+	{8128, allocStrBlock[[8128]byte]},                     // 8192
+	{12224, allocStrBlock[[12224]byte]},                   // 12288
+	{16320, allocStrBlock[[16320]byte]},                   // 16384
+	{24512, allocStrBlock[[24512]byte]},                   // 24576
+	{appendBlockMax, allocStrBlock[[appendBlockMax]byte]}, // 32768
+}
+
+// appendBlockMax is the largest buffer allocated with its String; a larger
+// one is an allocation of its own, without pointers.
+const appendBlockMax = 32704
+
+// newAppendBuf allocates an append buffer for n units of w bytes, used, and
+// up to capacity, and the String that will head it, which the caller fills
+// in: the largest block no longer than capacity that holds n, else the
+// smallest that does, else a buffer of exactly capacity.
+//
+// GC safety: a buffer past appendBlockMax is a []byte, and appendBuf has
+// no pointers, so viewing its first bytes as one hides nothing from the
+// collector; the allocation is at least 8-byte aligned. The String keeps it
+// alive through its pointer to the units.
+func newAppendBuf(n, capacity, w int) (*String, *appendBuf) {
+	capacity = min(capacity, MaxStringLength) // capacity*w fits an int32
+	var (
+		s *String
+		h *appendBuf
+	)
+	if n*w <= appendBlockMax {
+		i := 0
+		for i+1 < len(strBlocks) && strBlocks[i+1].bytes <= capacity*w {
+			i++
+		}
+		for strBlocks[i].bytes < n*w {
+			i++
+		}
+		s, h = strBlocks[i].alloc()
+		capacity = strBlocks[i].bytes / w
+	} else {
+		b := make([]byte, appendBufSize+capacity*w)
+		s, h = new(String), (*appendBuf)(unsafe.Pointer(unsafe.SliceData(b)))
+	}
+	h.cap = int32(capacity)
+	h.used.Store(int32(n))
+	return s, h
+}
+
+// newAppendASCII returns an inBuf ASCII String of n bytes heading a new
+// buffer of at least capacity, and the bytes, which the caller fills before
+// publishing the String.
+func newAppendASCII(n, capacity int) (*String, []byte) {
+	s, h := newAppendBuf(n, capacity, 1)
+	*s = String{s: h.ascii(n), n: int32(n), kind: strASCII, flags: strInBuf}
+	return s, h.bytes()[:n]
+}
+
+// newAppendUTF16 is newAppendASCII for UTF-16 units.
+func newAppendUTF16(n, capacity int) (*String, []uint16) {
+	s, h := newAppendBuf(n, capacity, 2)
+	*s = String{p: h.data(), n: int32(n), kind: strUTF16, flags: strInBuf}
+	return s, h.units()[:n]
 }

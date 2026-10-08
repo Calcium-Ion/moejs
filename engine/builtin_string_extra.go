@@ -54,7 +54,7 @@ func stringFromCodePoint(r *Realm, this Value, args []Value) (Value, error) {
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // stringRaw implements String.raw(template, ...substitutions).
@@ -94,7 +94,7 @@ func stringRaw(r *Realm, this Value, args []Value) (Value, error) {
 			return Undefined(), err
 		}
 		if k+1 == n {
-			return StringValue(sb.String()), nil
+			return StringValue(r.builtString(&sb)), nil
 		}
 		if k < int64(len(subs)) {
 			s, err := r.ToString(subs[k])
@@ -130,7 +130,7 @@ func stringProtoToWellFormed(r *Realm, this Value, args []Value) (Value, error) 
 	if s.IsWellFormed() {
 		return StringValue(s), nil
 	}
-	u := append([]uint16(nil), s.u...)
+	u := append([]uint16(nil), s.UTF16()...) // UTF16, not units: s may be a rope
 	for i := 0; i < len(u); i++ {
 		c := u[i]
 		switch {

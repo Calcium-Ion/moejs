@@ -1,5 +1,7 @@
 package engine
 
+import "unsafe"
+
 // Map, %MapIteratorPrototype% and Map.groupBy (ES2025 §24.1, §24.1.5,
 // §24.1.2.1). The table is builtin_map_table.go; Set shares it
 // (builtin_set.go).
@@ -86,6 +88,7 @@ type collObject struct {
 func (r *Realm) newCollectionObject(proto *Object, class Class) (*Object, *collection) {
 	r.markPrototype(proto)
 	co := &collObject{}
+	r.chargeObject(unsafe.Sizeof(collObject{}))
 	o := &co.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -116,7 +119,7 @@ func mapConstruct(r *Realm, args []Value, newTarget *Object) (Value, error) {
 	}
 	o, c := r.newCollectionObject(proto, ClassMap)
 	return ObjectValue(o), r.fillFromEntries(o, Arg(args, 0), AtomSet, &r.mapSetFn, func(k, v Value) error {
-		c.set(k, v)
+		c.set(r, k, v)
 		return nil
 	})
 }
@@ -237,7 +240,7 @@ func mapProtoSet(r *Realm, this Value, args []Value) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
-	c.set(Arg(args, 0), Arg(args, 1))
+	c.set(r, Arg(args, 0), Arg(args, 1))
 	return this, nil
 }
 
@@ -332,6 +335,7 @@ type collIterObject struct {
 
 func (r *Realm) newCollIterator(proto *Object, class Class, c *collection, kind IterKind) *Object {
 	it := &collIterObject{}
+	r.chargeObject(unsafe.Sizeof(collIterObject{}))
 	o := &it.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -376,7 +380,7 @@ func mapGroupBy(r *Realm, this Value, args []Value) (Value, error) {
 		i, ok := groups.get(k)
 		if !ok {
 			i = IntValue(len(lists))
-			groups.set(k, i)
+			groups.set(r, k, i)
 			lists = append(lists, nil)
 		}
 		n := int(i.AsNumber())
@@ -393,7 +397,7 @@ func mapGroupBy(r *Realm, this Value, args []Value) (Value, error) {
 		if !ok {
 			break
 		}
-		c.set(k, ObjectValue(r.NewArrayFromSlice(lists[int(i.AsNumber())])))
+		c.set(r, k, ObjectValue(r.NewArrayFromSlice(lists[int(i.AsNumber())])))
 	}
 	return ObjectValue(o), nil
 }

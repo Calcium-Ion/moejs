@@ -202,9 +202,18 @@ func CompileEval(e *syntax.Eval) (*bytecode.Function, error) {
 }
 
 // compileEvalStop is CompileEval, calling stop as scriptState.stop.
-func compileEvalStop(e *syntax.Eval, stop func() error) (fn *bytecode.Function, err error) {
-	c := &compiler{file: e.File, script: &scriptState{stop: stop}}
+func compileEvalStop(e *syntax.Eval, stop func() error) (*bytecode.Function, error) {
+	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
+		return compileEvalWith(e, stop, noHoist)
+	})
+}
+
+// compileEvalWith is compileEvalStop without hoisting in the functions of
+// noHoist.
+func compileEvalWith(e *syntax.Eval, stop func() error, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
+	c := newCompiler(e.File, &scriptState{stop: stop}, noHoist)
 	defer c.recover(&err)
+	defer c.release()
 	// The caller: a script or module top level and, when the eval code has
 	// one, the function supplying this, holding the levels' environments.
 	kind := bytecode.KindScript

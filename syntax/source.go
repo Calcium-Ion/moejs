@@ -19,6 +19,14 @@ type Options struct {
 	// this variant of an import-free module only when an import cycle can
 	// call into it before its body ran (engine.LinkOptions.EarlyExports).
 	EarlyExports bool
+	// TypeScript makes ParseModule read TypeScript, whose type syntax it
+	// erases: the tree is the one the type-erased JavaScript gives, with
+	// every position in the TypeScript text. Import specifiers used only as
+	// types are dropped, and TypeScript with run-time semantics (enums,
+	// namespaces with values, parameter properties, import = require,
+	// export =) is a syntax error. ParseScript rejects it: TypeScript code
+	// is a module here.
+	TypeScript bool
 	// Stop, when set, is called before every stopEvery-th statement of each
 	// statement list the parser and the resolver go through, the first
 	// included: an error it returns ends the parse, which returns that error

@@ -271,7 +271,7 @@ func umDAG(t *testing.T, r *Realm, n int, leaf string) Value {
 func umParsed(t *testing.T, r *Realm, n int) Value {
 	v, err := r.JSONParseGoString(`"` + strings.Repeat("A", n) + `"`)
 	require.NoError(t, err)
-	require.True(t, v.AsString().jsonPlain)
+	require.Equal(t, jsonPlain, v.AsString().json)
 	return v
 }
 
@@ -327,6 +327,84 @@ func TestUnmarshalOutputBound(t *testing.T) {
 				require.NoError(t, gerr, c.name)
 			}
 			require.Equal(t, want, got, c.name)
+		}
+	}
+}
+
+// TestUnmarshalHostStringBound checks the bound of long FromGo strings read
+// by a script, which are scanned for the bytes JSON quoting escapes at
+// their first use: whichever comes first, the bound of Unmarshal or
+// ToGoInto or AppendJSON, a plain one counts its length, the text of one of
+// 262,142 characters being the limit exactly, and one with an escape, a
+// shorter one or a non-ASCII one counts six bytes a code unit, as when
+// FromGo scanned them; the results are the round trip's.
+func TestUnmarshalHostStringBound(t *testing.T) {
+	const limit = 1 << 18
+	lowerMaxStringLength(t, limit)
+	r := NewRealm()
+	plain := func(n int) string { return strings.Repeat("QUJD+/==", n/8+1)[:n] }
+	with := func(n int, c string) string { g := plain(n - len(c)); return g[:n/2] + c + g[n/2:] }
+	// value reads the strings from a FromGo argument, an array of them if
+	// more than one: new Strings, which nothing has scanned.
+	value := func(gs []string) Value {
+		items := make([]Value, len(gs))
+		for i, g := range gs {
+			r.ReleaseCallData()
+			o, err := r.FromGo(map[string]any{"s": g})
+			require.NoError(t, err)
+			items[i], err = o.AsObject().GetProp(r, r.KeyFromGoString("s"))
+			require.NoError(t, err)
+		}
+		if len(items) == 1 {
+			return items[0]
+		}
+		return ObjectValue(r.NewArray(items...))
+	}
+	for _, c := range []struct {
+		name     string
+		gs       []string
+		complete bool // whether the bound fits the limit
+		fails    bool // whether AppendJSON fails
+	}{
+		{"plain at the limit", []string{plain(limit - 2)}, true, false},
+		{"plain past the limit", []string{plain(limit - 1)}, false, true},
+		{"two plain at the limit", []string{plain(limit/2 - 4), plain(limit/2 - 4)}, true, false}, // text limit-1 bytes
+		{"quote", []string{with(jsonPlainMin, `"`)}, false, false},
+		{"newline at the end", []string{plain(jsonPlainMin-1) + "\n"}, false, false},
+		{"plain and a backslash", []string{plain(jsonPlainMin), with(jsonPlainMin, `\`)}, false, false},
+		{"short of the minimum", []string{plain(jsonPlainMin - 1)}, false, false},
+		{"non-ASCII", []string{with(jsonPlainMin, "é")}, false, false},
+	} {
+		for _, first := range []string{"Unmarshal", "ToGoInto", "AppendJSON"} {
+			name := c.name + ", " + first + " first"
+			v := value(c.gs)
+			_, _, aerr := r.AppendJSON(nil, v)
+			if first != "AppendJSON" {
+				v = value(c.gs)
+			}
+			got, want := new(any), new(any)
+			var complete bool
+			var gerr, werr error
+			if first == "ToGoInto" {
+				complete = r.ToGoInto(v, got)
+				_, werr = togoRoundTrip(r, v, want)
+				if !complete {
+					require.Equal(t, new(any), got, name) // nothing written
+					_, gerr = togoRoundTrip(r, v, got)
+				}
+			} else {
+				complete, gerr = r.Unmarshal(v, got)
+				require.NoError(t, gerr, name)
+				werr = unmarshalRoundTrip(r, v, want)
+				if !complete {
+					require.Equal(t, new(any), got, name)
+					gerr = unmarshalRoundTrip(r, v, got)
+				}
+			}
+			require.Equal(t, c.complete, complete, name)
+			require.Equal(t, c.fails, aerr != nil, "%s: %v", name, aerr)
+			require.Equal(t, errText(werr), errText(gerr), name)
+			require.Equal(t, want, got, name)
 		}
 	}
 }

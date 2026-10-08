@@ -60,6 +60,8 @@ type Module struct {
 	// HasDirectEval is set by the scope pass when a direct eval call
 	// appears in the module's code, at any depth.
 	Async, HasDirectEval bool
+
+	ts *tsInfo // a TypeScript module's names for the scope pass (elideTypeImports)
 }
 
 // Script is a parsed script. Strict is set when its directive prologue

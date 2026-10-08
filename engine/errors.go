@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"strconv"
+	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 )
@@ -176,6 +177,15 @@ func (e *InterruptedError) Error() string {
 	return "interrupted: " + fmt.Sprint(e.Value)
 }
 
+// Unwrap returns Value when it is an error, so that errors.Is and errors.As
+// see what Interrupt was called with: a host that interrupts with
+// context.Cause(ctx) finds context.DeadlineExceeded or its own cause through
+// the *InterruptedError. It returns nil for any other Value.
+func (e *InterruptedError) Unwrap() error {
+	err, _ := e.Value.(error)
+	return err
+}
+
 // Throw wraps a JavaScript value as an error.
 func (r *Realm) Throw(v Value) error { return &Exception{Value: v} }
 
@@ -256,6 +266,7 @@ func (r *Realm) newErrorObject(proto *Object, message Value) *Object {
 // and including the innermost call of skip (captureStackInto).
 func (r *Realm) newErrorObjectSkip(proto *Object, message Value, skip *Object) *Object {
 	eo := &errorObject{}
+	r.chargeObject(unsafe.Sizeof(errorObject{}))
 	o := &eo.obj
 	shape := r.rootShapeFor(proto)
 	o.proto = proto

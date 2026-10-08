@@ -66,7 +66,7 @@ func setConstruct(r *Realm, args []Value, newTarget *Object) (Value, error) {
 	}
 	o, c := r.newCollectionObject(proto, ClassSet)
 	return ObjectValue(o), r.fillFromValues(o, Arg(args, 0), AtomAdd, &r.setAddFn, func(v Value) error {
-		c.add(v)
+		c.add(r, v)
 		return nil
 	})
 }
@@ -76,7 +76,7 @@ func setProtoAdd(r *Realm, this Value, args []Value) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
-	c.add(Arg(args, 0))
+	c.add(r, Arg(args, 0))
 	return this, nil
 }
 
@@ -274,7 +274,7 @@ func setProtoUnion(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), err
 	}
 	o, res := r.newSetResult()
-	res.copyFrom(c)
+	res.copyFrom(r, c)
 	for k := int64(0); ; k++ {
 		if err := interruptEvery(r, k); err != nil {
 			return Undefined(), err
@@ -286,7 +286,7 @@ func setProtoUnion(r *Realm, this Value, args []Value) (Value, error) {
 		if done {
 			return ObjectValue(o), nil
 		}
-		res.add(v)
+		res.add(r, v)
 	}
 }
 
@@ -299,14 +299,14 @@ func setProtoIntersection(r *Realm, this Value, args []Value) (Value, error) {
 	if float64(c.size()) <= rec.size {
 		err = rec.forEachThis(r, c, func(e Value, in bool) bool {
 			if in {
-				res.add(e)
+				res.add(r, e)
 			}
 			return false
 		})
 	} else {
 		_, err = rec.forEachKey(r, func(v Value) bool {
 			if c.has(v) {
-				res.add(v)
+				res.add(r, v)
 			}
 			return false
 		})
@@ -323,7 +323,7 @@ func setProtoDifference(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), err
 	}
 	o, res := r.newSetResult()
-	res.copyFrom(c)
+	res.copyFrom(r, c)
 	if float64(c.size()) <= rec.size {
 		// The walk is over the copy (which only this loop mutates): the
 		// spec reads resultSetData[index] up to the original size.
@@ -355,7 +355,7 @@ func setProtoSymmetricDifference(r *Realm, this Value, args []Value) (Value, err
 		return Undefined(), err
 	}
 	o, res := r.newSetResult()
-	res.copyFrom(c)
+	res.copyFrom(r, c)
 	for k := int64(0); ; k++ {
 		if err := interruptEvery(r, k); err != nil {
 			return Undefined(), err
@@ -371,7 +371,7 @@ func setProtoSymmetricDifference(r *Realm, this Value, args []Value) (Value, err
 		if c.has(v) {
 			res.delete(v)
 		} else {
-			res.add(v)
+			res.add(r, v)
 		}
 	}
 }

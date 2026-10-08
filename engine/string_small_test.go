@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -13,6 +14,7 @@ import (
 // NumberToString) hold the right content across the size buckets and the
 // boundary to separately allocated payloads.
 func TestSmallASCIICoallocation(t *testing.T) {
+	r := NewRealm()
 	for n := 1; n <= smallASCIIMax+8; n++ {
 		src := strings.Repeat("Ab", n/2) + strings.Repeat("c", n%2)
 		a, b := src[:n/2], src[n/2:]
@@ -29,9 +31,9 @@ func TestSmallASCIICoallocation(t *testing.T) {
 		sb.WriteGoString(src)
 		assert.Equal(t, src, sb.String().GoString(), "builder string n=%d", n)
 
-		lower, _ := stringToLower(nil, asciiString(src))
+		lower, _ := stringToLower(r, asciiString(src))
 		assert.Equal(t, strings.ToLower(src), lower.GoString(), "lower n=%d", n)
-		upper, _ := stringToUpper(nil, asciiString(src))
+		upper, _ := stringToUpper(r, asciiString(src))
 		assert.Equal(t, strings.ToUpper(src), upper.GoString(), "upper n=%d", n)
 		// The source is untouched by the in-place case conversion.
 		assert.Equal(t, strings.Repeat("Ab", n/2)+strings.Repeat("c", n%2), src)
@@ -62,7 +64,8 @@ func TestSmallASCIIAllocations(t *testing.T) {
 	a, b := asciiString("Content-"), asciiString("Type")
 	assert.Equal(t, 1.0, testing.AllocsPerRun(50, func() { concat(a, b) }))
 	mixed := asciiString("X-Request-Id")
-	assert.Equal(t, 1.0, testing.AllocsPerRun(50, func() { stringToLower(nil, mixed) }))
+	r := NewRealm()
+	assert.Equal(t, 1.0, testing.AllocsPerRun(50, func() { stringToLower(r, mixed) }))
 	assert.Equal(t, 1.0, testing.AllocsPerRun(50, func() { NumberToString(370) }))
 	assert.Equal(t, 1.0, testing.AllocsPerRun(50, func() {
 		var sb StringBuilder
@@ -71,4 +74,14 @@ func TestSmallASCIIAllocations(t *testing.T) {
 		sb.WriteString(b)
 		sb.String()
 	}))
+}
+
+// TestStringSize pins String to the 48-byte size class, with the small
+// co-allocated strings filling theirs: a field added to String moves every
+// string, rope node and split piece up a class.
+func TestStringSize(t *testing.T) {
+	assert.Equal(t, uintptr(48), unsafe.Sizeof(String{}))
+	assert.Equal(t, uintptr(64), unsafe.Sizeof(asciiBuf16{}))
+	assert.Equal(t, uintptr(80), unsafe.Sizeof(asciiBuf32{}))
+	assert.Equal(t, uintptr(112), unsafe.Sizeof(asciiBuf64{}))
 }

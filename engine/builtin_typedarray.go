@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"reflect"
+	"unsafe"
 )
 
 // Typed arrays (ECMA-262 §23.2): %TypedArray%, its prototype and the twelve
@@ -164,31 +165,102 @@ func typedArrayOwnCell(o *Object, key PropertyKey) (propCell, bool) {
 
 // typedArrayGetNumber implements [[Get]] of the typed array o for the
 // Number key f (TypedArrayGetElement): every Number is a canonical numeric
-// string.
+// string. An index inFixed of a Number type is read in place.
 func typedArrayGetNumber(o *Object, f float64) Value {
 	ta := o.internal.(*typedArray)
-	if f >= 0 && f < float64(ta.length()) {
-		if i := int(f); float64(i) == f {
-			return ta.at(i)
+	i := int(f)
+	if float64(i) != f || i < 0 {
+		return Undefined()
+	}
+	if ta.inFixed(i) {
+		b := ta.view.data.data[ta.view.offset+i<<elemShift[ta.kind]:]
+		var x float64
+		switch ta.kind {
+		case elemFloat64:
+			x = math.Float64frombits(binary.LittleEndian.Uint64(b))
+		case elemFloat32:
+			x = float64(math.Float32frombits(binary.LittleEndian.Uint32(b)))
+		case elemInt32:
+			return IntValue(int(int32(binary.LittleEndian.Uint32(b))))
+		case elemUint32:
+			return IntValue(int(binary.LittleEndian.Uint32(b)))
+		case elemInt16:
+			return IntValue(int(int16(binary.LittleEndian.Uint16(b))))
+		case elemUint16:
+			return IntValue(int(binary.LittleEndian.Uint16(b)))
+		case elemInt8:
+			return IntValue(int(int8(b[0])))
+		case elemUint8, elemUint8Clamped:
+			return IntValue(int(b[0]))
+		default:
+			return ta.at(i) // Float16 and the BigInt types
 		}
+		return NumberValue(x)
+	}
+	if i < ta.length() {
+		return ta.at(i)
 	}
 	return Undefined()
 }
 
+// inFixed reports whether i, i >= 0, indexes an element of a fixed-length
+// array whose buffer is not detached and still holds the whole array: then
+// the array's length is its own, with no TypedArrayLength to compute, and
+// the element types read and write their bits in place.
+func (ta *typedArray) inFixed(i int) bool {
+	v := &ta.view
+	return v.length >= 0 && i < v.length>>elemShift[ta.kind] && !v.data.detached && v.offset+v.length <= len(v.data.data)
+}
+
+// float64At reads the element at the Number key f of a Float64Array when f
+// is an index that inFixed accepts: the in-place read of typedArrayGetNumber,
+// which the interpreter loop makes without a call.
+func (ta *typedArray) float64At(f float64) (float64, bool) {
+	v, i := &ta.view, int(f)
+	if ta.kind != elemFloat64 || float64(i) != f || v.length < 0 || uint(i) >= uint(v.length>>3) || v.data.detached || v.offset+v.length > len(v.data.data) {
+		return 0, false
+	}
+	return math.Float64frombits(binary.LittleEndian.Uint64(v.data.data[v.offset+i<<3:])), true
+}
+
+// setFloat64 stores the Number x at the Number key f of a Float64Array when
+// f is an index that inFixed accepts: the in-place write of
+// typedArraySetNumber.
+func (ta *typedArray) setFloat64(f, x float64) bool {
+	v, i := &ta.view, int(f)
+	if ta.kind != elemFloat64 || float64(i) != f || v.length < 0 || uint(i) >= uint(v.length>>3) || v.data.detached || v.offset+v.length > len(v.data.data) {
+		return false
+	}
+	binary.LittleEndian.PutUint64(v.data.data[v.offset+i<<3:], math.Float64bits(x))
+	return true
+}
+
 // typedArraySetNumber implements [[Set]] of the typed array o for the Number
 // key f with o as the receiver (TypedArraySetElement): the value is
-// converted even when f is not a valid index.
+// converted even when f is not a valid index. A Number written to an index
+// inFixed of a Number type is stored in place.
 func (r *Realm) typedArraySetNumber(o *Object, f float64, v Value) error {
 	ta := o.internal.(*typedArray)
-	u, err := r.toRaw(ta.kind, v)
-	if err != nil {
-		return err
-	}
-	if f >= 0 && f < float64(ta.length()) {
-		if i := int(f); float64(i) == f {
-			ta.setRaw(i, u)
+	i := int(f)
+	index := float64(i) == f && i >= 0
+	var u uint64
+	if index && v.IsNumber() && ta.inFixed(i) && !ta.kind.isBigInt() {
+		// A Number converts without running code, so the index stays valid.
+		if x := v.AsNumber(); ta.kind == elemFloat64 {
+			u = math.Float64bits(x)
+		} else {
+			u = numberToRaw(ta.kind, x)
+		}
+	} else {
+		var err error
+		if u, err = r.toRaw(ta.kind, v); err != nil {
+			return err
+		}
+		if !index || i >= ta.length() {
+			return nil
 		}
 	}
+	ta.setRaw(i, u)
 	return nil
 }
 
@@ -395,6 +467,7 @@ func (r *Realm) newTypedArrayObject(proto *Object, kind elemType, buf *Object, o
 		view: dataView{buf: buf, data: buf.internal.(*arrayBuffer), offset: offset, length: byteLength},
 		kind: kind,
 	}}
+	r.chargeObject(unsafe.Sizeof(typedArrayObject{}))
 	o := &to.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -420,7 +493,10 @@ func (r *Realm) allocTypedArray(proto *Object, kind elemType, n int64) (*Object,
 		return nil, err
 	}
 	size := int(n) << elemShift[kind]
-	buf := r.newBufferObject(r.binaryIntr().ArrayBufferPrototype, ClassArrayBuffer, newBytes(size, size), -1)
+	if r.overBudget(size) {
+		return nil, r.RangeError("Invalid typed array length: %d", n)
+	}
+	buf := r.newBufferObject(r.binaryIntr().ArrayBufferPrototype, ClassArrayBuffer, r.newBytes(size, size), -1)
 	return r.newTypedArrayObject(proto, kind, buf, 0, size), nil
 }
 

@@ -74,7 +74,7 @@ func (f *funcState) stmt(s syntax.Stmt) {
 	case *syntax.ReturnStmt:
 		mark := f.nregs
 		if s.Result != nil {
-			f.emitReturn(f.returnValue(s.Result))
+			f.returnExpr(s.Result)
 		} else if len(f.finallys) > 0 {
 			t := f.alloc()
 			f.emitA(bytecode.LoadUndef, t)
@@ -194,6 +194,29 @@ func (f *funcState) varDecl(d *syntax.VarDecl) {
 	}
 }
 
+// returnExpr compiles `return e`. Where a return is one Ret (no finally
+// to route it through, no iterator to close, no epilogue to jump to), a
+// conditional returns from each of its branches instead of joining their
+// values in one register with a Move and a Jmp.
+func (f *funcState) returnExpr(e syntax.Expr) {
+	if c, ok := e.(*syntax.CondExpr); ok && len(f.finallys) == 0 && len(f.iterCloses) == 0 && f.retLbl == nil {
+		// A conditional that folds is one constant: expr loads it, where
+		// splitting would compile a dead branch and a jump.
+		if _, folds := f.fold(c); !folds {
+			f.setPosNode(c)
+			alt := f.newLabel()
+			f.condJump(c.Test, alt, false)
+			f.returnExpr(c.Cons)
+			f.bind(alt)
+			f.returnExpr(c.Alt)
+			return
+		}
+	}
+	mark := f.nregs
+	f.emitReturn(f.returnValue(e))
+	f.free(mark)
+}
+
 // --- labels, break and continue -----------------------------------------------------
 
 func (f *funcState) takeLabels() []string {
@@ -288,6 +311,7 @@ func (f *funcState) forStmt(s *syntax.ForStmt) {
 	if es != nil {
 		f.emitNone(bytecode.CopyEnv)
 	}
+	hoist := f.hoistLoop(s)
 	loop, cont, exit := f.newLabel(), f.newLabel(), f.newLabel()
 	f.bind(loop)
 	if s.Cond != nil {
@@ -307,11 +331,14 @@ func (f *funcState) forStmt(s *syntax.ForStmt) {
 	f.setPos(s.Pos)
 	f.emitJump(bytecode.Jmp, 0, loop)
 	f.bind(exit)
+	f.endHoist(hoist)
 	f.leaveScope(es, mark)
 }
 
 func (f *funcState) whileStmt(s *syntax.WhileStmt) {
 	names := f.takeLabels()
+	mark := f.nregs
+	hoist := f.hoistLoop(s)
 	loop, cont, exit := f.newLabel(), f.newLabel(), f.newLabel()
 	f.bind(loop)
 	f.setPosNode(s.Cond)
@@ -323,10 +350,14 @@ func (f *funcState) whileStmt(s *syntax.WhileStmt) {
 	f.setPos(s.Pos)
 	f.emitJump(bytecode.Jmp, 0, loop)
 	f.bind(exit)
+	f.endHoist(hoist)
+	f.free(mark)
 }
 
 func (f *funcState) doWhile(s *syntax.DoWhileStmt) {
 	names := f.takeLabels()
+	mark := f.nregs
+	hoist := f.hoistLoop(s)
 	loop, cont, exit := f.newLabel(), f.newLabel(), f.newLabel()
 	f.bind(loop)
 	f.pushLoopTarget(names, exit, cont)
@@ -339,6 +370,8 @@ func (f *funcState) doWhile(s *syntax.DoWhileStmt) {
 	f.condJump(s.Cond, exit, false)
 	f.emitJump(bytecode.Jmp, 0, loop)
 	f.bind(exit)
+	f.endHoist(hoist)
+	f.free(mark)
 }
 
 func (f *funcState) forInOf(s *syntax.ForInOfStmt) {
@@ -435,7 +468,6 @@ func (f *funcState) switchStmt(s *syntax.SwitchStmt) {
 	exit := f.newLabel()
 	labels := make([]*label, len(s.Cases))
 	var def *label
-	t := f.alloc()
 	for i, c := range s.Cases {
 		labels[i] = f.newLabel()
 		if c.Test == nil {
@@ -445,8 +477,8 @@ func (f *funcState) switchStmt(s *syntax.SwitchStmt) {
 		m := f.nregs
 		f.setPosNode(c.Test)
 		v := f.operand(c.Test)
-		f.emitABC(bytecode.StrictEq, t, disc, v)
-		f.emitJump(bytecode.JmpT, t, labels[i])
+		f.emitJump(bytecode.JmpStrictEq, disc, labels[i])
+		f.emitExtra(uint32(v))
 		f.free(m)
 	}
 	if def != nil {

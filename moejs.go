@@ -20,8 +20,9 @@
 //
 // The jobs JavaScript queues (promise reactions, queueMicrotask callbacks)
 // run before the method that ran it returns, getters and proxy traps
-// included (Load, Call, Has, Get, ToGo, AppendJSON, SetGlobal, the settlers
-// of NewPromise): the first exception a callback throws is the method's
+// included (Load, Call, CallFunction, Has, Get, ToGo, AppendJSON,
+// SetGlobal, the settlers of NewPromise): the first exception a callback
+// throws is the method's
 // error when it succeeded otherwise, and an interrupt drops the jobs left.
 //
 // A module that imports others is linked once with the modules it imports,
@@ -69,6 +70,12 @@ type (
 	Exception = engine.Exception
 	// InterruptedError is returned when Interrupt stopped running code.
 	InterruptedError = engine.InterruptedError
+	// MemoryLimitError is the value of the *InterruptedError a runtime
+	// stops with when it allocates more than Options.MemoryLimit between
+	// resets; it unwraps to ErrMemoryLimit.
+	MemoryLimitError = engine.MemoryLimitError
+	// Stats are a runtime's counters (Runtime.Stats).
+	Stats = engine.Stats
 )
 
 // Arg returns args[i], or undefined when there are fewer arguments.
@@ -91,18 +98,21 @@ var (
 	// is missing, undefined or null.
 	ErrHookNotFound = errors.New("moejs: hook not found")
 	// ErrNotCallable is returned when a hook names a value that is not a
-	// function.
-	ErrNotCallable = errors.New("moejs: hook is not a function")
+	// function, and when CallFunction is given one.
+	ErrNotCallable = errors.New("moejs: not a function")
 	// ErrForeign is returned for a function or generator of another
 	// runtime (or a bound function or proxy of one) passed to Call,
-	// SetGlobal, FromGo or a settler of NewPromise: it runs only in the
-	// runtime that created it. Inside a Go map or slice FromGo or SetGlobal
-	// converts it is not the error: reading that member throws a TypeError
-	// with ErrForeign's text.
+	// CallFunction, SetGlobal, FromGo or a settler of NewPromise: it runs
+	// only in the runtime that created it. Inside a Go map or slice FromGo
+	// or SetGlobal converts it is not the error: reading that member throws
+	// a TypeError with ErrForeign's text.
 	ErrForeign = engine.ErrForeign
 	// ErrModulePending is Load's error for a module with top-level await
 	// whose evaluation still awaits once no job is left.
 	ErrModulePending = engine.ErrModulePending
+	// ErrMemoryLimit is what errors.Is finds in the error of a call that
+	// passed Options.MemoryLimit (a *MemoryLimitError).
+	ErrMemoryLimit = engine.ErrMemoryLimit
 )
 
 // SyntaxError is a parse or early error in module source.

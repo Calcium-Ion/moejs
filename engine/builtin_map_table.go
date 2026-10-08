@@ -4,6 +4,7 @@ import (
 	"hash/maphash"
 	"math/rand/v2"
 	"sort"
+	"unsafe"
 )
 
 // The ordered hash table behind Map and Set (ES2025 §24.1, §24.2).
@@ -105,11 +106,14 @@ func collHash(v Value) uint32 {
 	switch {
 	case v.IsString():
 		s := v.AsString()
-		s.flatten()
-		if s.kind == strASCII {
-			h = maphash.String(collSeed, s.s)
+		f := s
+		if s.kind == strRope {
+			f = s.flat(new(String))
+		}
+		if f.kind == strASCII {
+			h = maphash.String(collSeed, f.s)
 		} else {
-			h = maphash.Bytes(collSeed, utf16Bytes(s.u))
+			h = maphash.Bytes(collSeed, utf16Bytes(f.units()))
 		}
 	case v.IsBigInt():
 		b := &v.AsBigInt().v
@@ -181,8 +185,9 @@ func (c *collection) has(key Value) bool {
 	return c.t != nil && c.t.find(key, collHash(key)) >= 0
 }
 
-// set stores value under key (a Map's set; a Set passes Undefined).
-func (c *collection) set(key, value Value) {
+// set stores value under key (a Map's set; a Set passes Undefined),
+// charging a grown table to r's memory limit.
+func (c *collection) set(r *Realm, key, value Value) {
 	key = canonicalCollKey(key)
 	t := c.table()
 	h := collHash(key)
@@ -191,14 +196,15 @@ func (c *collection) set(key, value Value) {
 		return
 	}
 	if len(t.entries) == cap(t.entries) {
-		c.rebuild(collCapFor(t.live + 1))
+		c.rebuild(r, collCapFor(t.live+1))
 		t = c.t
 	}
 	t.insert(key, value, h)
 }
 
-// add inserts key unless present and reports whether it was added.
-func (c *collection) add(key Value) bool {
+// add inserts key unless present and reports whether it was added, as set
+// charging a grown table.
+func (c *collection) add(r *Realm, key Value) bool {
 	key = canonicalCollKey(key)
 	t := c.table()
 	h := collHash(key)
@@ -206,7 +212,7 @@ func (c *collection) add(key Value) bool {
 		return false
 	}
 	if len(t.entries) == cap(t.entries) {
-		c.rebuild(collCapFor(t.live + 1))
+		c.rebuild(r, collCapFor(t.live+1))
 		t = c.t
 	}
 	t.insert(key, Undefined(), h)
@@ -228,7 +234,7 @@ func (c *collection) delete(key Value) bool {
 			*e = collEntry{key: Hole(), value: Undefined()}
 			t.live--
 			if n := cap(t.entries); n >= 32 && t.live <= n/8 {
-				c.rebuild(collCapFor(t.live))
+				c.rebuild(nil, collCapFor(t.live))
 			}
 			return true
 		}
@@ -253,6 +259,11 @@ func (c *collection) clear() {
 	c.t = nt
 }
 
+// collTableSize is the size of the storage of a table of capacity n.
+func collTableSize(n int) int {
+	return n * int(unsafe.Sizeof(collEntry{})+unsafe.Sizeof(int32(0)))
+}
+
 // collCapFor returns the capacity of a rebuilt table holding live entries:
 // a power of two with room for half as many insertions again.
 func collCapFor(live int) int {
@@ -263,8 +274,12 @@ func collCapFor(live int) int {
 	return n
 }
 
-// rebuild replaces the table with a compacted one of capacity n.
-func (c *collection) rebuild(n int) {
+// rebuild replaces the table with a compacted one of capacity n, charged
+// to r's memory limit unless r is nil (a shrink).
+func (c *collection) rebuild(r *Realm, n int) {
+	if r != nil {
+		r.charge(collTableSize(n))
+	}
 	old := c.t
 	t := &collTable{
 		entries:  make([]collEntry, 0, n),
@@ -290,12 +305,13 @@ func (c *collection) rebuild(n int) {
 }
 
 // copyFrom fills an empty collection with src's live entries.
-func (c *collection) copyFrom(src *collection) {
+func (c *collection) copyFrom(r *Realm, src *collection) {
 	if src.size() == 0 {
 		return
 	}
 	s := src.t
 	t := c.table()
+	r.charge(collTableSize(collCapFor(s.live)))
 	t.entries = make([]collEntry, 0, collCapFor(s.live))
 	t.buckets = make([]int32, cap(t.entries))
 	for i := range s.entries {

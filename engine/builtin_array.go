@@ -252,6 +252,22 @@ func indexFreeProtos(o *Object) bool {
 	return true
 }
 
+// fillGrowLimit bounds the elements Array.prototype.fill adds to an array's
+// storage at once (256 MiB of values); a larger fill takes the generic
+// path, which checks the interrupt as it grows the storage.
+const fillGrowLimit = 1 << 24
+
+// fillableArray reports whether Set of the indices below end that the array
+// o lacks adds them to its dense storage (setAbsentIndex): o is extensible,
+// with no sparse elements, end is within its length, and nothing on its
+// prototype chain has indexed properties.
+func fillableArray(o *Object, end int64) bool {
+	if o.class != ClassArray || o.flags&(flagExtensible|flagHasLazy) != flagExtensible || o.dict != nil && o.dict.sparse != nil {
+		return false
+	}
+	return end <= int64(o.internal.(*ArrayData).length) && indexFreeProtos(o)
+}
+
 // mutableArray reports whether o is a plainArray whose storage may be
 // rewritten in place: extensible, not sealed, frozen or shared, writable
 // length.
@@ -583,7 +599,7 @@ func arrayProtoUnshift(r *Realm, this Value, args []Value) (Value, error) {
 			return Undefined(), r.TypeError("Unshifting %d elements on an array-like of length %d is disallowed, as the total surpasses 2**53-1", argc, n)
 		}
 		if mutableArray(o) && n+argc <= math.MaxUint32 {
-			ne := growWithHoles(o.elements, int(n+argc))
+			ne := r.growWithHoles(o.elements, int(n+argc))
 			copy(ne[argc:], ne[:n])
 			copy(ne, args)
 			o.elements = ne
@@ -661,7 +677,7 @@ func arrayProtoSplice(r *Realm, this Value, args []Value) (Value, error) {
 			o.elements = o.elements[:newLen]
 			copy(o.elements[start:], items)
 		default:
-			ne := growWithHoles(o.elements, int(newLen))
+			ne := r.growWithHoles(o.elements, int(newLen))
 			copy(ne[start+insertCount:], ne[start+delCount:n])
 			copy(ne[start:], items)
 			o.elements = ne
@@ -820,8 +836,26 @@ func arrayProtoFill(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), err
 	}
 	// A start/end valueOf may have shrunk the array below final; writes past
-	// the storage take the generic path, which grows it again per spec.
+	// the length take the generic path, which grows it again per spec.
 	if mutableArray(o) && final <= int64(len(o.elements)) {
+		for i := k; i < final; i++ {
+			o.elements[i] = value
+		}
+		return ObjectValue(o), nil
+	}
+	if k <= int64(len(o.elements)) && final-int64(len(o.elements)) <= fillGrowLimit && fillableArray(o, final) {
+		// The indices from the end of the storage to final are holes (new
+		// Array(n) has no storage past denseGrowLimit): Set adds each of
+		// them, as setAbsentIndex would, in one allocation.
+		if n := int64(len(o.elements)); final > n {
+			if final > int64(cap(o.elements)) {
+				if err := r.reserve(int(final) * valueSize); err != nil {
+					return Undefined(), err
+				}
+			}
+			o.elements = slices.Grow(o.elements, int(final-n))[:final]
+			r.bumpEpoch(o)
+		}
 		for i := k; i < final; i++ {
 			o.elements[i] = value
 		}
@@ -931,9 +965,11 @@ func sortValues(r *Realm, items []Value, cmp Value) error {
 			if err != nil {
 				return 0, err
 			}
-			f, err := r.ToNumber(res)
-			if err != nil {
-				return 0, err
+			f := res.AsNumber()
+			if !res.IsNumber() {
+				if f, err = r.ToNumber(res); err != nil {
+					return 0, err
+				}
 			}
 			switch {
 			case f < 0:
@@ -1356,7 +1392,7 @@ func join(r *Realm, o *Object, args []Value, size int64) (Value, error) {
 			return Undefined(), err
 		}
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // joining reports whether o is on the stack of objects being joined.
@@ -1438,7 +1474,7 @@ func arrayProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error)
 			return Undefined(), err
 		}
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // arrayProtoToString implements Array.prototype.toString: join when it is
@@ -1736,7 +1772,7 @@ func arrayProtoMap(r *Realm, this Value, args []Value) (Value, error) {
 		a = r.NewArrayLen(uint32(n))
 		dense = n <= int64(len(o.elements))+denseGrowLimit
 		if dense && len(a.elements) != int(n) {
-			a.elements = growWithHoles(a.elements, int(n))
+			a.elements = r.growWithHoles(a.elements, int(n))
 		}
 	}
 	thisArg := Arg(args, 1)

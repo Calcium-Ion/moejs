@@ -193,7 +193,7 @@ func ParseEval(name, src string, env *EvalEnv, opts Options) (*Eval, error) {
 	if env == nil {
 		env = &EvalEnv{Var: -1, This: -1, Fields: -1}
 	}
-	p := newParser(name, src, opts, false)
+	p := newParser(name, src, opts.Stop, false)
 	if env.Strict || env.Module {
 		p.strict = true
 	}
@@ -204,14 +204,14 @@ func ParseEval(name, src string, env *EvalEnv, opts Options) (*Eval, error) {
 	if err := p.run(func() { e.Program = p.parseProgram(); e.Strict = p.strict }); err != nil {
 		return nil, err
 	}
-	if err := resolveEval(e, env, opts); err != nil {
+	if err := resolveEval(e, env, opts.Stop); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func resolveEval(e *Eval, env *EvalEnv, opts Options) error {
-	r := &resolver{file: e.File, stop: opts.Stop, scriptStrict: e.Strict}
+func resolveEval(e *Eval, env *EvalEnv, stop func() error) error {
+	r := &resolver{file: e.File, stop: stop, scriptStrict: e.Strict}
 	return r.run(func() {
 		var this *Function
 		if env.This >= 0 {

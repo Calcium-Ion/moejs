@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"math/rand/v2"
 	"strings"
 	"testing"
 
@@ -204,10 +205,40 @@ func TestToInt32Uint32(t *testing.T) {
 		{math.Inf(-1), 0, 0},
 		{1e20, 1661992960, 1661992960},
 		{-1e20, -1661992960, 2632974336},
+		{1 << 62, 0, 0},
+		{1<<62 + 1<<31, -2147483648, 2147483648},
+		{-(1<<62 + 1<<31), -2147483648, 2147483648},
+		{1<<63 - 1024, -1024, 4294966272},
+		{-(1<<63 - 1024), 1024, 1024},
+		{1 << 63, 0, 0},
+		{-(1 << 63), 0, 0},
+		{1<<63 + 2048, 2048, 2048},
+		{9007199254740993, 0, 0},
+		{-9007199254740994.0, -2, 4294967294},
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.i32, ToInt32Float(c.in), "int32 %v", c.in)
 		assert.Equal(t, c.u32, ToUint32Float(c.in), "uint32 %v", c.in)
+	}
+	// The int64 conversion below 2^63 agrees with the spec's modulo.
+	ref := func(f float64) uint32 {
+		if f != f || math.IsInf(f, 0) {
+			return 0
+		}
+		m := math.Mod(math.Trunc(f), 4294967296)
+		if m < 0 {
+			m += 4294967296
+		}
+		return uint32(m)
+	}
+	rng := rand.New(rand.NewPCG(3, 4))
+	for range 100000 {
+		f := math.Ldexp(rng.Float64()+0.5, rng.IntN(70))
+		if rng.IntN(2) == 0 {
+			f = -f
+		}
+		assert.Equal(t, ref(f), ToUint32Float(f), "uint32 %v", f)
+		assert.Equal(t, int32(ref(f)), ToInt32Float(f), "int32 %v", f)
 	}
 }
 

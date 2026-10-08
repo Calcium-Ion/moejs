@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // JSON builtins. parse scans bytes (ASCII text zero-copy; a
@@ -144,7 +145,15 @@ type jsonParser struct {
 	short [hostStrSlots]*String
 	pos   int
 	depth int
-	work  int
+	// work counts the values parsed (only its low bits are read). It is an
+	// int32 so that quiet shares its word: one word more in the parser
+	// costs about a quarter of an instruction per byte of a long text
+	// (ParseJSON of the multi-image bodies, 2.7 and 7.5 MiB: +2.4 % and
+	// +4.1 % instructions, GOGC=off).
+	work int32
+	// quiet: observe no interrupt (a parse for FromGo, which may run where
+	// no error can be returned, materializing a json.RawMessage).
+	quiet bool
 	stack []Value
 	keys  []PropertyKey
 }
@@ -165,13 +174,14 @@ type jsonStack struct {
 const jsonStackMax = 256
 
 func (p *jsonParser) parse(text *String) (Value, error) {
+	f := text
 	if text.kind == strRope {
-		text.flatten()
+		f = text.flat(new(String))
 	}
-	if text.kind == strASCII {
-		return p.parseText(text.s)
+	if f.kind == strASCII {
+		return p.parseText(f.s)
 	}
-	return p.parseText(wtf8FromUTF16(text.u))
+	return p.parseText(wtf8FromUTF16(f.units()))
 }
 
 // parseText parses src, ASCII or WTF-8; the strings of the result may alias
@@ -260,7 +270,7 @@ func (p *jsonParser) unexpected() error {
 
 func (p *jsonParser) value() (Value, error) {
 	p.work++
-	if p.work&4095 == 0 {
+	if p.work&4095 == 0 && !p.quiet {
 		if err := p.r.CheckInterrupt(); err != nil {
 			return Undefined(), err
 		}
@@ -395,6 +405,7 @@ func (p *jsonParser) str() (*String, error) {
 			if high != 0 {
 				return p.plain(src[start:i]), nil
 			}
+			p.r.chargeString(2 * (i - start))
 			return FromUTF16(appendWTF8Units(nil, src[start:i])), nil
 		case c == '\\':
 			return p.strSlow(start, i)
@@ -424,7 +435,7 @@ func (p *jsonParser) strSlow(start, i int) (*String, error) {
 		units = writeWTF8Run(&sb, src[run:i], units)
 		if c == '"' {
 			p.pos = i + 1
-			return sb.String(), nil
+			return p.r.builtString(&sb), nil
 		}
 		i++ // the backslash
 		if i >= len(src) {
@@ -690,6 +701,7 @@ func (r *Realm) buildJSONObject(keys []PropertyKey, vals []Value) *Object {
 	}
 	copy(slots, vals)
 	o.slots = slots
+	r.chargeObject(unsafe.Sizeof(Object{}) + uintptr(len(slots)*valueSize))
 	return initObject(o, ClassObject, shape)
 }
 
@@ -820,7 +832,7 @@ func (r *Realm) JSONStringify(v Value) (*String, error) {
 		return nil, err
 	}
 	r.jsonSizeHint = int32(js.sb.Len())
-	return js.sb.String(), nil
+	return r.builtString(&js.sb), nil
 }
 
 func jsonStringify(r *Realm, this Value, args []Value) (Value, error) {
@@ -886,7 +898,7 @@ func jsonStringify(r *Realm, this Value, args []Value) (Value, error) {
 		return Undefined(), err
 	}
 	r.jsonSizeHint = int32(js.sb.Len())
-	return StringValue(js.sb.String()), nil
+	return StringValue(r.builtString(&js.sb)), nil
 }
 
 type jsonStringifier struct {
@@ -1100,19 +1112,48 @@ const lowerHex = "0123456789abcdef"
 // the interrupt flag is checked every interruptStride units of a long string.
 func (js *jsonStringifier) quote(s *String) error {
 	if s.kind == strRope {
-		s.flatten()
+		return js.quoteRope(s)
 	}
 	js.sb.WriteASCII('"')
 	var err error
 	switch {
-	case s.jsonPlain:
+	case s.json != 0: // plain, or a long FromGo string not scanned yet
+		if int8(s.json) < 0 { // jsonDeferred
+			if !s.scanJSON() {
+				err = js.quoteASCII(s.s)
+				break
+			}
+		}
 		writeASCIIString(&js.sb, s.s)
 	case s.kind == strASCII:
 		err = js.quoteASCII(s.s)
 	case js.raw:
-		err = js.quoteUTF8(s.u)
+		err = js.quoteUTF8(s.units())
 	default:
-		err = js.quoteUTF16(s.u)
+		err = js.quoteUTF16(s.units())
+	}
+	if err != nil {
+		return err
+	}
+	js.sb.WriteASCII('"')
+	return nil
+}
+
+// quoteRope is quote of a rope, out of line so that the view (flat) does
+// not grow quote's frame. A view knows nothing of its bytes (json 0).
+//
+//go:noinline
+func (js *jsonStringifier) quoteRope(s *String) error {
+	f := s.flat(new(String))
+	js.sb.WriteASCII('"')
+	var err error
+	switch {
+	case f.kind == strASCII:
+		err = js.quoteASCII(f.s)
+	case js.raw:
+		err = js.quoteUTF8(f.units())
+	default:
+		err = js.quoteUTF16(f.units())
 	}
 	if err != nil {
 		return err

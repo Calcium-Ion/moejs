@@ -77,21 +77,82 @@ func jsonScan(s string, i int, high uint64) int {
 	return len(s)
 }
 
-// jsonPlainMin is the length from which FromGo scans a string for the bytes
-// JSON quoting escapes along with its ASCII test (jsonASCII): a payload
-// (an image, a document) a hook forwards. A shorter string costs isASCII
-// only, and rescanning it when it is quoted costs little.
+// jsonPlainMin is the length from which a FromGo string remembers its scan
+// for the bytes JSON quoting escapes (jsonDeferred): a payload (an image, a
+// document) a hook forwards. A shorter one is scanned each time it is
+// quoted, which costs little.
+//
+// FromGo tests such a string for ASCII only (isASCIILong): a host that
+// releases its call data after each hook converts the payload again for
+// every hook that reads it, and most hooks never quote it. The scan waits
+// for the first use that needs it, quote or Unmarshal's bound.
 const jsonPlainMin = 64 << 10
 
+// isASCIILong is isASCII for a long string: 32 bytes a step, tested
+// together.
+//
+// GC safety: as in isASCII, the []byte view of s is read-only and local.
+func isASCIILong(s string) bool {
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	for len(b) >= 32 {
+		x := binary.LittleEndian.Uint64(b) | binary.LittleEndian.Uint64(b[8:]) |
+			binary.LittleEndian.Uint64(b[16:]) | binary.LittleEndian.Uint64(b[24:])
+		if x&swarMSB != 0 {
+			return false
+		}
+		b = b[32:]
+	}
+	return isASCII(s[len(s)-len(b):])
+}
+
+// jsonMaybeSpecial sets the top bit of each byte of x (little-endian) that
+// is below 0x23, '\\' or >= 0x80, and maybe of the bytes above one, the
+// other bits being noise: the bytes jsonSpecial flags with high set, and
+// ' ' and '!', in fewer operations. Only whether any byte is flagged is
+// exact.
+func jsonMaybeSpecial(x uint64) uint64 {
+	return (x - 0x23*swarLSB) | x | (x ^ '\\'*swarLSB - swarLSB)
+}
+
 // jsonASCII reports whether g is ASCII and whether it has no byte JSON
-// quoting escapes: one scan for both, where quoting the string would scan
-// it again.
+// quoting escapes: one scan for both. Blocks of 64 bytes are tested whole
+// for the bytes jsonMaybeSpecial flags, until one has any (a payload
+// without escapes has none); jsonScan finds the first byte from there.
+//
+// GC safety: as in isASCII, the []byte view of g is read-only and local.
 func jsonASCII(g string) (ascii, plain bool) {
-	i := jsonScan(g, 0, swarMSB)
+	b := unsafe.Slice(unsafe.StringData(g), len(g))
+	for len(b) >= 64 {
+		m := jsonMaybeSpecial(binary.LittleEndian.Uint64(b)) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[8:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[16:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[24:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[32:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[40:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[48:])) |
+			jsonMaybeSpecial(binary.LittleEndian.Uint64(b[56:]))
+		if m&swarMSB != 0 {
+			break
+		}
+		b = b[64:]
+	}
+	i := jsonScan(g, len(g)-len(b), swarMSB)
 	if i == len(g) {
 		return true, true
 	}
 	return g[i] < 0x80 && isASCII(g[i:]), false
+}
+
+// scanJSON scans the jsonDeferred string s for the bytes JSON quoting
+// escapes, records what it found in json and reports whether there are
+// none.
+func (s *String) scanJSON() bool {
+	s.json = 0
+	if _, plain := jsonASCII(s.s); plain {
+		s.json = jsonPlain
+		return true
+	}
+	return false
 }
 
 // jsonShortMax is the longest literal JSON.parse shares between repeats.
@@ -104,13 +165,15 @@ func (p *jsonParser) plain(lit string) *String {
 		return emptyString
 	}
 	if len(lit) > jsonShortMax {
-		return &String{s: lit, n: int32(len(lit)), kind: strASCII, jsonPlain: true}
+		p.r.chargeString(0)
+		return &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain}
 	}
 	slot := strSlot(lit)
 	if s := p.short[slot]; s != nil && s.s == lit {
 		return s
 	}
-	s := &String{s: lit, n: int32(len(lit)), kind: strASCII, jsonPlain: true}
+	p.r.chargeString(0)
+	s := &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain}
 	p.short[slot] = s
 	return s
 }

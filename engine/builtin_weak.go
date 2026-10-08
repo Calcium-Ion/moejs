@@ -1,6 +1,9 @@
 package engine
 
-import "weak"
+import (
+	"unsafe"
+	"weak"
+)
 
 // WeakMap, WeakSet and WeakRef (ES2025 §24.3, §24.4, §26.1).
 //
@@ -160,6 +163,7 @@ type weakCollObject struct {
 func (r *Realm) newWeakCollection(proto *Object, class Class) (*Object, *weakColl) {
 	r.markPrototype(proto)
 	co := &weakCollObject{}
+	r.chargeObject(unsafe.Sizeof(weakCollObject{}))
 	o := &co.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto
@@ -428,6 +432,7 @@ func weakRefConstruct(r *Realm, args []Value, newTarget *Object) (Value, error) 
 	}
 	r.markPrototype(proto)
 	wo := &weakRefObject{data: weakRefData{strong: Undefined()}}
+	r.chargeObject(unsafe.Sizeof(weakRefObject{}))
 	o := &wo.obj
 	o.shape = r.rootShapeFor(proto)
 	o.proto = proto

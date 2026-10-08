@@ -332,6 +332,8 @@ func TestInterrupt(t *testing.T) {
 	require.ErrorAs(t, err, &ie)
 	assert.Same(t, cause, ie.Value)
 	assert.Equal(t, "interrupted: timeout", ie.Error())
+	assert.ErrorIs(t, err, cause, "Unwrap returns an error Value")
+	assert.Same(t, cause, ie.Unwrap())
 	// Stays pending until cleared.
 	assert.Error(t, r.CheckInterrupt())
 	r.ClearInterrupt()
@@ -344,7 +346,12 @@ func TestInterrupt(t *testing.T) {
 	assert.Equal(t, "interrupted: stop", r.CheckInterrupt().Error())
 	r.ClearInterrupt()
 	r.Interrupt(42)
-	assert.Equal(t, "interrupted: 42", r.CheckInterrupt().Error())
+	err = r.CheckInterrupt()
+	assert.Equal(t, "interrupted: 42", err.Error())
+	assert.Nil(t, errors.Unwrap(err), "a Value that is not an error unwraps to nil")
+	r.ClearInterrupt()
+	r.Interrupt(nil)
+	assert.Nil(t, errors.Unwrap(r.CheckInterrupt()))
 }
 
 func TestCallDepthLimit(t *testing.T) {

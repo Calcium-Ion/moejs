@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // RegExp builtins. A pattern is parsed once (regexpsyntax.Parse)
@@ -335,8 +336,8 @@ func (r *Realm) regexpSyntaxError(pattern *String, flags regexpFlags, err error)
 // index text; a UTF-16 subject of a pattern without an RE2 program has no
 // working copy (units), and its positions are code units.
 type reSubject struct {
-	s       *String
-	text    []byte // ASCII bytes (aliasing the string) or a UTF-8 working copy
+	s       *String // as given: a rope stays one (Len and At read it)
+	text    []byte  // ASCII bytes (aliasing the string) or a UTF-8 working copy
 	ascii   bool
 	unicode bool // u mode: working copy built with surrogate pairs combined
 	units   bool // UTF-16 subject without a working copy
@@ -352,7 +353,7 @@ type reSubject struct {
 // len returns the subject length in positions.
 func (sub *reSubject) len() int {
 	if sub.units {
-		return len(sub.s.u)
+		return sub.s.Len()
 	}
 	return len(sub.text)
 }
@@ -377,8 +378,8 @@ func (sub *reSubject) advance(b int) int {
 		return b + 1
 	}
 	if sub.units {
-		u := sub.s.u
-		if sub.unicode && b+1 < len(u) && isHighSurrogate(rune(u[b])) && isLowSurrogate(rune(u[b+1])) {
+		s := sub.s // At reads a rope's units too
+		if sub.unicode && b+1 < s.Len() && isHighSurrogate(rune(s.At(b))) && isLowSurrogate(rune(s.At(b+1))) {
 			return b + 2
 		}
 		return b + 1
@@ -392,13 +393,16 @@ func (sub *reSubject) advance(b int) int {
 // character (its code point); every other surrogate unit is encoded as its
 // private-use stand-in rune (see regexp_translate.go).
 func (r *Realm) initRegExpSubject(sub *reSubject, s *String, c *compiledRegExp) {
+	// sub keeps s, a rope as it came (the cache compares pointers), and f
+	// is what is read.
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
 	unicode := c.flags.unicode
-	if s.kind == strASCII {
-		*sub = reSubject{s: s, text: asciiBytes(s.s), ascii: true, unicode: unicode}
-		sub.crLS = c.btCR && strings.IndexByte(s.s, '\r') >= 0
+	if f.kind == strASCII {
+		*sub = reSubject{s: s, text: asciiBytes(f.s), ascii: true, unicode: unicode}
+		sub.crLS = c.btCR && strings.IndexByte(f.s, '\r') >= 0
 		return
 	}
 	if c.re == nil {
@@ -412,9 +416,10 @@ func (r *Realm) initRegExpSubject(sub *reSubject, s *String, c *compiledRegExp) 
 			return
 		}
 	}
-	u := s.u
+	u := f.units()
 	text := make([]byte, 0, len(u)+len(u)/2)
 	u2b := make([]int32, len(u)+1)
+	r.charge(cap(text) + 4*len(u2b))
 	var crLS, foldWord, private bool
 	for i := 0; i < len(u); i++ {
 		u2b[i] = int32(len(text))
@@ -766,7 +771,7 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 			items[i] = Undefined()
 			continue
 		}
-		items[i] = StringValue(s.Substring(m[2*i], m[2*i+1]))
+		items[i] = StringValue(r.substring(s, m[2*i], m[2*i+1]))
 	}
 	groups := Undefined()
 	if d.c.tr.hasNames {
@@ -780,6 +785,7 @@ func (r *Realm) regexpExecResult(d *RegExpData, s *String, m []int) *Object {
 	}
 	if !d.c.flags.hasIndices {
 		eo := &execResultObject{}
+		r.chargeObject(unsafe.Sizeof(execResultObject{}))
 		arr := &eo.obj
 		arr.shape = st.execShape
 		arr.proto = st.execShape.proto
@@ -868,6 +874,7 @@ func (r *Realm) regexpCreate(proto *Object, pattern *String, flagsText *String, 
 		shape = r.rootShapeFor(proto).addProperty(r, lastIndexKey, attrWritable)
 	}
 	ro := &regexpObject{}
+	r.chargeObject(unsafe.Sizeof(regexpObject{}))
 	o := &ro.obj
 	o.shape = shape
 	o.proto = proto
@@ -1154,7 +1161,7 @@ func regexpProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	sb.WriteString(source)
 	sb.WriteASCII('/')
 	sb.WriteString(flags)
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 func regexpGetSource(r *Realm, this Value, args []Value) (Value, error) {
@@ -1309,7 +1316,7 @@ func regexpMatch(r *Realm, rx *Object, d *RegExpData, s *String) (Value, error) 
 			if !ok {
 				break
 			}
-			items = append(items, StringValue(s.Substring(start, end)))
+			items = append(items, StringValue(r.substring(s, start, end)))
 			last, pos = start, end
 			if len(items)&1023 == 0 {
 				if err := r.CheckInterrupt(); err != nil {
@@ -1348,7 +1355,7 @@ func regexpMatch(r *Realm, rx *Object, d *RegExpData, s *String) (Value, error) 
 	r.noteMatch(d, s, d.c, matchedAt(sub.toUnit(matches[len(matches)-1][0])))
 	items := make([]Value, len(matches))
 	for i, m := range matches {
-		items[i] = StringValue(s.Substring(sub.toUnit(m[0]), sub.toUnit(m[1])))
+		items[i] = StringValue(r.substring(s, sub.toUnit(m[0]), sub.toUnit(m[1])))
 	}
 	return ObjectValue(r.NewArrayFromSlice(items)), nil
 }
@@ -1399,7 +1406,7 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 		}
 		sub.toUnits(m)
 		st.lastS, st.lastC, st.lastAt = s, d.c, matchedAt(m[0])
-		items = append(items, StringValue(s.Substring(p, m[0])))
+		items = append(items, StringValue(r.substring(s, p, m[0])))
 		if uint32(len(items)) == lim {
 			return ObjectValue(r.NewArrayFromSlice(items)), nil
 		}
@@ -1407,7 +1414,7 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 			if m[2*i] < 0 {
 				items = append(items, Undefined())
 			} else {
-				items = append(items, StringValue(s.Substring(m[2*i], m[2*i+1])))
+				items = append(items, StringValue(r.substring(s, m[2*i], m[2*i+1])))
 			}
 			if uint32(len(items)) == lim {
 				return ObjectValue(r.NewArrayFromSlice(items)), nil
@@ -1422,7 +1429,7 @@ func regexpSplit(r *Realm, d *RegExpData, s *String, lim uint32) (Value, error) 
 			}
 		}
 	}
-	items = append(items, StringValue(s.Substring(p, size)))
+	items = append(items, StringValue(r.substring(s, p, size)))
 	return ObjectValue(r.NewArrayFromSlice(items)), nil
 }
 
@@ -1553,7 +1560,7 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // simpleReplace is regexpReplace for a single-class pattern: matches are
@@ -1618,7 +1625,7 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // regexpReplaceFast handles the hot path `str.replace(/re/g, "template")`

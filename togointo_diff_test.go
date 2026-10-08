@@ -85,6 +85,7 @@ func TestToGoIntoDifferential(t *testing.T) {
 					"tags": []string{"a", "b"}, "hdr": map[string]string{"k": "v"}, "big": int64(1<<53 + 1), "u8": uint8(3),
 					"f32": float32(0.1), "neg0": math.Copysign(0, -1), "nilslice": []any(nil), "nilstrs": []string(nil),
 					"nilmaps": []map[string]any(nil), "nilmap": map[string]any(nil), "empty": []any{}, "multi": map[string][]string{"a": nil, "b": {"x"}},
+					"raw": json.RawMessage(` {"z": [1, 2.50, 1E2, -0, "<\u2028>\ud800"], "a": null, "é": {"k": "v"}} `), "rawlist": json.RawMessage(`[1, {"x": "é"}, []]`), "rawprim": json.RawMessage(` "s" `), "rawnull": json.RawMessage(nil),
 				}),
 				from(map[string]any{"n": 1, "nan": math.NaN(), "f32n": []any{float32(math.Inf(1))}}),
 				from(map[string]any{"num": json.Number("1.50"), "bad": "a\xffb", "k\xff": 1}),

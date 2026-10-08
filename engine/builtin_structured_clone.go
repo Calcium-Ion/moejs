@@ -193,11 +193,11 @@ func (c *cloner) step() error {
 		f = &c.stack[top]
 		switch {
 		case !f.isMap:
-			f.coll.add(out)
+			f.coll.add(c.r, out)
 		case f.i%2 == 1:
 			f.key = out
 		default:
-			f.coll.set(f.key, out)
+			f.coll.set(c.r, f.key, out)
 		}
 		return nil
 	}
@@ -357,7 +357,7 @@ func (c *cloner) cloneBinary(o *Object) (*Object, error) {
 		if x.detached {
 			return nil, r.TypeError("DataCloneError: a detached ArrayBuffer could not be cloned")
 		}
-		data := newBytes(len(x.data), len(x.data))
+		data := r.newBytes(len(x.data), len(x.data))
 		if err := r.copyBytes(data, x.data); err != nil {
 			return nil, err
 		}

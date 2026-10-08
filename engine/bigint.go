@@ -13,6 +13,100 @@ type BigInt struct {
 	v big.Int
 }
 
+// The BigInt results whose words fit one of these buckets are allocated
+// with them (newBigIntCap): one allocation instead of the header and
+// math/big's slice. On 64-bit platforms each bucket up to 48 words fills a
+// size class exactly.
+type (
+	bigInt2 struct {
+		BigInt
+		w [2]big.Word
+	}
+	bigInt4 struct {
+		BigInt
+		w [4]big.Word
+	}
+	bigInt6 struct {
+		BigInt
+		w [6]big.Word
+	}
+	bigInt8 struct {
+		BigInt
+		w [8]big.Word
+	}
+	bigInt12 struct {
+		BigInt
+		w [12]big.Word
+	}
+	bigInt16 struct {
+		BigInt
+		w [16]big.Word
+	}
+	bigInt24 struct {
+		BigInt
+		w [24]big.Word
+	}
+	bigInt32 struct {
+		BigInt
+		w [32]big.Word
+	}
+	bigInt48 struct {
+		BigInt
+		w [48]big.Word
+	}
+	bigInt64 struct {
+		BigInt
+		w [64]big.Word
+	}
+)
+
+// newBigIntCap returns a zero BigInt with room for n words, co-allocated up
+// to 64: math/big reuses the room when the result needs at most n words
+// (nat.make). A larger n gets a plain BigInt, whose words math/big
+// allocates.
+func newBigIntCap(n int) *BigInt {
+	var (
+		z *BigInt
+		w []big.Word
+	)
+	switch {
+	case n <= 2:
+		x := &bigInt2{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 4:
+		x := &bigInt4{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 6:
+		x := &bigInt6{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 8:
+		x := &bigInt8{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 12:
+		x := &bigInt12{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 16:
+		x := &bigInt16{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 24:
+		x := &bigInt24{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 32:
+		x := &bigInt32{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 48:
+		x := &bigInt48{}
+		z, w = &x.BigInt, x.w[:0]
+	case n <= 64:
+		x := &bigInt64{}
+		z, w = &x.BigInt, x.w[:0]
+	default:
+		return &BigInt{}
+	}
+	z.v.SetBits(w)
+	return z
+}
+
 // maxBigIntBits bounds the magnitude of every BigInt (SpiderMonkey's limit,
 // 2^20 bits): an operation whose result would be larger throws a RangeError,
 // so no single math/big call runs long enough to need an interrupt check.

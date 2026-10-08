@@ -177,6 +177,11 @@
 //	JmpNullish    A sBx    if R[A] is null or undefined pc += sBx
 //	JmpNotNullish A sBx    if R[A] is neither null nor undefined pc += sBx
 //	JmpNotUndef   A sBx    if R[A] is not undefined pc += sBx
+//	JmpLt         A sBx +X if R[A] < R[X] pc += sBx (offset relative to the X word); JmpLe, JmpGt, JmpGe
+//	                       likewise with <=, >, >=. The compiler emits them for a comparison whose value
+//	                       only decides a conditional jump; they convert and throw as Lt .. Ge do
+//	JmpNLt        A sBx +X if !(R[A] < R[X]) pc += sBx; JmpNLe, JmpNGt, JmpNGe likewise (NaN jumps)
+//	JmpStrictEq   A sBx +X if R[A] === R[X] pc += sBx; JmpStrictNe with !==
 //
 // Calls
 //

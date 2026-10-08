@@ -2,15 +2,35 @@ package engine
 
 import (
 	"strings"
+	"sync/atomic"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // String kinds (String.kind).
 const (
 	strASCII uint8 = iota // s holds bytes < 0x80; byte index == code unit index
 	strUTF16              // u holds code units, at least one >= 0x80
-	strRope               // left/right children; flattened lazily in place
+	strRope               // left/right children; flattened lazily, never in place (flatten)
+)
+
+// String.flags.
+const (
+	// strInBuf marks a flat string whose units start an append buffer
+	// (string_append.go): Concat may write past them in place.
+	strInBuf uint8 = 1 << iota
+	// strCharged marks a rope allocated as a ropeNode (memlimit.go): its
+	// flattening is charged to the account the node holds.
+	strCharged
+)
+
+// String.json states; 0 is nothing known. jsonDeferred is the top bit, so
+// that quote tells the three apart with one test of the byte (int8(json)
+// < 0 once it is not 0).
+const (
+	jsonPlain    uint8 = 1    // no byte JSON quoting escapes
+	jsonDeferred uint8 = 0x80 // a long FromGo string not scanned yet
 )
 
 // ropeThreshold is the combined length at or above which Concat builds a
@@ -30,26 +50,39 @@ const MaxStringLength = 1<<30 - 24
 var maxStringLength = MaxStringLength
 
 // String is an immutable JavaScript string (a UTF-16 code unit sequence).
-// Strings are shared freely; the only mutation is the one-time in-place
-// flattening of a rope and the caching of hash/atom, both of which preserve
-// the logical value.
+// Strings are shared freely; the only mutations are the publication of a
+// rope's flattened contents, which leaves the fields its readers read as
+// they were (flatten), and the caching of hash/atom, both of which preserve
+// the logical value. Concat writes past the end of a string in an append
+// buffer, never into it.
 type String struct {
-	s     string   // strASCII payload
-	u     []uint16 // strUTF16 payload (never all-ASCII)
-	left  *String  // strRope children
+	// s is the strASCII payload; a strRope publishes its flattened
+	// contents in it (flatten).
+	s string
+	// p is the strUTF16 payload, the first of n code units (never all
+	// ASCII), or a strRope's left child; one field for both keeps String
+	// in the 48-byte size class. units and children read it.
+	p unsafe.Pointer
+	// right is a strRope's right child.
 	right *String
 	n     int32  // length in code units
 	hash  uint32 // 0 = not computed
 	atom  uint32 // 0 = not interned
 	kind  uint8
+	// flags holds strInBuf and strCharged, both set when the String is
+	// made and never changed.
+	flags uint8
 	// numeric marks an atom that is a canonical numeric string other than
 	// an array index ("-0", "1.5", "NaN"): the keys a typed array answers
 	// itself (typedArrayKey). It is set before the atom is published.
 	numeric bool
-	// jsonPlain marks an ASCII string known to have no byte JSON quoting
-	// escapes, found by the scan that made it (a JSON.parse literal, a long
-	// FromGo string): quote copies it without scanning it again.
-	jsonPlain bool
+	// json is what is known of the bytes JSON quoting escapes in an ASCII
+	// string: jsonPlain, none, found by the scan that made it (a JSON.parse
+	// literal) or by the first use that asked, and quote copies the string
+	// without scanning it again; jsonDeferred, a long FromGo string
+	// (jsonPlainMin) not scanned yet, which the first use that needs to
+	// know, quote or Unmarshal's bound, scans (scanJSON); 0, nothing.
+	json uint8
 }
 
 // emptyString is the shared "" value.
@@ -68,8 +101,7 @@ func FromGoString(s string) *String {
 	if isASCII(s) {
 		return &String{s: s, n: int32(len(s)), kind: strASCII}
 	}
-	u := appendUTF16(make([]uint16, 0, len(s)), s)
-	return &String{u: u, n: int32(len(u)), kind: strUTF16}
+	return utf16String(appendUTF16(make([]uint16, 0, len(s)), s))
 }
 
 // appendUTF16 appends the UTF-16 encoding of the UTF-8 string s to u
@@ -94,7 +126,7 @@ func FromUTF16(u []uint16) *String {
 	}
 	for _, c := range u {
 		if c >= 0x80 {
-			return &String{u: u, n: int32(len(u)), kind: strUTF16}
+			return utf16String(u)
 		}
 	}
 	b := make([]byte, len(u))
@@ -117,10 +149,11 @@ func (s *String) Len() int { return int(s.n) }
 
 // IsASCII reports whether the string (after flattening) is ASCII-only.
 func (s *String) IsASCII() bool {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	return s.kind == strASCII
+	return f.kind == strASCII
 }
 
 // IsInterned reports whether s is an atom.
@@ -132,35 +165,41 @@ func (s *String) At(i int) uint16 {
 	case strASCII:
 		return uint16(s.s[i])
 	case strUTF16:
-		return s.u[i]
+		return s.units()[i]
 	}
-	s.flatten()
-	return s.At(i)
+	return s.flat(new(String)).at(i)
+}
+
+// at is At of a flat string, for views (flat).
+func (s *String) at(i int) uint16 {
+	if s.kind == strASCII {
+		return uint16(s.s[i])
+	}
+	return s.units()[i]
 }
 
 // ASCII returns the underlying Go string and true when the string is ASCII.
 func (s *String) ASCII() (string, bool) {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return s.s, true
-	}
-	return "", false
+	return f.s, f.kind == strASCII // a UTF-16 string's s is ""
 }
 
 // UTF16 returns the code units. For ASCII strings a fresh slice is built;
 // for UTF-16 strings the internal slice is returned and must not be modified.
 func (s *String) UTF16() []uint16 {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strUTF16 {
-		return s.u
+	if f.kind == strUTF16 {
+		return f.units()
 	}
-	u := make([]uint16, len(s.s))
-	for i := range len(s.s) {
-		u[i] = uint16(s.s[i])
+	u := make([]uint16, len(f.s))
+	for i := range len(f.s) {
+		u[i] = uint16(f.s[i])
 	}
 	return u
 }
@@ -168,26 +207,28 @@ func (s *String) UTF16() []uint16 {
 // GoString exports to a Go string. ASCII is zero-copy; UTF-16 is encoded to
 // UTF-8 with lone surrogates replaced by U+FFFD.
 func (s *String) GoString() string {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return s.s
+	if f.kind == strASCII {
+		return f.s
 	}
-	return utf16ToGoString(s.u)
+	return utf16ToGoString(f.units())
 }
 
 // wtf8 is GoString with lone surrogates encoded as WTF-8 three-byte
 // sequences instead of U+FFFD: the source text of dynamic code, whose
 // literals keep them (fromWTF8Text).
 func (s *String) wtf8() string {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return s.s
+	if f.kind == strASCII {
+		return f.s
 	}
-	return wtf8FromUTF16(s.u)
+	return wtf8FromUTF16(f.units())
 }
 
 func utf16ToGoString(u []uint16) string {
@@ -213,65 +254,196 @@ func utf16ToGoString(u []uint16) string {
 	return b.String()
 }
 
-// flatten collapses a rope in place. It is iterative so that left-deep ropes
-// built by `s += x` loops cannot exhaust the Go stack.
-func (s *String) flatten() {
-	if s.kind != strRope {
-		return
+// flat returns a flat string of the contents of the rope s, flattening it
+// on first use, in *v, which the caller provides: a read that needs a
+// rope's units reads them through this view, as a rope's own fields never
+// change (flatten). Allocated with new in the branch that found the rope,
+// v costs nothing for a flat string, and stays on the caller's stack
+// (TestRopeReadNoAlloc) when the caller keeps it in a variable of its own,
+//
+//	f := s
+//	if s.kind == strRope {
+//		f = s.flat(new(String))
+//	}
+//
+// and reads f with methods that have no rope branch (at, contentHash,
+// units): flat lets its receiver escape (the atomic operations on a
+// rope's words take its address), and so does any method that may call
+// it, so f must reach neither, nor be returned or kept.
+func (s *String) flat(v *String) *String {
+	f, ok := s.published()
+	if !ok {
+		s.flatten()
+		f, _ = s.published()
 	}
-	ascii := true
-	stack := []*String{s}
-	for len(stack) > 0 {
-		cur := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		switch cur.kind {
-		case strRope:
-			stack = append(stack, cur.right, cur.left)
-		case strUTF16:
-			ascii = false
-		}
-	}
-	if ascii {
-		b := make([]byte, 0, s.n)
-		stack = append(stack[:0], s)
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if cur.kind == strRope {
-				stack = append(stack, cur.right, cur.left)
-				continue
-			}
-			b = append(b, cur.s...)
-		}
-		s.s = string(b)
-		s.kind = strASCII
-	} else {
-		u := make([]uint16, 0, s.n)
-		stack = append(stack[:0], s)
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			switch cur.kind {
-			case strRope:
-				stack = append(stack, cur.right, cur.left)
-			case strASCII:
-				for i := range len(cur.s) {
-					u = append(u, uint16(cur.s[i]))
-				}
-			case strUTF16:
-				u = append(u, cur.u...)
-			}
-		}
-		s.u = u
-		s.kind = strUTF16
-	}
-	s.left, s.right = nil, nil
+	*v = f
+	return v
 }
 
-// Concat returns a + b, building a rope when the result is long. A result
-// longer than the string length limit is RangeError: Invalid string length,
-// raised before anything is allocated (`s = s + s` builds ropes without
-// copying, so the limit must be enforced on the length arithmetic itself).
+// flatten copies the leaves of the rope s into one allocation and publishes
+// it, unless a flattening did already.
+//
+// A rope may be read by several goroutines at once (strings are shared like
+// values: interned names, frozen intrinsics, strings a host keeps), so
+// flattening never changes what a reader may be reading: kind, n and the
+// flags stay as Concat made them, and nothing but the words below is
+// written after the rope is published. Each flattener makes a copy of its
+// own; for ASCII bytes it stores s.n into the length word of s (flatLen)
+// and for UTF-16 units leaves it 0; then it publishes the address of its
+// copy with a compare-and-swap of the data word of s (flatData) from nil.
+// The first swap wins and the losers' copies are dropped. The winner then
+// releases the children, storing nil into p and right. Each flattener
+// charges what it allocated to the account the rope carries
+// (chargeFlatten, before the swap), a loser's copy included.
+//
+// The data word is the publication point. Go's atomic operations are
+// sequentially consistent, and the swap that stores the address
+// synchronizes with every load that returns it, so a reader that loads a
+// published address also sees what its flattener wrote before the swap:
+// the copied units, never written again, and the length word, which every
+// flattener of the rope stores with the same value (the contents decide
+// it). A walk that loads a released child (nil) finds the data word
+// published, as the release follows the swap. These four words of a rope
+// are only accessed with atomic operations, which the race detector sees
+// as the synchronizing pairs they are, and the fields a reader of a flat
+// string loads are written only before the string is shared, so those
+// reads stay plain loads.
+func (s *String) flatten() {
+	if s.kind != strRope || atomic.LoadPointer(s.flatData()) != nil {
+		return
+	}
+	var d unsafe.Pointer
+	if s.ropeASCII() {
+		b := make([]byte, s.n)
+		s.copyBytes(b)
+		s.chargeFlatten(len(b))
+		d = unsafe.Pointer(unsafe.SliceData(b))
+		atomic.StoreUintptr(s.flatLen(), uintptr(s.n))
+	} else {
+		u := make([]uint16, s.n)
+		s.copyUnits(u)
+		s.chargeFlatten(2 * len(u))
+		d = unitsPtr(u)
+	}
+	if atomic.CompareAndSwapPointer(s.flatData(), nil, d) {
+		atomic.StorePointer(s.leftWord(), nil)
+		atomic.StorePointer(s.rightWord(), nil)
+	}
+}
+
+// children returns the children of the rope s, or nil, nil once a
+// flattening published its contents (published), which may have released
+// them.
+func (s *String) children() (l, r *String) {
+	if atomic.LoadPointer(s.flatData()) != nil {
+		return nil, nil
+	}
+	l = (*String)(atomic.LoadPointer(s.leftWord()))
+	r = (*String)(atomic.LoadPointer(s.rightWord()))
+	if l == nil || r == nil {
+		return nil, nil
+	}
+	return l, r
+}
+
+// The rope walks below recurse into the shorter child and loop on the
+// longer one, so their depth is at most log2 of the length whatever the
+// rope's shape (left-deep from `s += x`, right-deep from `s = x + s`), and
+// they need no stack on the heap.
+
+// ropeASCII reports whether every leaf of s is ASCII.
+func (s *String) ropeASCII() bool {
+	for s.kind == strRope {
+		l, r := s.children()
+		if l == nil {
+			f, _ := s.published()
+			return f.kind == strASCII
+		}
+		if l.n > r.n {
+			l, r = r, l
+		}
+		if !l.ropeASCII() {
+			return false
+		}
+		s = r
+	}
+	return s.kind == strASCII
+}
+
+// copyBytes writes the ASCII string s (a rope of ASCII leaves or a leaf)
+// to b, len(b) == s.Len().
+func (s *String) copyBytes(b []byte) {
+	for s.kind == strRope {
+		left, right := s.children()
+		if left == nil {
+			s.copyPublished(b, nil)
+			return
+		}
+		l := int(left.n)
+		if l <= int(right.n) {
+			left.copyBytes(b[:l])
+			s, b = right, b[l:]
+		} else {
+			right.copyBytes(b[l:])
+			s, b = left, b[:l]
+		}
+	}
+	copy(b, s.s)
+}
+
+// copyUnits writes the code units of s to u, len(u) == s.Len().
+func (s *String) copyUnits(u []uint16) {
+	for s.kind == strRope {
+		left, right := s.children()
+		if left == nil {
+			s.copyPublished(nil, u)
+			return
+		}
+		l := int(left.n)
+		if l <= int(right.n) {
+			left.copyUnits(u[:l])
+			s, u = right, u[l:]
+		} else {
+			right.copyUnits(u[l:])
+			s, u = left, u[:l]
+		}
+	}
+	s.copyFlatUnits(u)
+}
+
+// copyPublished copies the contents a flattening of the rope s published
+// to b, or to u, out of line so that the walks, which appendString runs on
+// flat strings, keep a small frame.
+//
+//go:noinline
+func (s *String) copyPublished(b []byte, u []uint16) {
+	f, _ := s.published()
+	if b != nil {
+		copy(b, f.s)
+		return
+	}
+	f.copyFlatUnits(u)
+}
+
+// copyFlatUnits is copyUnits of a flat string.
+func (s *String) copyFlatUnits(u []uint16) {
+	if s.kind == strUTF16 {
+		copy(u, s.units())
+		return
+	}
+	for i := range len(s.s) {
+		u[i] = uint16(s.s[i])
+	}
+}
+
+// Concat returns a + b. A short result is a flat copy; a long one appends
+// b to a in an append buffer (appendString) when b is the shorter and a is
+// flat, and is a rope otherwise: a prepend, a join of two big pieces, or an
+// append to a rope (wrapping `s = "(" + s + ")"` stays constant time a
+// step). A result longer than the string length limit is RangeError:
+// Invalid string length, raised before anything is allocated (`s = s + s`
+// builds ropes without copying, so the limit must be enforced on the length
+// arithmetic itself).
 func (r *Realm) Concat(a, b *String) (*String, error) {
 	if a.n == 0 {
 		return b, nil
@@ -284,25 +456,35 @@ func (r *Realm) Concat(a, b *String) (*String, error) {
 		return nil, r.invalidStringLength()
 	}
 	if n >= ropeThreshold {
-		return &String{left: a, right: b, n: int32(n), kind: strRope}, nil
+		if b.n <= a.n && a.kind != strRope && (a.flags&strInBuf != 0 || b.n < appendPieceMax) {
+			return r.appendString(a, b, n), nil
+		}
+		if lz := r.lazy; lz != nil && lz.mem != nil {
+			return r.newChargedRope(a, b, n), nil
+		}
+		return &String{p: unsafe.Pointer(a), right: b, n: int32(n), kind: strRope}, nil
 	}
+	// Only a rope Concat did not make is this short (a test's).
+	fa, fb := a, b // a and b are returned above, fa and fb never
 	if a.kind == strRope {
-		a.flatten()
+		fa = a.flat(new(String))
 	}
 	if b.kind == strRope {
-		b.flatten()
+		fb = b.flat(new(String))
 	}
-	if a.kind == strASCII && b.kind == strASCII {
+	if fa.kind == strASCII && fb.kind == strASCII {
 		// n < ropeThreshold <= smallASCIIMax: header and bytes share one
 		// allocation.
 		s, buf := newASCIIBuf(n)
-		copy(buf[copy(buf, a.s):], b.s)
+		copy(buf[copy(buf, fa.s):], fb.s)
+		r.chargeString(n)
 		return s, nil
 	}
 	u := make([]uint16, 0, n)
-	u = appendUnits(u, a)
-	u = appendUnits(u, b)
-	return &String{u: u, n: int32(n), kind: strUTF16}, nil
+	u = appendUnits(u, fa)
+	u = appendUnits(u, fb)
+	r.chargeString(2 * n)
+	return utf16String(u), nil
 }
 
 func appendUnits(u []uint16, s *String) []uint16 {
@@ -312,7 +494,7 @@ func appendUnits(u []uint16, s *String) []uint16 {
 		}
 		return u
 	}
-	return append(u, s.u...)
+	return append(u, s.units()...)
 }
 
 // Substring returns the code units in [start, end). Bounds must be valid.
@@ -324,12 +506,25 @@ func (s *String) Substring(start, end int) *String {
 		return emptyString
 	}
 	if s.kind == strRope {
-		s.flatten()
+		return s.ropeSubstring(start, end)
 	}
 	if s.kind == strASCII {
 		return &String{s: s.s[start:end], n: int32(end - start), kind: strASCII}
 	}
-	return FromUTF16(s.u[start:end])
+	return FromUTF16(s.units()[start:end])
+}
+
+// The rope branches of the hot string operations below are out of line,
+// so that the views they take (flat) do not grow the frames of the flat
+// paths, which stay as they were before ropes were read through views.
+
+//go:noinline
+func (s *String) ropeSubstring(start, end int) *String {
+	f := s.flat(new(String))
+	if f.kind == strASCII {
+		return &String{s: f.s[start:end], n: int32(end - start), kind: strASCII}
+	}
+	return FromUTF16(f.units()[start:end])
 }
 
 // Hash returns the cached content hash (never 0).
@@ -338,22 +533,30 @@ func (s *String) Hash() uint32 {
 		return s.hash
 	}
 	if s.kind == strRope {
-		s.flatten()
+		// A rope keeps no hash: no field of it but flatten's is written
+		// once it is shared (Equals reads hash).
+		return s.flat(new(String)).contentHash()
 	}
+	h := s.contentHash()
+	s.hash = h
+	return h
+}
+
+// contentHash computes the hash of the flat string s (never 0).
+func (s *String) contentHash() uint32 {
 	h := uint32(2166136261)
 	if s.kind == strASCII {
 		for i := range len(s.s) {
 			h = (h ^ uint32(s.s[i])) * 16777619
 		}
 	} else {
-		for _, c := range s.u {
+		for _, c := range s.units() {
 			h = (h ^ uint32(c)) * 16777619
 		}
 	}
 	if h == 0 {
 		h = 1
 	}
-	s.hash = h
 	return h
 }
 
@@ -368,20 +571,35 @@ func (s *String) Equals(t *String) bool {
 	if s.hash != 0 && t.hash != 0 && s.hash != t.hash {
 		return false
 	}
+	if s.kind == strRope || t.kind == strRope {
+		return ropeEquals(s, t)
+	}
+	return flatEquals(s, t)
+}
+
+//go:noinline
+func ropeEquals(s, t *String) bool {
+	a, b := s, t
 	if s.kind == strRope {
-		s.flatten()
+		a = s.flat(new(String))
 	}
 	if t.kind == strRope {
-		t.flatten()
+		b = t.flat(new(String))
 	}
+	return flatEquals(a, b)
+}
+
+// flatEquals is Equals of flat strings of one length.
+func flatEquals(s, t *String) bool {
 	if s.kind != t.kind {
 		return false // utf16 strings always contain a unit >= 0x80
 	}
 	if s.kind == strASCII {
 		return s.s == t.s
 	}
-	for i, c := range s.u {
-		if t.u[i] != c {
+	tu := t.units()
+	for i, c := range s.units() {
+		if tu[i] != c {
 			return false
 		}
 	}
@@ -390,16 +608,17 @@ func (s *String) Equals(t *String) bool {
 
 // EqualsGoString compares against an ASCII/UTF-8 Go string.
 func (s *String) EqualsGoString(g string) bool {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
-		return s.s == g
+	if f.kind == strASCII {
+		return f.s == g
 	}
 	if isASCII(g) {
 		return false
 	}
-	return s.GoString() == g && utf8.ValidString(g)
+	return utf16ToGoString(f.units()) == g && utf8.ValidString(g)
 }
 
 // Compare orders by code units: -1, 0 or 1.
@@ -407,18 +626,20 @@ func (s *String) Compare(t *String) int {
 	if s == t {
 		return 0
 	}
+	x := s
 	if s.kind == strRope {
-		s.flatten()
+		x = s.flat(new(String))
 	}
+	y := t
 	if t.kind == strRope {
-		t.flatten()
+		y = t.flat(new(String))
 	}
-	if s.kind == strASCII && t.kind == strASCII {
-		return strings.Compare(s.s, t.s)
+	if x.kind == strASCII && y.kind == strASCII {
+		return strings.Compare(x.s, y.s)
 	}
-	n := min(int(s.n), int(t.n))
+	n := min(int(x.n), int(y.n))
 	for i := range n {
-		a, b := s.At(i), t.At(i)
+		a, b := x.at(i), y.at(i)
 		if a != b {
 			if a < b {
 				return -1
@@ -427,9 +648,9 @@ func (s *String) Compare(t *String) int {
 		}
 	}
 	switch {
-	case s.n < t.n:
+	case x.n < y.n:
 		return -1
-	case s.n > t.n:
+	case x.n > y.n:
 		return 1
 	}
 	return 0
@@ -446,31 +667,34 @@ func (s *String) IndexOf(sub *String, from int) int {
 	if from+int(sub.n) > int(s.n) {
 		return -1
 	}
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
+	fsub := sub
 	if sub.kind == strRope {
-		sub.flatten()
+		fsub = sub.flat(new(String))
 	}
-	if s.kind == strASCII && sub.kind == strASCII {
-		i := strings.Index(s.s[from:], sub.s)
+	if f.kind == strASCII && fsub.kind == strASCII {
+		i := strings.Index(f.s[from:], fsub.s)
 		if i < 0 {
 			return -1
 		}
 		return from + i
 	}
-	if s.kind == strASCII && sub.kind == strUTF16 {
+	if f.kind == strASCII && fsub.kind == strUTF16 {
 		return -1
 	}
-	first := sub.At(0)
-	last := int(s.n) - int(sub.n)
+	first := fsub.at(0)
+	last := int(f.n) - int(fsub.n)
+	u := f.units()
 outer:
 	for i := from; i <= last; i++ {
-		if s.u[i] != first {
+		if u[i] != first {
 			continue
 		}
-		for j := 1; j < int(sub.n); j++ {
-			if s.u[i+j] != sub.At(j) {
+		for j := 1; j < int(fsub.n); j++ {
+			if u[i+j] != fsub.at(j) {
 				continue outer
 			}
 		}
@@ -484,18 +708,20 @@ func (s *String) String() string { return s.GoString() }
 
 // IsWellFormed reports whether the string has no lone surrogates.
 func (s *String) IsWellFormed() bool {
+	f := s
 	if s.kind == strRope {
-		s.flatten()
+		f = s.flat(new(String))
 	}
-	if s.kind == strASCII {
+	if f.kind == strASCII {
 		return true
 	}
-	for i := 0; i < len(s.u); i++ {
-		c := s.u[i]
+	u := f.units()
+	for i := 0; i < len(u); i++ {
+		c := u[i]
 		if c < 0xD800 || c >= 0xE000 {
 			continue
 		}
-		if c >= 0xDC00 || i+1 >= len(s.u) || s.u[i+1] < 0xDC00 || s.u[i+1] >= 0xE000 {
+		if c >= 0xDC00 || i+1 >= len(u) || u[i+1] < 0xDC00 || u[i+1] >= 0xE000 {
 			return false
 		}
 		i++

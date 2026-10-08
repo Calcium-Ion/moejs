@@ -1,6 +1,9 @@
 package engine
 
-import "github.com/Calcium-Ion/moejs/bytecode"
+import (
+	"github.com/Calcium-Ion/moejs/bytecode"
+	"unsafe"
+)
 
 // Async functions (ECMA-262 §27.7) suspend and resume the way generators do
 // (generator.go): the frame's register window is copied out at an Await and
@@ -41,6 +44,7 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		r.makeAsyncFunction(regs[a].AsObject())
 	case bytecode.AsyncStart:
 		af := &asyncFunction{promise: r.newPromise()}
+		r.chargeObject(unsafe.Sizeof(asyncFunction{}))
 		af.g = genFrame{fn: st.frames[st.nframes-1].fn, fd: fd, this: regs[a], state: genExecuting}
 		o := initObject(&af.obj, ClassObject, r.nullProtoRoot)
 		o.internal = af
@@ -72,6 +76,7 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		}
 		if g.regs == nil {
 			g.regs = make([]Value, len(regs))
+			r.charge(len(regs) * valueSize)
 		}
 		g.recv, g.state = uint8(a), genAwaiting
 		r.promiseReact(p, x)

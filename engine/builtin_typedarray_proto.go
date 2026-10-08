@@ -924,7 +924,7 @@ func typedArrayJoin(r *Realm, this Value, args []Value) (Value, error) {
 			return Undefined(), err
 		}
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // typedArrayToLocaleString implements %TypedArray%.prototype.toLocaleString
@@ -961,7 +961,7 @@ func typedArrayToLocaleString(r *Realm, this Value, args []Value) (Value, error)
 			return Undefined(), err
 		}
 	}
-	return StringValue(sb.String()), nil
+	return StringValue(r.builtString(&sb)), nil
 }
 
 // typedArrayIterator implements the entries, keys and values methods.
