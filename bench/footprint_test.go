@@ -27,6 +27,7 @@ func footprintEngines() []engines.Engine {
 		engines.NewMoejsEngine(),
 		engines.NewMoejsEngineWith(engines.MoejsOptions{MutableIntrinsics: true, Host: engines.DefaultHost}),
 		engines.NewSobekEngine(),
+		engines.NewModerncQuickJSEngine(),
 		engines.NewQuickJSEngine(),
 		engines.NewV8Engine(),
 	}
@@ -96,7 +97,7 @@ func TestFootprint(t *testing.T) {
 		}
 	}
 	for _, key := range PluginKeys {
-		for _, e := range footprintEngines()[:3] {
+		for _, e := range footprintEngines()[:4] {
 			rows = append(rows, footprintRow(t, e, key, 64))
 		}
 	}

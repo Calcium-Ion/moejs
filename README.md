@@ -26,16 +26,17 @@ The workload is new-api's 10 task plugins and 269 recorded calls. Times are
 taken on the Go caller's side and include converting the arguments and the
 result.
 
-| | moejs | Sobek | QuickJS (quickjs-go) | V8 (v8go) |
+| | moejs | Sobek | QuickJS (modernc) | QuickJS (quickjs-go) |
 |---|--:|--:|--:|--:|
-| One plugin call | 6.9 µs | 14.3 µs | 104.5 µs | 56.6 µs ¹ |
-| New runtime | 1.4 µs | 2.2 µs | 382 µs | 1,153 µs ¹ |
-| Memory per runtime with the largest plugin loaded | 81 KiB | 264 KiB | 348 KiB ² | 1,544 KiB ² |
+| One plugin call | 21.4 µs | 45.8 µs | 111.6 µs | 316 µs |
+| New runtime | 4.3 µs | 6.2 µs | 556 µs | 1,126 µs |
+| Memory per runtime with the largest plugin loaded | 76 KiB | 264 KiB | 456 KiB ¹ | 348 KiB ² |
 
-¹ V8's timings varied widely on the test machine. ² The engine's own heap.
+¹ RSS delta; the modernc allocator is outside the Go heap. ² The engine's own heap.
 
-Sobek is a pure-Go engine like moejs. QuickJS and V8 run through cgo. The
-test machine, the full results and how to reproduce them are in
+Sobek and QuickJS (modernc) are pure-Go engines like moejs. QuickJS
+(quickjs-go) runs through cgo. V8 (v8go) is also benchmarked when resources
+allow. The test machine, the full results and how to reproduce them are in
 [docs/performance.md](docs/performance.md).
 
 ## Features
@@ -337,6 +338,8 @@ independently.
   JavaScript parser in Go.
 - [Hardened JavaScript / SES](https://github.com/endojs/endo/tree/master/packages/ses):
   the `lockdown()` model behind the shared frozen builtins.
+- [modernc.org/quickjs](https://pkg.go.dev/modernc.org/quickjs): the pure-Go
+  QuickJS transpilation baseline of the benchmarks.
 - [quickjs-go](https://github.com/buke/quickjs-go) and [v8go](https://github.com/rogchap/v8go):
   the cgo baselines of the benchmarks.
 - [test262](https://github.com/tc39/test262): the conformance suite.

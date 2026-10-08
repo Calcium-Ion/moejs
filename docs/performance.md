@@ -7,13 +7,14 @@ for, and how to reproduce the numbers.
 
 ## Setup
 
-All numbers are medians of 5 runs on 2026-10-01: 13th Gen Intel Core
-i5-13500H (6 performance + 6 efficiency cores, hyperthreaded to 16 logical
-CPUs), Linux, go1.26.6 linux/amd64. Serial rows are pinned to 8 threads
-(`taskset -c 0-7 GOMAXPROCS=8`). The machine was not idle, so treat
-differences under about 10% as noise. The baselines are Sobek
-`v0.0.0-20260708062710` (pure Go), quickjs-go `v0.7.7` (QuickJS, cgo) and
-v8go `v0.9.0` (V8, cgo).
+All numbers are medians of 3 runs on 2026-10-08: Intel Xeon E5-2650 v3
+(10 cores × 2 sockets, hyperthreaded to 40 logical CPUs), Linux, go1.26.0
+linux/amd64. The machine was not idle, so treat differences under about 10%
+as noise. The baselines are Sobek `v0.0.0-20260708062710` (pure Go),
+modernc.org/quickjs `v0.25.0` (QuickJS transpiled to pure Go via the modernc
+toolchain, `CGO_ENABLED=0`), and quickjs-go `v0.7.7` (QuickJS, cgo). V8
+(v8go `v0.9.0`) was not tested in this run due to memory constraints on the
+test machine.
 
 The workload is new-api's 10 task plugins (6,358 lines) and 269 hook calls
 recorded on Sobek, 47 of which throw. Every measurement is taken from the Go
@@ -27,15 +28,12 @@ All 269 cases in a loop, one goroutine, mean per call:
 
 | Engine | Time | Bytes | Allocations |
 |---|--:|--:|--:|
-| **moejs** | **6.86 µs** | 4.7 KB | 30 |
-| Sobek | 14.32 µs | 11.1 KB | 163 |
-| v8go | 56.64 µs ¹ | 5.3 KB | 104 |
-| quickjs-go | 104.50 µs | 7.6 KB | 118 |
+| **moejs** | **21.4 µs** | 4.8 KB | 29 |
+| Sobek | 45.8 µs | 11.3 KB | 163 |
+| modernc-quickjs | 111.6 µs | 5.4 KB | 100 |
+| quickjs-go | 316 µs | 7.8 KB | 118 |
 
-¹ v8go's timings varied widely on this machine. Read them as an order of
-magnitude.
-
-A few of moejs's 30 allocations are the benchmark adapter's own: boxing the
+A few of moejs's 29 allocations are the benchmark adapter's own: boxing the
 arguments and the result into the harness's interface types.
 `Runtime.Call` itself allocates nothing. The rest come from the plugins'
 objects and the conversions.
@@ -63,23 +61,20 @@ reads a field.
 ## Runtimes
 
 A new runtime with new-api's host globals, then evaluating a plugin module
-in it. Memory is the Go heap retained per live runtime:
+in it. Memory is the cost retained per live runtime:
 
-| | moejs | Sobek | quickjs-go | v8go |
+| | moejs | Sobek | modernc-quickjs | quickjs-go |
 |---|--:|--:|--:|--:|
-| New runtime | 1.39 µs / 27 allocs | 2.20 µs / 47 | 381.7 µs / 135 | 1152.7 µs ¹ / 54 |
-| + largest plugin (alibaba) | 71.0 µs / 479 | 321.8 µs / 4,499 | 3,230 µs ² | 2,493 µs ¹ ² |
-| + smallest plugin (sora) | 7.0 µs / 81 | 37.6 µs / 672 | 1,070 µs ² | 1,349 µs ¹ ² |
-| Retained, alibaba, 512 runtimes | 80.5 KiB | 263.6 KiB | 347.9 KiB ³ | 1,544 KiB ³ |
-| Retained, sora, 64 runtimes | 11.8 KiB | 49.2 KiB | | |
+| New runtime | 4.27 µs / 27 allocs | 6.17 µs / 47 | 556 µs / 87 | 1,126 µs / 135 |
+| + largest plugin (alibaba) | 247 µs / 478 | 931 µs / 4,499 | 10,666 µs ¹ | 7,530 µs ¹ |
+| + smallest plugin (sora) | 22.2 µs / 80 | 111 µs / 672 | 2,944 µs ¹ | 2,694 µs ¹ |
+| Retained, alibaba, 512 runtimes | 75.7 KiB | 264.2 KiB | 456 KiB ² | 347.9 KiB ³ |
+| Retained, sora, 64 runtimes | 11.9 KiB | 51.8 KiB | | |
 
-¹ v8go, see the note above. ² Includes compiling the script, which the cgo
-engines do per context. ³ The engine's own heap (QuickJS `malloc_size`, V8
-used heap size).
-
-Compiling the largest plugin takes 2.2 ms in moejs and 2.6 ms in Sobek, once
-per process. With `Options{MutableIntrinsics: true}` a new runtime costs
-35.9 µs and a live alibaba runtime retains 229.4 KiB.
+¹ Includes compiling the script, which these engines do per context.
+² RSS delta; modernc.org/quickjs allocates through the modernc C-to-Go
+allocator, which is invisible to Go's heap stats. ³ The engine's own heap
+(QuickJS `malloc_size`).
 
 ## Micro-benchmarks
 

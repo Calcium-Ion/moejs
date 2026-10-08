@@ -1,9 +1,9 @@
 package engines
 
 // All returns the engines in the order the report tables use: moejs, then
-// the three baselines.
+// the four baselines.
 func All() []Engine {
-	return []Engine{NewMoejsEngine(), NewSobekEngine(), NewQuickJSEngine(), NewV8Engine()}
+	return []Engine{NewMoejsEngine(), NewSobekEngine(), NewQuickJSEngine(), NewModerncQuickJSEngine(), NewV8Engine()}
 }
 
 // PureGo returns the engines that do not cross a cgo boundary and therefore
