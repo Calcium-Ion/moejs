@@ -12,8 +12,9 @@ i5-13500H (6 performance + 6 efficiency cores, hyperthreaded to 16 logical
 CPUs), Linux, go1.26.6 linux/amd64. Serial rows are pinned to 8 threads
 (`taskset -c 0-7 GOMAXPROCS=8`). The machine was not idle, so treat
 differences under about 10% as noise. The baselines are Sobek
-`v0.0.0-20260708062710` (pure Go), quickjs-go `v0.7.7` (QuickJS, cgo) and
-v8go `v0.9.0` (V8, cgo).
+`v0.0.0-20260708062710` (pure Go), modernc.org/quickjs `v0.25.0` (QuickJS
+translated to pure Go, measured on 2026-10-08 on the same machine),
+quickjs-go `v0.7.7` (QuickJS, cgo) and v8go `v0.9.0` (V8, cgo).
 
 The workload is new-api's 10 task plugins (6,358 lines) and 269 hook calls
 recorded on Sobek, 47 of which throw. Every measurement is taken from the Go
@@ -29,6 +30,7 @@ All 269 cases in a loop, one goroutine, mean per call:
 |---|--:|--:|--:|
 | **moejs** | **6.86 µs** | 4.7 KB | 30 |
 | Sobek | 14.32 µs | 11.1 KB | 163 |
+| modernc-quickjs | 35.16 µs | 5.4 KB | 100 |
 | v8go | 56.64 µs ¹ | 5.3 KB | 104 |
 | quickjs-go | 104.50 µs | 7.6 KB | 118 |
 
@@ -65,17 +67,21 @@ reads a field.
 A new runtime with new-api's host globals, then evaluating a plugin module
 in it. Memory is the Go heap retained per live runtime:
 
-| | moejs | Sobek | quickjs-go | v8go |
-|---|--:|--:|--:|--:|
-| New runtime | 1.39 µs / 27 allocs | 2.20 µs / 47 | 381.7 µs / 135 | 1152.7 µs ¹ / 54 |
-| + largest plugin (alibaba) | 71.0 µs / 479 | 321.8 µs / 4,499 | 3,230 µs ² | 2,493 µs ¹ ² |
-| + smallest plugin (sora) | 7.0 µs / 81 | 37.6 µs / 672 | 1,070 µs ² | 1,349 µs ¹ ² |
-| Retained, alibaba, 512 runtimes | 80.5 KiB | 263.6 KiB | 347.9 KiB ³ | 1,544 KiB ³ |
-| Retained, sora, 64 runtimes | 11.8 KiB | 49.2 KiB | | |
+| | moejs | Sobek | modernc-quickjs | quickjs-go | v8go |
+|---|--:|--:|--:|--:|--:|
+| New runtime | 1.39 µs / 27 allocs | 2.20 µs / 47 | 179.8 µs / 87 | 381.7 µs / 135 | 1152.7 µs ¹ / 54 |
+| + largest plugin (alibaba) | 71.0 µs / 479 | 321.8 µs / 4,499 | 4,326 µs ² | 3,230 µs ² | 2,493 µs ¹ ² |
+| + smallest plugin (sora) | 7.0 µs / 81 | 37.6 µs / 672 | 1,124 µs ² | 1,070 µs ² | 1,349 µs ¹ ² |
+| Retained, alibaba, 512 runtimes | 80.5 KiB | 263.6 KiB | 226.8 KiB ⁴ | 347.9 KiB ³ | 1,544 KiB ³ |
+| Retained, sora, 64 runtimes | 11.8 KiB | 49.2 KiB | | | |
 
-¹ v8go, see the note above. ² Includes compiling the script, which the cgo
-engines do per context. ³ The engine's own heap (QuickJS `malloc_size`, V8
-used heap size).
+¹ v8go, see the note above. ² Includes compiling the script, which the
+QuickJS engines and V8 do per context. ³ The engine's own heap (QuickJS
+`malloc_size`, V8 used heap size). ⁴ How much the resident set grew per
+runtime: modernc.org/quickjs allocates outside the Go heap and keeps no
+in-use count. The figure also moves with memory the process freed earlier,
+so the smaller plugins, measured after other runtimes were closed, are left
+out.
 
 Compiling the largest plugin takes 2.2 ms in moejs and 2.6 ms in Sobek, once
 per process. With `Options{MutableIntrinsics: true}` a new runtime costs
@@ -104,39 +110,57 @@ moejs vs Sobek, 100 iterations per operation:
 
 ![moejs plugin benchmark](assets/plugin-bench.en.png)
 
-Throughput of new-api's plugin workloads on the engines a Go program can embed, with QuickJS called straight from C as a reference, measured on 2026-10-08 with moejs 8abaca5.
+Throughput of new-api's plugin workloads on the engines a Go program can embed, with QuickJS called straight from C as a reference, measured on 2026-10-08 with moejs v0.1.0-alpha.6.
 
 - Intel Core i5-13500H with the benchmark pinned to the 8 threads of its 4 performance cores (taskset 0-7, GOMAXPROCS=8), Debian 12, Go 1.26.6, gcc 12.2.
 - One runtime per worker. A call hands JSON bytes to the engine to parse, calls the plugin, and serializes the result into bytes the host owns. Each run warms up for 2 s and measures 6 s (small and agent requests) or 8 s (large requests). Runs go back to back, the engine order changes for every cell, and every cell is the median of 3 rounds.
 - Small requests are 269 real calls to new-api's 10 task plugins. Agent requests are 8 different coding sessions of 100k tokens each (o200k_base): a system prompt, 12 tool definitions, a user task and the results of 67 to 102 tool calls (Go source, grep hits and test output). The agent plugin was written for this benchmark against the interface of new-api's task plugin buildSubmitRequest: it converts every message, renames the model, prefixes the system prompt, drops parameters and JSON Schema keywords the upstream rejects, and returns url, headers and body. Large requests take 25 MB in and 17 MB out.
 - Memory is the Go heap still live after a GC plus the bytes glibc malloc has in use, read while every worker is stopped right after its last call. It includes the 32 runtimes and leaves out garbage waiting for collection.
 - quickjs-go v0.7.7 turns its goroutine check on by default, which reads a goroutine stack on every API call; the charts show both settings. Both serialize with JSON.stringify, because Value.JSONStringify leaks. Sobek is the 2026-07-08 version.
+- modernc.org/quickjs v0.25.0 is QuickJS translated to pure Go by the modernc toolchain, with no cgo. It has no JSON API, so the argument goes in as text that JSON.parse reads inside the engine, and JSON.stringify writes the result. It allocates through its own allocator, which gives no in-use figure, so it has no memory number.
 - The C hosts are built with gcc 12.2: QuickJS 2026-06-04 with -O2, quickjs-ng 0.15.1 (the copy shipped in quickjs-go) with -O3.
 - ParseJSONString reads the caller's string in place, so the caller must not change those bytes while the call's values are in use.
 
 Requests per second, median of 3 rounds:
 
-| Scenario | Workers | moejs (no copy) | moejs | Sobek | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
+| Scenario | Workers | moejs (no copy) | moejs | Sobek | QuickJS pure Go (modernc) | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| Small requests | 1 | 52,750 | 54,138 | 9,566 | 19,073 | 12,093 | 29,792 | 46,446 | 34,228 |
+| Small requests | 8 | 146,944 | 132,222 | 21,803 | 62,751 | 12,908 | 108,980 | 205,938 | 140,049 |
+| Small requests | 32 | 146,959 | 140,397 | 23,689 | 59,712 | 12,258 | 106,111 | 201,756 | 134,291 |
+| Agent requests, 100k tokens | 1 | 640 | 603 | 159 | 195 | 303 | 303 | 440 | 323 |
+| Agent requests, 100k tokens | 8 | 1,894 | 1,828 | 559 | 602 | 1,045 | 1,065 | 1,740 | 1,275 |
+| Agent requests, 100k tokens | 32 | 2,001 | 1,954 | 546 | 554 | 1,016 | 1,037 | 1,721 | 1,253 |
+| One 8 MiB image | 1 | 141 | 107 | 4.2 | 5.6 | 11.9 | 11.9 | 11.6 | 14.8 |
+| One 8 MiB image | 8 | 514 | 236 | 16.1 | 18.0 | 41.1 | 41.9 | 56.5 | 54.0 |
+| One 8 MiB image | 32 | 504 | 241 | 15.4 | 17.0 | 41.0 | 40.9 | 58.0 | 53.0 |
+| Eight 1 MiB images | 1 | 147 | 113 | 4.4 | 5.5 | 12.2 | 12.0 | 11.8 | 14.6 |
+| Eight 1 MiB images | 8 | 532 | 253 | 16.5 | 18.0 | 42.2 | 41.5 | 58.8 | 53.6 |
+| Eight 1 MiB images | 32 | 500 | 252 | 15.7 | 16.5 | 40.5 | 41.5 | 57.3 | 53.2 |
+
+Memory in use at 32 workers, MiB (modernc has no in-use figure):
+
+| Scenario | moejs (no copy) | moejs | Sobek | QuickJS pure Go (modernc) | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|
-| Small requests | 1 | 52,750 | 54,138 | 9,566 | 12,093 | 29,792 | 46,446 | 34,228 |
-| Small requests | 8 | 146,944 | 132,222 | 21,803 | 12,908 | 108,980 | 205,938 | 140,049 |
-| Small requests | 32 | 146,959 | 140,397 | 23,689 | 12,258 | 106,111 | 201,756 | 134,291 |
-| Agent requests, 100k tokens | 1 | 640 | 603 | 159 | 303 | 303 | 440 | 323 |
-| Agent requests, 100k tokens | 8 | 1,894 | 1,828 | 559 | 1,045 | 1,065 | 1,740 | 1,275 |
-| Agent requests, 100k tokens | 32 | 2,001 | 1,954 | 546 | 1,016 | 1,037 | 1,721 | 1,253 |
-| One 8 MiB image | 1 | 141 | 107 | 4.2 | 11.9 | 11.9 | 11.6 | 14.8 |
-| One 8 MiB image | 8 | 514 | 236 | 16.1 | 41.1 | 41.9 | 56.5 | 54.0 |
-| One 8 MiB image | 32 | 504 | 241 | 15.4 | 41.0 | 40.9 | 58.0 | 53.0 |
-| Eight 1 MiB images | 1 | 147 | 113 | 4.4 | 12.2 | 12.0 | 11.8 | 14.6 |
-| Eight 1 MiB images | 8 | 532 | 253 | 16.5 | 42.2 | 41.5 | 58.8 | 53.6 |
-| Eight 1 MiB images | 32 | 500 | 252 | 15.7 | 40.5 | 41.5 | 57.3 | 53.2 |
+| One 8 MiB image | 384 | 1,152 | 1,101 | — | 1,111 | 1,111 | 1,138 | 1,140 |
+| Eight 1 MiB images | 366 | 1,134 | 1,104 | — | 1,111 | 1,111 | 1,138 | 1,140 |
 
-Memory in use at 32 workers, MiB:
+## Another machine
 
-| Scenario | moejs (no copy) | moejs | Sobek | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
-|---|--:|--:|--:|--:|--:|--:|--:|
-| One 8 MiB image | 384 | 1,152 | 1,101 | 1,111 | 1,111 | 1,138 | 1,140 |
-| Eight 1 MiB images | 366 | 1,134 | 1,104 | 1,111 | 1,111 | 1,138 | 1,140 |
+hanxi measured these numbers for [#1](https://github.com/Calcium-Ion/moejs/pull/1), which added modernc.org/quickjs to
+the benchmarks: Intel Xeon E5-2650 v3 (2 × 10 cores, hyperthreaded to 40
+logical CPUs), Linux, go1.26.0 linux/amd64, medians of 3 runs on 2026-10-08.
+quickjs-go ran with its default settings, and V8 was not run.
+
+| | moejs | Sobek | modernc-quickjs | quickjs-go |
+|---|--:|--:|--:|--:|
+| One plugin call | 21.4 µs / 4.8 KB / 29 | 45.8 µs / 11.3 KB / 163 | 111.6 µs / 5.4 KB / 100 | 316 µs / 7.8 KB / 118 |
+| New runtime | 4.27 µs | 6.17 µs | 556 µs | 1,126 µs |
+| + largest plugin (alibaba) | 247 µs | 931 µs | 10,666 µs | 7,530 µs |
+| + smallest plugin (sora) | 22.2 µs | 111 µs | 2,944 µs | 2,694 µs |
+| Retained, alibaba, 512 runtimes | 75.7 KiB | 264.2 KiB | 456 KiB ¹ | 347.9 KiB ² |
+
+¹ How much the resident set grew. ² The engine's own heap.
 
 ## Reproducing
 

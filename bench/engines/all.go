@@ -1,10 +1,11 @@
 package engines
 
 // All returns the engines in the order the report tables use: moejs, then
-// the baselines. QuickJS appears twice, with the quickjs-go defaults and
-// tuned the way a pooled host would run it (see QuickJSEngine).
+// the baselines. QuickJS appears three times: with the quickjs-go defaults,
+// tuned the way a pooled host would run it (see QuickJSEngine), and as
+// modernc.org/quickjs, QuickJS translated to pure Go.
 func All() []Engine {
-	return []Engine{NewMoejsEngine(), NewSobekEngine(), NewQuickJSEngine(), NewQuickJSTunedEngine(), NewV8Engine()}
+	return []Engine{NewMoejsEngine(), NewSobekEngine(), NewQuickJSEngine(), NewQuickJSTunedEngine(), NewModerncQuickJSEngine(), NewV8Engine()}
 }
 
 // PureGo returns the engines that do not cross a cgo boundary and therefore

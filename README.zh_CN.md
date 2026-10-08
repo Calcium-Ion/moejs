@@ -27,15 +27,15 @@ moejs 支持 ES 模块、类、async/await、Proxy、BigInt 等现代 JavaScript
 
 下表是单次调用的耗时：测试负载是 new-api 的 10 个任务插件和 269 个录制下来的调用，计时在 Go 调用方进行，包括参数和结果的转换。
 
-| | moejs | Sobek | QuickJS（quickjs-go 默认配置） | V8（v8go） |
-|---|--:|--:|--:|--:|
-| 一次插件调用 | 6.9 µs | 14.3 µs | 104.5 µs | 56.6 µs ¹ |
-| 新建运行时 | 1.4 µs | 2.2 µs | 382 µs | 1,153 µs ¹ |
-| 加载最大的插件后，每个运行时的内存 | 81 KiB | 264 KiB | 348 KiB ² | 1,544 KiB ² |
+| | moejs | Sobek | QuickJS 纯 Go（modernc） | QuickJS（quickjs-go 默认配置） | V8（v8go） |
+|---|--:|--:|--:|--:|--:|
+| 一次插件调用 | 6.9 µs | 14.3 µs | 35.2 µs | 104.5 µs | 56.6 µs ¹ |
+| 新建运行时 | 1.4 µs | 2.2 µs | 180 µs | 382 µs | 1,153 µs ¹ |
+| 加载最大的插件后，每个运行时的内存 | 81 KiB | 264 KiB | 227 KiB ³ | 348 KiB ² | 1,544 KiB ² |
 
-¹ V8 的耗时在测试机上波动很大。² 引擎自己的堆。
+¹ V8 的耗时在测试机上波动很大。² 引擎自己的堆。³ 常驻内存增长了多少：modernc.org/quickjs 在 Go 堆之外分配内存，也不统计正在用的字节。
 
-Sobek 和 moejs 一样是纯 Go 引擎，QuickJS 和 V8 通过 cgo 调用。测试机器、完整结果和复现方法见
+Sobek 和 modernc.org/quickjs（翻译成 Go 的 QuickJS）和 moejs 一样是纯 Go 引擎，quickjs-go 和 V8 通过 cgo 调用。测试机器、完整结果和复现方法见
 [docs/performance.zh_CN.md](docs/performance.zh_CN.md)。
 
 ## 功能
@@ -319,6 +319,7 @@ moejs 的设计参考了下面这些项目，代码是独立编写的。
 - [esbuild](https://github.com/evanw/esbuild)：用 Go 写快速 JavaScript 解析器的做法。
 - [Hardened JavaScript / SES](https://github.com/endojs/endo/tree/master/packages/ses)：共享冻结内建对象所用的
   `lockdown()` 模型。
+- [modernc.org/quickjs](https://pkg.go.dev/modernc.org/quickjs)：基准测试里纯 Go 的 QuickJS 对照。
 - [quickjs-go](https://github.com/buke/quickjs-go) 和 [v8go](https://github.com/rogchap/v8go)：基准测试里的 cgo 对照。
 - [test262](https://github.com/tc39/test262)：一致性测试集。
 - [new-api](https://github.com/QuantumNous/new-api)：插件宿主，它的 `pkg/jsplugin` 决定了 moejs 要支持哪些 API。
