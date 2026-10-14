@@ -1,0 +1,18 @@
+name: Feature request
+description: A JavaScript feature from TODO.md, or a change to the Go API
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature
+      description: The JavaScript feature (see [TODO.md](https://github.com/Calcium-Ion/moejs/blob/main/TODO.md)) or the Go API you need.
+    validations:
+      required: true
+  - type: textarea
+    id: use
+    attributes:
+      label: The code that needs it
+      description: A short example of the plugin or host code that should run.
+    validations:
+      required: true

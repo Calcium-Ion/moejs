@@ -1,0 +1,53 @@
+name: Bug report
+description: JavaScript that gives the wrong result or crashes, or a Go API that behaves differently from docs/guide.md
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Features listed in [TODO.md](https://github.com/Calcium-Ion/moejs/blob/main/TODO.md) fail with "is not supported yet (see TODO.md)". To ask for one, use the feature request form.
+        Report security problems privately: see [SECURITY.md](https://github.com/Calcium-Ion/moejs/blob/main/SECURITY.md).
+  - type: input
+    id: moejs-version
+    attributes:
+      label: moejs version
+      description: The output of `go list -m github.com/Calcium-Ion/moejs` in your module.
+      placeholder: github.com/Calcium-Ion/moejs v0.1.0-alpha.7
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version, OS and architecture
+      description: The output of `go version`.
+      placeholder: go version go1.26.6 linux/amd64
+    validations:
+      required: true
+  - type: textarea
+    id: javascript
+    attributes:
+      label: JavaScript
+      description: The smallest code that shows the problem.
+      render: js
+    validations:
+      required: true
+  - type: textarea
+    id: go-code
+    attributes:
+      label: Go code
+      description: How the host runs it, when the problem is in the values moejs takes or returns.
+      render: go
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output, the error, or the panic with its stack trace.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If Node prints something else for the same JavaScript, paste what it prints.
+    validations:
+      required: true
