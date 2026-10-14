@@ -154,6 +154,9 @@ type jsonParser struct {
 	// quiet: observe no interrupt (a parse for FromGo, which may run where
 	// no error can be returned, materializing a json.RawMessage).
 	quiet bool
+	// used is the largest length the value stack had when a container
+	// closed (closed), saturating; it shares the word of work and quiet.
+	used  uint16
 	stack []Value
 	keys  []PropertyKey
 }
@@ -201,25 +204,39 @@ func (p *jsonParser) parseText(src string) (Value, error) {
 			err = p.unexpected()
 		}
 	}
-	l.json.keep(p.stack, p.keys)
+	l.json.keep(p.stack, p.keys, int(p.used))
 	if err != nil {
 		return Undefined(), err
 	}
 	return v, nil
 }
 
-// keep takes back the stack a parse grew, clearing the entries a failed
-// parse left (those of the containers it was in).
-func (s *jsonStack) keep(vals []Value, keys []PropertyKey) {
-	clear(vals)
-	clear(keys)
+// keep takes back the stack a parse grew, clearing the entries it left: a
+// closed container's up to used (closed), and those of the containers a
+// failed parse was still in. A key is pushed only with its value, so the
+// key stack never got longer than used either.
+func (s *jsonStack) keep(vals []Value, keys []PropertyKey, used int) {
 	if cap(vals) > jsonStackMax {
 		vals = nil
+	} else {
+		clear(vals[:max(len(vals), used)])
 	}
 	if cap(keys) > jsonStackMax {
 		keys = nil
+	} else {
+		clear(keys[:max(len(keys), min(used, cap(keys)))])
 	}
 	s.vals, s.keys = vals[:0], keys[:0]
+}
+
+// closed records the value stack's length as a container closes, leaving
+// the container's entries where they are: keep clears the stacks once, up
+// to the largest length. Clearing them at each container would cost a bulk
+// write barrier per container while the collector marks.
+func (p *jsonParser) closed() {
+	if n := len(p.stack); n > int(p.used) {
+		p.used = uint16(min(n, math.MaxUint16))
+	}
 }
 
 // wtf8FromUTF16 encodes code units as UTF-8, with lone surrogates encoded as
@@ -640,8 +657,7 @@ func (p *jsonParser) object() (Value, error) {
 	}
 	keys, vals := p.keys[kbase:], p.stack[base:]
 	o := r.buildJSONObject(keys, vals)
-	clear(p.stack[base:])
-	clear(p.keys[kbase:])
+	p.closed()
 	p.stack = p.stack[:base]
 	p.keys = p.keys[:kbase]
 	p.depth--
@@ -812,7 +828,7 @@ func (p *jsonParser) array() (Value, error) {
 		return Undefined(), p.unexpected()
 	}
 	a := p.r.newJSONArray(p.stack[base:])
-	clear(p.stack[base:])
+	p.closed()
 	p.stack = p.stack[:base]
 	p.depth--
 	return ObjectValue(a), nil
@@ -838,7 +854,6 @@ func (r *Realm) JSONStringify(v Value) (*String, error) {
 func jsonStringify(r *Realm, this Value, args []Value) (Value, error) {
 	value, replacer, space := Arg(args, 0), Arg(args, 1), Arg(args, 2)
 	js := jsonStringifier{r: r}
-	js.stack = js.stackBuf[:0]
 	if IsCallable(replacer) {
 		js.replacerFn = replacer
 	} else if isArr, err := r.isArray(replacer); err != nil {
@@ -911,10 +926,16 @@ type jsonStringifier struct {
 	inDst        bool    // AppendJSON: sb.b is still dst's spare capacity (own)
 	plainEpoch   uint32  // protosLackToJSON's answer: protoEpoch+1 when positive
 	gap          *String // nil for no indentation
-	stack        []*Object
-	stackBuf     [16]*Object
-	deep         map[*Object]struct{} // stack[jsonScanDepth:], for the cycle check
-	work         int
+	// depth is the number of containers being serialized, the stack push
+	// and pop keep: its first len(shallow) entries are in shallow, the
+	// rest in deeper. (A slice over an array of the stringifier would
+	// point it at itself and move it to the heap, one allocation per
+	// stringify.)
+	depth   int
+	shallow [16]*Object
+	deeper  []*Object
+	deep    map[*Object]struct{} // the stack past jsonScanDepth, for the cycle check
+	work    int
 }
 
 // setPropertyList implements the replacer-array branch of JSON.stringify.
@@ -1172,14 +1193,17 @@ const jsonScanDepth = 64
 // the depth. A value shallower than jsonScanDepth, the common case, pays
 // one compare for the bookkeeping.
 func (js *jsonStringifier) push(o *Object) error {
-	n := len(js.stack)
-	scan := js.stack
-	if n > jsonScanDepth {
-		scan = scan[:jsonScanDepth]
-	}
-	for _, e := range scan {
+	n := js.depth
+	for _, e := range js.shallow[:min(n, len(js.shallow))] {
 		if e == o {
 			return js.r.TypeError("Converting circular structure to JSON")
+		}
+	}
+	if n > len(js.shallow) {
+		for _, e := range js.deeper[:min(n, jsonScanDepth)-len(js.shallow)] {
+			if e == o {
+				return js.r.TypeError("Converting circular structure to JSON")
+			}
 		}
 	}
 	if n >= jsonScanDepth {
@@ -1199,19 +1223,28 @@ func (js *jsonStringifier) push(o *Object) error {
 		}
 		js.deep[o] = struct{}{}
 	}
-	js.stack = append(js.stack, o)
+	if n < len(js.shallow) {
+		js.shallow[n] = o
+	} else {
+		js.deeper = append(js.deeper, o)
+	}
+	js.depth = n + 1
 	return nil
 }
 
 func (js *jsonStringifier) pop() {
-	n := len(js.stack) - 1
-	if n >= jsonScanDepth {
-		delete(js.deep, js.stack[n])
-		if n%jsonCallLevels == 0 {
-			js.r.ExitCall()
+	n := js.depth - 1
+	if n >= len(js.shallow) {
+		i := n - len(js.shallow)
+		if n >= jsonScanDepth {
+			delete(js.deep, js.deeper[i])
+			if n%jsonCallLevels == 0 {
+				js.r.ExitCall()
+			}
 		}
+		js.deeper = js.deeper[:i]
 	}
-	js.stack = js.stack[:n]
+	js.depth = n
 }
 
 // newline starts a line indented by level gaps.
@@ -1233,7 +1266,7 @@ func (js *jsonStringifier) object(o *Object) error {
 	if err := js.push(o); err != nil {
 		return err
 	}
-	level := len(js.stack) // the members' indentation
+	level := js.depth // the members' indentation
 	js.sb.WriteASCII('{')
 	first := true
 	if o.flags&flagHasLazy != 0 {
@@ -1383,7 +1416,7 @@ func (js *jsonStringifier) array(o *Object) error {
 	if err := js.push(o); err != nil {
 		return err
 	}
-	level := len(js.stack) // the elements' indentation
+	level := js.depth // the elements' indentation
 	n, err := r.LengthOfArrayLike(o)
 	if err != nil {
 		return err

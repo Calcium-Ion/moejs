@@ -217,7 +217,7 @@ func (r *Realm) ResetAllocation() {
 func (r *Realm) Stats() Stats {
 	s := Stats{
 		ICEntries:          len(r.ic),
-		RegisterStackBytes: int64(len(r.interp.stack)) * int64(unsafe.Sizeof(Value{})),
+		RegisterStackBytes: int64(cap(r.interp.stack)) * int64(unsafe.Sizeof(Value{})),
 	}
 	if p := r.interruptValue.Load(); p != nil {
 		s.Interrupts = p.n

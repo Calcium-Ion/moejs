@@ -160,7 +160,7 @@ func (r *Realm) DropJobs(err error) {
 		return
 	}
 	if s := r.lazy.json; s != nil {
-		s.keep(s.vals[:cap(s.vals)], s.keys[:cap(s.keys)])
+		s.keep(s.vals[:cap(s.vals)], s.keys[:cap(s.keys)], 0)
 	}
 	if r.lazy.jobs == nil {
 		return

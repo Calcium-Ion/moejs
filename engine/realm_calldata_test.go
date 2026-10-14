@@ -87,8 +87,9 @@ func TestReleaseCallData(t *testing.T) {
 				assert.False(t, h.touched)
 				assert.Equal(t, 0, st.sp)
 				assert.Equal(t, 0, st.nframes)
-				assert.Len(t, st.stack, initialStackSize, "a shallow request keeps its stack")
-				assert.False(t, slices.ContainsFunc(st.stack, func(v Value) bool { return v != Value{} }), "registers")
+				assert.Empty(t, st.stack)
+				assert.Equal(t, initialStackSize, cap(st.stack), "a shallow request keeps its stack")
+				assert.False(t, slices.ContainsFunc(st.stack[:cap(st.stack)], func(v Value) bool { return v != Value{} }), "registers")
 				assert.False(t, slices.ContainsFunc(st.frames, func(fi frameInfo) bool { return fi != frameInfo{} }), "frame records")
 				for j := range r.regexps.subjects {
 					assert.Nil(t, r.regexps.subjects[j].s, "RegExp subject %d", j)
@@ -160,25 +161,61 @@ func TestReleaseCallDataDeepRecursion(t *testing.T) {
 		return res.AsNumber()
 	}
 	shallow := deep(3)
-	shallowStack, shallowFrames := len(st.stack), len(st.frames)
+	shallowStack, shallowFrames := cap(st.stack), len(st.frames)
 	require.LessOrEqual(t, shallowStack, maxRetainedStack)
 	deepest := deep(400)
-	require.Greater(t, len(st.stack), maxRetainedStack)
+	require.Greater(t, cap(st.stack), maxRetainedStack)
 	require.Greater(t, len(st.frames), maxRetainedFrames)
 
 	r.ReleaseCallData()
 	assert.Nil(t, st.stack)
 	assert.Nil(t, st.frames)
 	assert.Equal(t, shallow, deep(3))
-	assert.Len(t, st.stack, shallowStack)
+	assert.Equal(t, shallowStack, cap(st.stack))
 	assert.Len(t, st.frames, shallowFrames)
 	r.ReleaseCallData()
-	assert.Len(t, st.stack, shallowStack, "a shallow call's stack is cleared, not dropped")
+	assert.Equal(t, shallowStack, cap(st.stack), "a shallow call's stack is cleared, not dropped")
 	assert.Len(t, st.frames, shallowFrames)
 	assert.Equal(t, deepest, deep(400))
 	r.ReleaseCallData()
 	assert.Nil(t, st.stack)
 	assert.Equal(t, shallow, deep(3))
+}
+
+// TestReleaseCallDataExtent: the length of the register stack is the extent
+// the calls since the last release used; past it, up to the capacity, every
+// register is zero. A release clears the extent and empties the stack, so a
+// shallow request after a deep one has only its own registers to clear.
+func TestReleaseCallDataExtent(t *testing.T) {
+	f := newHostLazyFixture(t, callDataSource, RealmOptions{})
+	r, st := f.r, &f.r.interp
+	deep := func(n int) {
+		t.Helper()
+		_, err := r.Call(f.fn("deep"), Undefined(), []Value{IntValue(n)})
+		require.NoError(t, err)
+	}
+	zeroPast := func(when string) {
+		t.Helper()
+		assert.False(t, slices.ContainsFunc(st.stack[len(st.stack):cap(st.stack)], func(v Value) bool { return v != Value{} }), "registers past the extent, %s", when)
+	}
+	deep(40)
+	zeroPast("after a deep call")
+	r.ReleaseCallData()
+	assert.Empty(t, st.stack)
+	zeroPast("after the release")
+	stack := cap(st.stack)
+	require.Greater(t, stack, 4*initialStackSize)
+
+	deep(1)
+	assert.Less(t, len(st.stack), stack/4, "a shallow call extends the stack only by its registers")
+	assert.True(t, slices.ContainsFunc(st.stack, func(v Value) bool { return v != Value{} }), "the registers it used")
+	zeroPast("after a shallow call")
+	deep(40)
+	assert.Equal(t, stack, cap(st.stack), "the capacity is kept")
+	zeroPast("after a deep call again")
+	r.ReleaseCallData()
+	assert.Empty(t, st.stack)
+	zeroPast("after the last release")
 }
 
 // BenchmarkReleaseCallData measures ReleaseCallData after a hook call, with

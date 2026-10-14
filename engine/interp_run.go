@@ -372,7 +372,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.Add:
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
-				regs[a] = NumberValue(x.AsNumber() + y.AsNumber())
+				regs[a].setScalar(NumberValue(x.AsNumber() + y.AsNumber()))
 				continue
 			}
 			if x.IsString() && y.IsString() {
@@ -392,10 +392,10 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x, y := regs[uint8(w>>16)], regs[uint8(w>>24)]
 			if x.IsNumber() && y.IsNumber() {
 				if f, ok := numberOp(bytecode.Op(w), x.AsNumber(), y.AsNumber()); ok {
-					regs[a] = NumberValue(f)
+					regs[a].setScalar(NumberValue(f))
 					continue
 				}
-				regs[a] = NumberValue(numericOp(bytecode.Op(w), x.AsNumber(), y.AsNumber()))
+				regs[a].setScalar(NumberValue(numericOp(bytecode.Op(w), x.AsNumber(), y.AsNumber())))
 				continue
 			}
 			var res Value
@@ -408,7 +408,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			imm := float64(int8(w >> 24))
 			if x.IsNumber() {
-				regs[a] = NumberValue(x.AsNumber() + imm)
+				regs[a].setScalar(NumberValue(x.AsNumber() + imm))
 				continue
 			}
 			var res Value
@@ -421,7 +421,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			x := regs[uint8(w>>16)]
 			imm := float64(int8(w >> 24))
 			if x.IsNumber() {
-				regs[a] = NumberValue(x.AsNumber() - imm)
+				regs[a].setScalar(NumberValue(x.AsNumber() - imm))
 				continue
 			}
 			var res Value
@@ -437,7 +437,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				d = -1
 			}
 			if x.IsNumber() {
-				regs[a] = NumberValue(x.AsNumber() + d)
+				regs[a].setScalar(NumberValue(x.AsNumber() + d))
 				continue
 			}
 			var res Value
@@ -449,7 +449,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.Neg:
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
-				regs[a] = NumberValue(-x.AsNumber())
+				regs[a].setScalar(NumberValue(-x.AsNumber()))
 				continue
 			}
 			var res Value
@@ -480,7 +480,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.BitNot:
 			x := regs[uint8(w>>16)]
 			if x.IsNumber() {
-				regs[a] = IntValue(int(^ToInt32Float(x.AsNumber())))
+				regs[a].setScalar(IntValue(int(^ToInt32Float(x.AsNumber()))))
 				continue
 			}
 			var res Value
@@ -540,10 +540,10 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				// Operands that are int32 already: ToInt32 is the identity.
 				fx, fy := x.AsNumber(), y.AsNumber()
 				if ix, iy := int32(fx), int32(fy); float64(ix) == fx && float64(iy) == fy {
-					regs[a] = Int64Value(bitwiseInt32(bytecode.Op(w), ix, iy))
+					regs[a].setScalar(Int64Value(bitwiseInt32(bytecode.Op(w), ix, iy)))
 					continue
 				}
-				regs[a] = bitwiseOp(bytecode.Op(w), fx, fy)
+				regs[a].setScalar(bitwiseOp(bytecode.Op(w), fx, fy))
 				continue
 			}
 			var res Value

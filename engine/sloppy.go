@@ -168,9 +168,9 @@ func (r *Realm) frameOp(w uint32, code *bytecode.Function, regs []Value, env *En
 		return this, nil
 	case bytecode.CallEval:
 		st := &r.interp
-		fr, nstack, nframes := st.frames[st.nframes-1], len(st.stack), len(st.frames)
+		fr, nstack, nframes := st.frames[st.nframes-1], cap(st.stack), len(st.frames)
 		err := r.callEval(code, int(fr.base), w, code.Code[fr.pc+1], env, this)
-		if err == nil && (len(st.stack) != nstack || len(st.frames) != nframes) {
+		if err == nil && (cap(st.stack) != nstack || len(st.frames) != nframes) {
 			return this, errFrameOp
 		}
 		return this, err

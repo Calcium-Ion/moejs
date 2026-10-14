@@ -45,12 +45,15 @@ func (r *Realm) ReleaseCallData() {
 		h.seal()
 	}
 	// No frame is live at depth 0, so sp and nframes are 0; the registers
-	// and records below them would be kept all the same.
+	// and records below them would be kept all the same. Of the register
+	// stack only the extent the calls used, its length (growStack), holds
+	// anything to clear.
 	st := &r.interp
-	if st.sp == 0 && len(st.stack) > maxRetainedStack {
+	if st.sp == 0 && cap(st.stack) > maxRetainedStack {
 		st.stack = nil
 	} else {
 		clear(st.stack[st.sp:])
+		st.stack = st.stack[:st.sp]
 	}
 	if st.nframes == 0 && len(st.frames) > maxRetainedFrames {
 		st.frames = nil

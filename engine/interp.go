@@ -21,7 +21,7 @@ import (
 
 // interpState is the interpreter's per-realm mutable state (embedded in Realm).
 type interpState struct {
-	stack   []Value // register stack; frames are windows [base, base+NumRegs)
+	stack   []Value // register stack; frames are windows [base, base+NumRegs); length: the extent used (growStack)
 	sp      int     // first free register
 	frames  []frameInfo
 	nframes int
@@ -526,14 +526,23 @@ func (r *Realm) pushArgs(n int) []Value {
 
 func (r *Realm) popArgs(n int) { r.interp.sp -= n }
 
-// growStack enlarges the register stack to hold at least top registers.
+// growStack makes the register stack hold at least top registers. Its
+// length is the extent the calls since the last ReleaseCallData have used,
+// so the release clears no more than that (a pointer store, a register
+// cleared included, costs a write barrier while the collector marks);
+// between the length and the capacity every register is zero. growStack
+// extends the length within the capacity and doubles the capacity past it.
 func (r *Realm) growStack(top int) {
 	st := &r.interp
-	n := max(initialStackSize, 2*len(st.stack))
+	if top <= cap(st.stack) {
+		st.stack = st.stack[:top]
+		return
+	}
+	n := max(initialStackSize, 2*cap(st.stack))
 	for n < top {
 		n *= 2
 	}
-	ns := make([]Value, n)
+	ns := make([]Value, top, n)
 	copy(ns, st.stack[:st.sp])
 	st.stack = ns
 }

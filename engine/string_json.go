@@ -285,7 +285,6 @@ func (js *jsonStringifier) quoteUTF8(u []uint16) error {
 // and no indentation; ok is false when v has no JSON representation or on
 // an error, which leaves the call depth as it found it.
 func (js *jsonStringifier) serialize(v Value) (ok bool, err error) {
-	js.stack = js.stackBuf[:0]
 	rv, err := js.resolve(v, StringKey(AtomEmpty), nil)
 	if err != nil {
 		return false, err

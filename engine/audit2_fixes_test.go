@@ -267,9 +267,25 @@ func TestJSONParseAllocs(t *testing.T) {
 		require.Len(t, r.ToGo(o), n)
 		require.Len(t, o.AsObject().slots, n)
 	}
+	// Nor does a successful one: the closed containers' entries, left in
+	// place, are cleared once at the end.
+	s := r.lazy.json
+	zero := func(what string) {
+		t.Helper()
+		for i, v := range s.vals[:cap(s.vals)] {
+			require.Equal(t, Value{}, v, "%s: value %d", what, i)
+		}
+		for i, k := range s.keys[:cap(s.keys)] {
+			require.Equal(t, PropertyKey{}, k, "%s: key %d", what, i)
+		}
+	}
+	require.NoError(t, parse(`{"a":[1,"s",{"x":"y","z":[true,{"q":"w"}]}],"b":{"c":"d","e":{"f":"g","h":["i"]}},"j":"k"}`))
+	require.Empty(t, s.vals)
+	require.Empty(t, s.keys)
+	require.NotZero(t, cap(s.keys))
+	zero("after a parse")
 	// A failed parse leaves nothing on the kept stack.
 	require.Error(t, parse(`{"a":{"b":[1,{"c":"x","d":`))
-	s := r.lazy.json
 	require.Empty(t, s.vals)
 	require.Empty(t, s.keys)
 	for _, v := range s.vals[:cap(s.vals)] {

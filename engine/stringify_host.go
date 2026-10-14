@@ -88,7 +88,7 @@ func (js *jsonStringifier) hostNode(o *Object) (bool, error) {
 		return false, nil
 	}
 	mark := js.sb.Len()
-	ok, err := js.hostValue(hostHeapOf(o.shape), o.hostSrc(), len(js.stack))
+	ok, err := js.hostValue(hostHeapOf(o.shape), o.hostSrc(), js.depth)
 	if !ok && err == nil {
 		js.sb.truncate(mark)
 	}
@@ -110,7 +110,7 @@ func (js *jsonStringifier) hostValue(h *hostHeap, v any, depth int) (ok bool, er
 			js.sb.writeASCIIBytes("null")
 			break
 		}
-		return hostMap(js, h, x, depth, &h.anyPairs, true, (*jsonStringifier).hostValue)
+		return hostMap(js, h, x, depth, &h.anyPairs, true)
 	case []any:
 		if depth >= jsonScanDepth {
 			return false, nil
@@ -140,7 +140,7 @@ func (js *jsonStringifier) hostValue(h *hostHeap, v any, depth int) (ok bool, er
 			js.sb.writeASCIIBytes("null")
 			break
 		}
-		return hostMap(js, h, x, depth, &h.strPairs, false, hostString)
+		return hostMap(js, h, x, depth, &h.strPairs, false)
 	case []string:
 		if depth >= jsonScanDepth {
 			return false, nil
@@ -151,7 +151,7 @@ func (js *jsonStringifier) hostValue(h *hostHeap, v any, depth int) (ok bool, er
 			js.sb.writeASCIIBytes("null")
 			break
 		}
-		return hostMap(js, h, x, depth, &h.listPairs, false, hostStringList)
+		return hostMap(js, h, x, depth, &h.listPairs, false)
 	case []map[string]any:
 		if depth >= jsonScanDepth {
 			return false, nil
@@ -220,13 +220,29 @@ func hostStrings(js *jsonStringifier, list []string) (bool, error) {
 	return true, js.sb.checkLength(js.r)
 }
 
+// hostPairValue writes the value of a host map's entry with the function
+// for the map's value type. It switches on the type rather than taking a
+// function value: through an indirect call the stringifier would escape to
+// the heap, one allocation per stringify.
+func hostPairValue[V any](js *jsonStringifier, h *hostHeap, v *V, depth int) (bool, error) {
+	switch x := any(v).(type) {
+	case *any:
+		return js.hostValue(h, *x, depth)
+	case *string:
+		return hostString(js, h, *x, depth)
+	case *[]string:
+		return hostStringList(js, h, *x, depth)
+	}
+	panic("engine: hostPairValue of an unexpected map value type")
+}
+
 // hostMap writes the Go map m with its keys sorted, as materializeMap lays
 // them out when none is an array index or not ASCII; a "toJSON" entry stops
 // the walk when its value could be callable (anyValues). The entries are
 // collected on the end of the heap's pair scratch, which nothing else uses
 // during a walk (it materializes nothing), so nested maps stack their
 // entries after the outer map's.
-func hostMap[V any](js *jsonStringifier, h *hostHeap, m map[string]V, depth int, scratch *[]hostPair[V], anyValues bool, value func(*jsonStringifier, *hostHeap, V, int) (bool, error)) (ok bool, err error) {
+func hostMap[V any](js *jsonStringifier, h *hostHeap, m map[string]V, depth int, scratch *[]hostPair[V], anyValues bool) (ok bool, err error) {
 	if depth >= jsonScanDepth {
 		return false, nil
 	}
@@ -257,7 +273,7 @@ func hostMap[V any](js *jsonStringifier, h *hostHeap, m map[string]V, depth int,
 			break
 		}
 		js.sb.writeASCIIBytes(`":`)
-		if ok, err = value(js, h, seg[i].v, depth+1); !ok || err != nil {
+		if ok, err = hostPairValue(js, h, &seg[i].v, depth+1); !ok || err != nil {
 			break
 		}
 	}

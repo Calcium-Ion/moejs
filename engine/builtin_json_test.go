@@ -328,6 +328,44 @@ func TestJSONStringifyIndentAndReplacer(t *testing.T) {
 	assert.Equal(t, IntValue(1), rv)
 }
 
+// TestJSONStringifyStackLevels: the stringifier's stack keeps its first
+// levels in an array of its own and the rest in a slice; a cycle closing on
+// an ancestor at either side of that boundary and of jsonScanDepth (past
+// which the deep set finds it) is found as it closes, a shared object that
+// closes none is not a cycle, and the indentation follows the depth on both
+// sides.
+func TestJSONStringifyStackLevels(t *testing.T) {
+	f := evalModule(t, `
+export function chain(n, k, shared) {
+	const all = [];
+	let cur = {};
+	const root = cur;
+	all.push(cur);
+	for (let i = 1; i < n; i++) { const next = {}; cur.c = next; cur = next; all.push(cur); }
+	let gets = 0;
+	if (k >= 0) Object.defineProperty(cur, "back", { get() { gets++; return all[k]; }, enumerable: true });
+	if (shared) { const leaf = {v: 1}; cur.a = leaf; cur.b = [leaf, leaf]; }
+	try { return String(JSON.stringify(root).length); } catch (e) { return e.name + "," + gets; }
+}
+export function indent(n) {
+	let v = 0;
+	for (let i = 0; i < n; i++) v = [v];
+	const line = JSON.stringify(v, null, 1).split("\n")[n];
+	return line.length - line.trimStart().length;
+}`)
+	for _, n := range []int{1, 15, 16, 17, 18, jsonScanDepth - 1, jsonScanDepth, jsonScanDepth + 1, jsonScanDepth + 40} {
+		for _, k := range []int{0, 14, 15, 16, 17, jsonScanDepth - 1, jsonScanDepth, n - 1} {
+			if k >= n {
+				continue
+			}
+			assert.Equal(t, "TypeError,1", f.call("chain", n, k, false), "a cycle from level %d to %d, found when it closes", n-1, k)
+		}
+		ok := f.call("chain", n, -1, true)
+		assert.NotContains(t, ok, "Error", "%d levels and a shared leaf", n)
+		assert.Equal(t, int64(n), f.call("indent", n), "indentation at %d levels", n)
+	}
+}
+
 func TestJSONStringifyToJSONAndErrors(t *testing.T) {
 	r := NewRealm()
 	o := r.NewObject()

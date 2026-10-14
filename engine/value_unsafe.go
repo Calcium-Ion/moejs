@@ -129,6 +129,21 @@ func privateValue(p *PrivateName) Value { return Value{ptr: unsafe.Pointer(p), b
 // importRef boxes a reference to an exported binding's slot (internal).
 func importRef(slot *Value) Value { return Value{ptr: unsafe.Pointer(slot), bits: tagImport} }
 
+// setScalar stores x, a value that holds no pointer (a number, a boolean,
+// undefined, null or the hole), into *v. Over a value that holds no pointer
+// either it writes only the bits: a store of the pointer word, nil included,
+// costs a write barrier whenever the collector is marking. It suits a
+// destination that holds a number already, as the arithmetic and bitwise
+// operators' results mostly do; where the old value is as often a pointer
+// (a register a constant is loaded into, a test's result) its branch
+// mispredicts, which costs more than the barrier it saves.
+func (v *Value) setScalar(x Value) {
+	if v.ptr != nil {
+		v.ptr = nil
+	}
+	v.bits = x.bits
+}
+
 // IsNumber reports whether v is a JavaScript number.
 func (v Value) IsNumber() bool { return v.ptr == nil && v.bits&reservedMask != reservedPrefix }
 
