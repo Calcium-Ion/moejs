@@ -177,6 +177,9 @@ func (r *Realm) callSite(i int) (callee, recv *Object, flags uint32, ok bool) {
 		return nil, nil, 0, false
 	}
 	this := st.stack[a+1]
+	if op == bytecode.Call && w>>24 == bytecode.CallUndefThis {
+		this = Undefined()
+	}
 	if op == bytecode.Call && r.isCallOrApply(callee, fd) {
 		// f.call(t, ...) and f.apply(t, args) enter f with this t, and V8
 		// shows no frame of their own.

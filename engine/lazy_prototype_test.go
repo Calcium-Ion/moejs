@@ -69,6 +69,7 @@ func TestLazyFunctionPrototype(t *testing.T) {
 // TestLazyFunctionPrototypeAllocation checks that creating a function
 // expression no longer allocates its prototype object.
 func TestLazyFunctionPrototypeAllocation(t *testing.T) {
+	skipInRegcheck(t)
 	allocs, _, _ := callAllocs(t, `export function f() { return function inner() {}; }`)
 	assert.Equal(t, 1.0, allocs, "the function object only")
 }

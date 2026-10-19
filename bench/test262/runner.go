@@ -340,8 +340,9 @@ func (s *Suite) execute(path string, md mode, m *Meta, src string) (Status, stri
 	case module:
 		_, err = r.EvaluateModule(code)
 	default:
-		r.SetHostDefined(code, path)
-		_, err = r.RunScript(code)
+		if err = r.SetHostDefined(code, path); err == nil {
+			_, err = r.RunScript(code)
+		}
 	}
 	switch {
 	case err == nil && neg == nil && async:

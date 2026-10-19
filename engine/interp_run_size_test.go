@@ -30,8 +30,12 @@ func TestRunIsNotBig(t *testing.T) {
 	if err != nil {
 		t.Skip("no go command on PATH")
 	}
-	out, err := exec.Command(gocmd, "build", "-gcflags=-m=2", ".").CombinedOutput()
-	require.NoError(t, err, "go build -gcflags=-m=2:\n%s", out)
+	// The fast run, whatever tags GOFLAGS sets: the checked build's copy
+	// (-tags moejsregcheck, interp_run_regcheck.go) is big, and is not the
+	// run this test is about. A -tags on the command line overrides
+	// GOFLAGS'.
+	out, err := exec.Command(gocmd, "build", "-tags=", "-gcflags=-m=2", ".").CombinedOutput()
+	require.NoError(t, err, "go build -tags= -gcflags=-m=2:\n%s", out)
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "interp_run.go", nil, 0)

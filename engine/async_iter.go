@@ -219,14 +219,24 @@ func (r *Realm) newAsyncFromSyncIterator(it, next Value) Value {
 }
 
 // asyncFromSyncThis returns the record of the async-from-sync iterator
-// this (the methods are unreachable from programs).
-func asyncFromSyncThis(this Value) *asyncFromSyncIter {
-	return this.AsObject().internal.(*asyncFromSyncIter)
+// this. The methods are unreachable from programs the compiler made, but
+// bytecode that hands the iterator (an AsyncIterInit's record) to a
+// program can call them on another this, which is an internal error.
+func (r *Realm) asyncFromSyncThis(this Value) (*asyncFromSyncIter, error) {
+	if this.IsObject() {
+		if s, ok := this.AsObject().internal.(*asyncFromSyncIter); ok {
+			return s, nil
+		}
+	}
+	return nil, r.TypeError("internal: an async-from-sync iterator method called on another object")
 }
 
 // asyncFromSyncNext implements %AsyncFromSyncIteratorPrototype%.next(value).
 func asyncFromSyncNext(r *Realm, this Value, args []Value) (Value, error) {
-	s := asyncFromSyncThis(this)
+	s, err := r.asyncFromSyncThis(this)
+	if err != nil {
+		return Undefined(), err
+	}
 	p := r.newPromise()
 	res, err := r.Call(s.next, s.it, args[:min(len(args), 1)])
 	if err == nil && !res.IsObject() {
@@ -240,7 +250,10 @@ func asyncFromSyncNext(r *Realm, this Value, args []Value) (Value, error) {
 
 // asyncFromSyncReturn implements %AsyncFromSyncIteratorPrototype%.return(value).
 func asyncFromSyncReturn(r *Realm, this Value, args []Value) (Value, error) {
-	s := asyncFromSyncThis(this)
+	s, err := r.asyncFromSyncThis(this)
+	if err != nil {
+		return Undefined(), err
+	}
 	p := r.newPromise()
 	m, err := r.GetMethod(s.it, returnKey)
 	if err != nil {
@@ -261,7 +274,10 @@ func asyncFromSyncReturn(r *Realm, this Value, args []Value) (Value, error) {
 
 // asyncFromSyncThrow implements %AsyncFromSyncIteratorPrototype%.throw(value).
 func asyncFromSyncThrow(r *Realm, this Value, args []Value) (Value, error) {
-	s := asyncFromSyncThis(this)
+	s, err := r.asyncFromSyncThis(this)
+	if err != nil {
+		return Undefined(), err
+	}
 	p := r.newPromise()
 	m, err := r.GetMethod(s.it, throwKey)
 	if err != nil {

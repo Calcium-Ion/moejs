@@ -542,10 +542,13 @@ func appendWTF8Units(u []uint16, s string) []uint16 {
 }
 
 // key parses an object key into a PropertyKey without allocating for
-// plain ASCII names that are already interned.
-func (p *jsonParser) key() (PropertyKey, error) {
+// plain ASCII names that are already interned. s is the shape of the
+// object's keys before it, or nil: a plain ASCII name that s has a child for
+// (Shape.childNamed) comes back with that child, whose key is the name's
+// atom, without an intern lookup.
+func (p *jsonParser) key(s *Shape) (PropertyKey, *Shape, error) {
 	if p.pos >= len(p.src) || p.src[p.pos] != '"' {
-		return PropertyKey{}, p.unexpected()
+		return PropertyKey{}, nil, p.unexpected()
 	}
 	start := p.pos + 1
 	i := start
@@ -554,18 +557,23 @@ func (p *jsonParser) key() (PropertyKey, error) {
 		c := src[i]
 		if c == '"' {
 			p.pos = i + 1
-			return p.r.KeyFromGoString(src[start:i]), nil
+			if s != nil {
+				if child := s.childNamed(src[start:i]); child != nil {
+					return child.key, child, nil
+				}
+			}
+			return p.r.KeyFromGoString(src[start:i]), nil, nil
 		}
 		if c == '\\' || c < 0x20 || c >= 0x80 {
 			break
 		}
 		i++
 	}
-	s, err := p.str()
+	name, err := p.str()
 	if err != nil {
-		return PropertyKey{}, err
+		return PropertyKey{}, nil, err
 	}
-	return p.r.KeyFromString(s), nil
+	return p.r.KeyFromString(name), nil, nil
 }
 
 // jsonKeyScanLimit is the object size above which JSON.parse indexes keys
@@ -593,13 +601,28 @@ func (p *jsonParser) object() (Value, error) {
 		return ObjectValue(r.NewObject()), nil
 	}
 	base, kbase := len(p.stack), len(p.keys)
+	// shape is the shape of the object's first n keys: while every key is a
+	// transition the shape tree already has (key, Shape.child), it follows
+	// them, and the object is built from it. Such a key is not among the
+	// earlier ones (a shape's keys are distinct: addProperty does not check
+	// it, but each of its callers looks the key up first, as addProp,
+	// literals through has, host shapes built from map keys and localize's
+	// replay do), so it skips the duplicate check. The first key that is
+	// not one leaves shape where it is, and it and the keys after it take
+	// the duplicate check and get their transitions from buildJSONObject.
+	shape, n := r.plainRoot, 0
 	// Duplicate keys (last wins, first position kept) are found by scanning
 	// the object's keys while it is small and through an index once it has
 	// more than jsonKeyScanLimit, so a wide object stays linear.
 	var index map[PropertyKey]int
+	// The first key is parsed here and the others at the comma before
+	// them: an object's first key is looked up at the root, whose children
+	// are found differently from the others' (Shape.childNamed), and a call
+	// site of its own keeps their outcomes apart for the branch predictor.
+	s := shape
+	p.skipWS()
+	k, child, err := p.key(s)
 	for {
-		p.skipWS()
-		k, err := p.key()
 		if err != nil {
 			return Undefined(), err
 		}
@@ -613,9 +636,14 @@ func (p *jsonParser) object() (Value, error) {
 		if err != nil {
 			return Undefined(), err
 		}
+		if child == nil && s != nil && !k.IsIndex() {
+			child = s.child(k, attrDefault)
+		}
 		seg := p.keys[kbase:]
 		dup := -1
-		if index != nil {
+		if child != nil {
+			shape, n = child, n+1
+		} else if index != nil {
 			if i, ok := index[k]; ok {
 				dup = i
 			}
@@ -648,6 +676,12 @@ func (p *jsonParser) object() (Value, error) {
 		}
 		if c := p.src[p.pos]; c == ',' {
 			p.pos++
+			p.skipWS()
+			s = nil
+			if n == len(p.keys)-kbase && n < maxShapeProps {
+				s = shape
+			}
+			k, child, err = p.key(s)
 			continue
 		} else if c == '}' {
 			p.pos++
@@ -656,7 +690,7 @@ func (p *jsonParser) object() (Value, error) {
 		return Undefined(), p.unexpected()
 	}
 	keys, vals := p.keys[kbase:], p.stack[base:]
-	o := r.buildJSONObject(keys, vals)
+	o := r.buildJSONObject(keys, vals, shape, n)
 	p.closed()
 	p.stack = p.stack[:base]
 	p.keys = p.keys[:kbase]
@@ -665,10 +699,11 @@ func (p *jsonParser) object() (Value, error) {
 }
 
 // buildJSONObject creates an object with the given own properties in order,
-// walking the realm's shape tree so equal key sequences share a Shape.
-func (r *Realm) buildJSONObject(keys []PropertyKey, vals []Value) *Object {
+// walking the realm's shape tree so equal key sequences share a Shape. shape
+// is the shape of keys[:n], which are strings: r.plainRoot for n == 0.
+func (r *Realm) buildJSONObject(keys []PropertyKey, vals []Value, shape *Shape, n int) *Object {
 	hasIndex := false
-	for _, k := range keys {
+	for _, k := range keys[n:] {
 		if k.IsIndex() {
 			hasIndex = true
 			break
@@ -681,8 +716,7 @@ func (r *Realm) buildJSONObject(keys []PropertyKey, vals []Value) *Object {
 		}
 		return o
 	}
-	shape := r.plainRoot
-	for _, k := range keys {
+	for _, k := range keys[n:] {
 		shape = shape.addProperty(r, k, attrDefault)
 	}
 	var o *Object

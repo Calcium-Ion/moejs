@@ -170,6 +170,8 @@ type transition struct {
 // a slice scanned like transSmall while small, a map beyond; data counts the
 // children whose key is not code-bound. table is the lookup table of a shape
 // published without one, built on its first lookup (Shape.lookupTable).
+// names indexes the map's children by name (childNamed), built with the
+// map (publish).
 //
 // For a shape of a realm's own tree it holds instead the children past
 // shapeStrongTransitions (weak), swept of the collected ones once they reach
@@ -177,10 +179,63 @@ type transition struct {
 type sharedTransitions struct {
 	small []transition
 	m     map[transitionKey]*Shape
-	data  int
 	table map[PropertyKey]uint32
+	names *nameTable
 	weak  map[transitionKey]weak.Pointer[Shape]
-	sweep int
+	// data and sweep are int32 so the snapshot stays 64 bytes: publish
+	// allocates one per child.
+	data  int32
+	sweep int32
+}
+
+// nameTable indexes the children of a shared shape whose snapshot keeps
+// them in a map by name (childNamed): open addressing over the children
+// with an ASCII string key and attrDefault, at their atoms' hash
+// (String.Hash). Readers probe it without a lock. publish builds it when
+// the snapshot's children move from the slice to a map, adds each later
+// child in place, under sharedTransMu, and replaces it past half full
+// with one a quarter full, so the tables of a shape add up to less than
+// twice its last one. Built at publish time, the tables of the shapes
+// that the templates and a host's plugins publish exist before the host's
+// first request parses a key (built at that parse instead, the root's
+// cost an SSE request of new-api 5 KiB the first time; rebuilt at each
+// publish, the warm-up of a host 4 KiB per new first key).
+type nameTable struct {
+	slots []atomic.Pointer[Shape]
+	n     int // children indexed; guarded by sharedTransMu
+}
+
+// newNameTable indexes the eligible children of m in a table at most a
+// quarter full.
+func newNameTable(m map[transitionKey]*Shape) *nameTable {
+	size := 16
+	for size < 4*len(m) {
+		size *= 2
+	}
+	t := &nameTable{slots: make([]atomic.Pointer[Shape], size)}
+	for _, c := range m {
+		t.put(c)
+	}
+	return t
+}
+
+// put adds the child c (sharedTransMu held, room left) unless its key has
+// no ASCII name or its attributes are not attrDefault.
+func (t *nameTable) put(c *Shape) {
+	if c.attrs != attrDefault || !c.key.IsString() {
+		return
+	}
+	a := c.key.String()
+	if a.kind != strASCII || a.hash == 0 {
+		return
+	}
+	mask := uint32(len(t.slots) - 1)
+	i := a.hash & mask
+	for t.slots[i].Load() != nil {
+		i = (i + 1) & mask
+	}
+	t.slots[i].Store(c)
+	t.n++
 }
 
 func (t *sharedTransitions) lookup(key PropertyKey, attrs uint8) *Shape {
@@ -323,6 +378,87 @@ func (s *Shape) transition(key PropertyKey, attrs uint8) *Shape {
 	return nil
 }
 
+// child returns the child of s for key/attrs that addProperty would return
+// without creating one, or nil.
+func (s *Shape) child(key PropertyKey, attrs uint8) *Shape {
+	if s.shared {
+		if t := s.sharedTrans.Load(); t != nil {
+			return t.lookup(key, attrs)
+		}
+		return nil
+	}
+	if c := s.transition(key, attrs); c != nil {
+		return c
+	}
+	return s.weakTransition(key, attrs)
+}
+
+// childNamed returns the child of s for the ASCII name with attrDefault,
+// comparing the name with the keys' content, so the caller needs no atom
+// (JSON.parse's keys). A shared shape's children are scanned while its
+// snapshot keeps them in a slice and found through names past it; a local
+// shape's are scanned while in transSmall. For a local shape whose children
+// are in a map it returns nil, and the caller interns the name and asks
+// child.
+func (s *Shape) childNamed(name string) *Shape {
+	var ts []transition
+	if !s.shared {
+		ts = s.transSmall
+	} else if t := s.sharedTrans.Load(); t != nil {
+		if t.m != nil {
+			return s.namedChild(t, name)
+		}
+		ts = t.small
+	}
+	for i := range ts {
+		t := &ts[i]
+		if t.attrs == attrDefault && t.key.IsString() {
+			if a := t.key.String(); a.kind == strASCII && a.s == name {
+				return t.shape
+			}
+		}
+	}
+	return nil
+}
+
+// namedChild is childNamed for a shared shape whose snapshot t keeps its
+// children in a map.
+func (s *Shape) namedChild(t *sharedTransitions, name string) *Shape {
+	names := t.names
+	if names == nil {
+		names = s.nameIndex()
+	}
+	h := hashASCII(name)
+	slots := names.slots
+	mask := uint32(len(slots) - 1)
+	for i := h & mask; ; i = (i + 1) & mask {
+		c := slots[i].Load()
+		if c == nil {
+			return nil
+		}
+		if a := c.key.String(); a.hash == h && a.s == name {
+			return c
+		}
+	}
+}
+
+// nameIndex returns the names index of the shared shape s, whose snapshot
+// keeps its children in a map, building it if a snapshot lacks one (as
+// with lookupTable, the index joins the snapshot under sharedTransMu);
+// publish builds it with the map.
+func (s *Shape) nameIndex() *nameTable {
+	sharedTransMu.Lock()
+	defer sharedTransMu.Unlock()
+	old := s.sharedTrans.Load()
+	if old.names != nil {
+		return old.names
+	}
+	next := *old
+	next.names = newNameTable(old.m)
+	s.sharedTrans.Store(&next)
+	return next.names
+}
+
 // addProperty returns the child shape with key appended, creating and caching
 // the transition on first use. A shared shape is never written: its child
 // comes from the process-wide tree (publish) or, past its bounds, from r's
@@ -454,6 +590,11 @@ func (s *Shape) publish(key PropertyKey, attrs uint8) *Shape {
 		maps.Copy(m, next.m)
 		m[transitionKey{key, attrs}] = child
 		next.m = m
+		if t := next.names; t == nil || 2*(t.n+1) > len(t.slots) {
+			next.names = newNameTable(m)
+		} else {
+			t.put(child)
+		}
 	case n < sharedSmallTransitions:
 		next.small = append(next.small[:n:n], transition{key, attrs, child})
 	default:
@@ -463,6 +604,7 @@ func (s *Shape) publish(key PropertyKey, attrs uint8) *Shape {
 		}
 		m[transitionKey{key, attrs}] = child
 		next.small, next.m = nil, m
+		next.names = newNameTable(m)
 	}
 	s.sharedTrans.Store(&next)
 	sharedShapeCount++
@@ -571,7 +713,7 @@ func (s *Shape) addWeakChild(key PropertyKey, attrs uint8, child *Shape) {
 		t = &sharedTransitions{sweep: shapeWeakSweep}
 		s.sharedTrans.Store(t)
 	}
-	if len(t.weak) >= t.sweep {
+	if len(t.weak) >= int(t.sweep) {
 		t.sweepWeak()
 	} else if t.weak == nil {
 		t.weak = make(map[transitionKey]weak.Pointer[Shape])
@@ -599,7 +741,7 @@ func (t *sharedTransitions) sweepWeak() {
 			m[k] = p
 		}
 	}
-	t.weak, t.sweep = m, 2*live+shapeWeakSweep
+	t.weak, t.sweep = m, int32(2*live+shapeWeakSweep)
 }
 
 // weakTransition returns the weakly held child of s for key/attrs if it is

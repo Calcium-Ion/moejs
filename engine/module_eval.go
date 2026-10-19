@@ -171,10 +171,25 @@ func (r *Realm) GraphRan(g *ModuleGraph) bool {
 func (r *Realm) instantiateGraph(g *ModuleGraph) (*moduleInstance, error) {
 	mm := r.modules()
 	insts := make([]*moduleInstance, len(g.records))
+	// The trees of the templates the graph instantiates (metaFor), all
+	// verified before anything changes; a small graph keeps them on the
+	// stack.
+	var buf [8]*funcMeta
+	metas := buf[:]
+	if len(g.records) > len(buf) {
+		metas = make([]*funcMeta, len(g.records))
+	}
 	for i := range g.records {
-		m := mm.instances[g.records[i].key]
-		if m == nil && g.records[i].code.Module.BodyPC >= 1<<genDepthShift {
+		rec := &g.records[i]
+		m := mm.instances[rec.key]
+		if m == nil && rec.code.Module.BodyPC >= 1<<genDepthShift {
 			return nil, errors.New("engine: module prologue too large")
+		}
+		if m == nil || m.code != rec.code {
+			var err error
+			if metas[i], err = r.metaFor(rec.code); err != nil {
+				return nil, err
+			}
 		}
 		insts[i] = m
 	}
@@ -194,7 +209,7 @@ func (r *Realm) instantiateGraph(g *ModuleGraph) (*moduleInstance, error) {
 		m := insts[i]
 		switch {
 		case m == nil:
-			fn, env := r.instantiateTopLevel(rec.code)
+			fn, env := r.instantiateTopLevel(rec.code, metas[i])
 			m = &moduleInstance{code: rec.code, fn: fn, env: env, ns: Undefined()}
 			mm.instances[rec.key] = m
 			fresh = append(fresh, i)
@@ -210,10 +225,10 @@ func (r *Realm) instantiateGraph(g *ModuleGraph) (*moduleInstance, error) {
 			// functions: the earlier graph could not call them early.
 			if rec.key.ScriptOrModule {
 				delete(mm.refs, m.fn.internal.(*FunctionData).meta)
-				mm.setScriptOrModule(r.metaFor(rec.code), rec.host)
+				mm.setScriptOrModule(metas[i], rec.host)
 			}
 			m.code = rec.code
-			m.fn, _ = r.newClosure(rec.code, r.metaFor(rec.code), m.env, Undefined())
+			m.fn, _ = r.newClosure(rec.code, metas[i], m.env, Undefined())
 			u := Undefined()
 			for j := range m.env.slots {
 				m.env.slots[j] = u
@@ -333,9 +348,9 @@ func (r *Realm) runModulePrologue(m *moduleInstance) error {
 			o, _ := r.newClosure(code.Children[w>>16], fd.meta.children[w>>16], env, Undefined())
 			regs[a] = ObjectValue(o)
 		case bytecode.AsyncFunc:
-			r.makeAsyncFunction(regs[a].AsObject())
+			err = r.asyncFunc(regs[a], w)
 		case bytecode.GenFunc:
-			r.makeGeneratorFunction(regs[a].AsObject())
+			err = r.genFunc(regs[a], w)
 		default:
 			err = errPrologue
 		}
@@ -356,17 +371,28 @@ func (r *Realm) runModuleBody(m *moduleInstance) (Value, error) {
 	r.callDepth++
 	res, err := r.enterModuleFrame(m.fn)
 	r.callDepth--
-	if err == nil {
+	switch {
+	case err != nil:
+	case !m.code.Async:
 		m.ran = true
-		if m.code.Async {
-			state, _, _ := res.AsObject().PromiseResult()
-			m.ran = state != PromiseRejected
-		}
+	case isPromise(res):
+		state, _, _ := res.AsObject().PromiseResult()
+		m.ran = state != PromiseRejected
+	default:
+		res, err = Undefined(), r.noBodyPromise()
 	}
 	if r.callDepth == 0 && r.jobsPending {
 		err = r.endJob(err)
 	}
 	return res, err
+}
+
+// noBodyPromise is the internal TypeError of a module with top-level
+// await whose body returned no promise: bytecode no compiler made (the
+// compiler starts the body with AsyncStart, whose promise the call
+// returns), which a Go caller would otherwise read as one.
+func (r *Realm) noBodyPromise() error {
+	return r.TypeError("internal: an async module body returned no promise")
 }
 
 // enterModuleFrame is enterFrame for a module body, which starts at

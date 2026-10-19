@@ -43,14 +43,22 @@ func (r *Realm) coldOp(fd *FunctionData, base int, env *Env, w uint32, pc int) (
 		env.up(uint8(b)).slots[insns[pc]] = regs[a]
 		return pc + 1, nil
 	case bytecode.GetImport:
-		v := *env.up(uint8(b)).slots[c].importTarget()
+		ref := env.up(uint8(b)).slots[c]
+		if !ref.isImportRef() {
+			return pc + 1, r.wrongKind(w, "an import binding")
+		}
+		v := *ref.importTarget()
 		if v.IsHole() {
 			return pc + 1, r.tdzError(meta, insns[pc])
 		}
 		regs[a] = v
 		return pc + 1, nil
 	case bytecode.GetImportW:
-		v := *env.up(uint8(b)).slots[insns[pc]].importTarget()
+		ref := env.up(uint8(b)).slots[insns[pc]]
+		if !ref.isImportRef() {
+			return pc + 2, r.wrongKind(w, "an import binding")
+		}
+		v := *ref.importTarget()
 		if v.IsHole() {
 			return pc + 2, r.tdzError(meta, insns[pc+1])
 		}
@@ -98,36 +106,72 @@ func (r *Realm) coldOp(fd *FunctionData, base int, env *Env, w uint32, pc int) (
 		return pc + 1, nil
 
 	// --- literals ---
+	// The object a literal builds is in R[A]; the compiler puts it there.
 	case bytecode.DefineElem:
-		return pc, r.defineElemSlow(regs[a].AsObject(), regs[b], regs[c])
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		return pc, r.defineElemSlow(o, regs[b], regs[c])
 	case bytecode.DefineMethod:
-		return pc, r.defineMethodSlow(regs[a].AsObject(), regs[b], regs[c])
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		if _, _, err := r.closureArg(regs[c], w); err != nil {
+			return pc, err
+		}
+		return pc, r.defineMethodSlow(o, regs[b], regs[c])
 	case bytecode.DefineAccessor:
-		return pc + 1, r.defineAccessor(regs[a].AsObject(), regs[b], regs[c].AsObject(), insns[pc])
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc + 1, err
+		}
+		fn, _, err := r.closureArg(regs[c], w)
+		if err != nil {
+			return pc + 1, err
+		}
+		return pc + 1, r.defineAccessor(o, regs[b], fn, insns[pc])
 	case bytecode.SetProto:
-		o := regs[a].AsObject()
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
 		if v := regs[b]; v.IsObject() {
 			o.SetPrototypeOf(r, v.AsObject())
 		} else if v.IsNull() {
 			o.SetPrototypeOf(r, nil)
 		}
 		return pc, nil
-	case bytecode.CopyDataProps:
-		return pc, r.copyDataProps(regs[a].AsObject(), regs[b], Undefined())
-	case bytecode.CopyDataPropsEx:
-		return pc, r.copyDataProps(regs[a].AsObject(), regs[b], regs[c])
+	case bytecode.CopyDataProps, bytecode.CopyDataPropsEx:
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		excluded := Undefined()
+		if bytecode.Op(w) == bytecode.CopyDataPropsEx {
+			excluded = regs[c]
+		}
+		return pc, r.copyDataProps(o, regs[b], excluded)
 	case bytecode.ArrayHole:
-		arr := regs[a].AsObject()
+		arr, err := r.arrayArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
 		arr.elements = r.growWithHoles(arr.elements, len(arr.elements)+1)
 		arr.internal.(*ArrayData).length = uint32(len(arr.elements))
 		return pc, nil
 	case bytecode.AppendSpread:
-		return pc, r.appendSpread(regs[a].AsObject(), regs[b])
+		arr, err := r.arrayArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		return pc, r.appendSpread(arr, regs[b])
 	case bytecode.NewRegExp:
 		// RegExpCreate with %RegExp.prototype% (the constructor's
 		// prototype property is immutable, so this equals constructing
 		// through %RegExp%).
-		bx := w >> 16
+		bx := w >> 16 // a ConstRegExp (bytecode.VerifyRegisters)
 		rx, err := r.NewRegExp(meta.consts[bx].AsString(), meta.names[bx])
 		if err == nil {
 			st.stack[base+a] = ObjectValue(rx)
@@ -164,6 +208,16 @@ func (r *Realm) coldOp(fd *FunctionData, base int, env *Env, w uint32, pc int) (
 			return pc, r.TypeError("Cannot destructure '%s' as it is %s.", v.String(), v.String())
 		}
 		return pc, nil
+	case bytecode.ToObject:
+		// The with statement's object, and the `this` of a class's member
+		// initializers, once per object constructed (compiler
+		// loadThisObject): here rather than among the sloppy ops, four
+		// calls further.
+		o, err := r.ToObject(regs[b])
+		if err == nil {
+			regs[a] = ObjectValue(o)
+		}
+		return pc, err
 
 	// --- iteration ---
 	case bytecode.ForInInit:
@@ -177,4 +231,66 @@ func (r *Realm) coldOp(fd *FunctionData, base int, env *Env, w uint32, pc int) (
 		return pc, err
 	}
 	return r.classOp(fd, base, w, pc) // class ops (class.go)
+}
+
+// wrongKind is the error of the instruction w when an operand it takes from
+// the compiler as want (an object, an array, a function, a generator, a
+// private name, an import binding) holds another kind of value: bytecode no
+// compiler made, or a compiler bug. The payload accessors read a value as
+// the kind they name without looking (value_as.go), so each op that trusts
+// the compiler for a kind checks it first and fails with this, a TypeError
+// as the engine's other internal errors are ("internal: unknown opcode"),
+// rather than read one kind of value as another. Three sites in run do not
+// (DefineField's instance, ArrayPush's literal, ForInNext's record): a
+// check there costs run's own code generation, and the bytecode verifier
+// proves those kinds instead (bytecode.KindOperands). The checked build's
+// accessors check every read (value_as_regcheck.go).
+//
+//go:noinline
+func (r *Realm) wrongKind(w uint32, want string) error {
+	return r.TypeError("internal: %s expects %s", bytecode.Op(w), want)
+}
+
+// objectArg returns the object in v, an operand of w the compiler makes an
+// object, or wrongKind.
+func (r *Realm) objectArg(v Value, w uint32) (*Object, error) {
+	if v.IsObject() {
+		return v.AsObject(), nil
+	}
+	return nil, r.wrongKind(w, "an object")
+}
+
+// arrayArg is objectArg for an array literal: an array of the realm's own,
+// whose elements the op writes directly (a shared intrinsic is frozen and
+// every realm's).
+func (r *Realm) arrayArg(v Value, w uint32) (*Object, error) {
+	if v.IsObject() {
+		if o := v.AsObject(); o.class == ClassArray && !o.IsShared() {
+			return o, nil
+		}
+	}
+	return nil, r.wrongKind(w, "an array literal")
+}
+
+// closureArg is objectArg for a closure of bytecode (the function a
+// Closure made), with its FunctionData: the ops that take one write its
+// internals directly (its home object, name, prototype or class), which a
+// native or a shared intrinsic must not get.
+func (r *Realm) closureArg(v Value, w uint32) (*Object, *FunctionData, error) {
+	if v.IsObject() {
+		o := v.AsObject()
+		if fd, ok := o.internal.(*FunctionData); ok && fd.code != nil && !o.IsShared() {
+			return o, fd, nil
+		}
+	}
+	return nil, nil, r.wrongKind(w, "a closure")
+}
+
+// privateArg returns the private name in v, an operand of w the compiler
+// makes one (NewPrivateName), or wrongKind.
+func (r *Realm) privateArg(v Value, w uint32) (*PrivateName, error) {
+	if v.isPrivate() {
+		return v.asPrivate(), nil
+	}
+	return nil, r.wrongKind(w, "a private name")
 }

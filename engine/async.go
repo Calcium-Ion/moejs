@@ -41,7 +41,9 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 	a, b := int(uint8(w>>8)), int(uint8(w>>16))
 	switch bytecode.Op(w) {
 	case bytecode.AsyncFunc:
-		r.makeAsyncFunction(regs[a].AsObject())
+		if err := r.asyncFunc(regs[a], w); err != nil {
+			return pc, err
+		}
 	case bytecode.AsyncStart:
 		af := &asyncFunction{promise: r.newPromise()}
 		r.chargeObject(unsafe.Sizeof(asyncFunction{}))
@@ -67,12 +69,21 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		regs = st.stack[base:top:top]
 		var g *genFrame
 		var x promiseReactor
-		switch s := regs[b].AsObject().internal.(type) {
+		o, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		switch s := o.internal.(type) {
 		case *asyncFunction:
 			g, x = &s.g, s
 			g.out = ObjectValue(s.promise)
 		case *asyncGenerator:
 			g, x = &s.g, s // run returns undefined to the resumer
+		default:
+			return pc, r.wrongKind(w, "an async function or generator")
+		}
+		if !g.runs(fd) {
+			return pc, r.wrongKind(w, "the async function or generator its frame runs")
 		}
 		if g.regs == nil {
 			g.regs = make([]Value, len(regs))
@@ -82,19 +93,35 @@ func (r *Realm) asyncOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		r.promiseReact(p, x)
 		return pc, g.save(regs, pc)
 	case bytecode.AsyncReturn:
-		af := regs[b].AsObject().internal.(*asyncFunction)
-		err := r.resolvePromiseErr(af.promise, regs[a])
+		af, err := r.asyncFunctionArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		err = r.resolvePromiseErr(af.promise, regs[a])
 		regs = st.stack[base:top:top]
 		regs[a] = ObjectValue(af.promise)
 		return pc, err
 	case bytecode.AsyncThrow:
-		af := regs[b].AsObject().internal.(*asyncFunction)
+		af, err := r.asyncFunctionArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
 		r.rejectPromise(af.promise, regs[a])
 		regs = st.stack[base:top:top] // the rejection tracker may have run code
 		regs[a] = ObjectValue(af.promise)
 	case bytecode.AsyncYield:
-		ag := regs[b].AsObject().internal.(*asyncGenerator)
-		err := r.agCompleteStep(ag, regs[a], false, false)
+		o, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		ag, ok := o.internal.(*asyncGenerator)
+		if !ok {
+			return pc, r.wrongKind(w, "an async generator")
+		}
+		if !ag.g.runs(fd) {
+			return pc, r.wrongKind(w, "the async generator its frame runs")
+		}
+		err = r.agCompleteStep(ag, regs[a], false, false)
 		regs = st.stack[base:top:top]
 		if err != nil {
 			return pc, err
@@ -143,6 +170,32 @@ func (r *Realm) resumeAwait(g *genFrame, v Value, rejected bool) (Value, error) 
 	res, err := r.resumeFrame(g, v, mode)
 	r.callDepth--
 	return res, err
+}
+
+// asyncFunctionArg returns the record of the async function in v, an
+// operand of w the compiler makes one (AsyncStart), or wrongKind.
+func (r *Realm) asyncFunctionArg(v Value, w uint32) (*asyncFunction, error) {
+	if v.IsObject() {
+		if af, ok := v.AsObject().internal.(*asyncFunction); ok {
+			return af, nil
+		}
+	}
+	return nil, r.wrongKind(w, "an async function")
+}
+
+// asyncFunc is AsyncFunc, of a function's code or a module's prologue: v
+// is the closure a Closure just made of an async function or async
+// generator function, which it checks (Realm.wrongKind) and completes.
+func (r *Realm) asyncFunc(v Value, w uint32) error {
+	fn, fd, err := r.closureArg(v, w)
+	if err != nil {
+		return err
+	}
+	if !fd.code.Async {
+		return r.wrongKind(w, "an async function")
+	}
+	r.makeAsyncFunction(fn)
+	return nil
 }
 
 // makeAsyncFunction completes the fresh closure o of an async function: its

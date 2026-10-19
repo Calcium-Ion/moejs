@@ -1,5 +1,7 @@
 package bytecode
 
+import "math"
+
 // Op is an opcode. Opcodes are dense so that the interpreter's switch
 // compiles to a jump table. See doc.go for the semantics of every op.
 type Op uint8
@@ -120,7 +122,7 @@ const (
 	JmpNotUndef   // AsBx
 
 	// --- calls ---
-	Call             // AB   R[A] = R[A].call(this = R[A+1], R[A+2 .. A+1+B])
+	Call             // ABC  R[A] = R[A].call(this = R[A+1], R[A+2 .. A+1+B]); C = CallUndefThis: this is undefined
 	CallSpread       // A    R[A] = R[A].call(this = R[A+1], ...R[A+2])
 	New              // AB   R[A] = new R[A](R[A+2 .. A+1+B])
 	NewSpread        // A    R[A] = new R[A](...R[A+2])
@@ -209,7 +211,7 @@ const (
 	DelPropSloppy   // AB+X  R[A] = delete R[B].name, false when rejected; X = name const
 	DelElemSloppy   // ABC   R[A] = delete R[B][R[C]], false when rejected
 	SetSuperSloppy  // ABC   R[A][R[B]] = R[C] with receiver R[A+1], a rejected assignment ignored
-	ToObject        // AB    R[A] = ToObject(R[B]) (the with statement's object)
+	ToObject        // AB    R[A] = ToObject(R[B]) (the with statement's object, DefineField's instance in initializers and eval code)
 	JmpWith         // AsBx+X pc += sBx if the with object R[A] has a binding name (HasProperty, not @@unscopables-blocked); X = name const
 	WithGet         // AB+X  R[A] = binding name of the with object R[B]; X = name:16 | strict<<16
 	WithSet         // AB+X  set binding name of the with object R[A] to R[B]; X = name:16 | strict<<16
@@ -230,6 +232,19 @@ const (
 	JmpNGe      // AsBx+X if !(R[A] >= R[X]) pc += sBx
 	JmpStrictEq // AsBx+X if R[A] === R[X] pc += sBx
 	JmpStrictNe // AsBx+X if R[A] !== R[X] pc += sBx
+
+	// --- compare and branch against an integer: JmpLt .. JmpStrictNe with
+	// the right operand int32(X), in the same order ---
+	JmpLtI       // AsBx+X if R[A] < int32(X) pc += sBx
+	JmpLeI       // AsBx+X if R[A] <= int32(X) pc += sBx
+	JmpGtI       // AsBx+X if R[A] > int32(X) pc += sBx
+	JmpGeI       // AsBx+X if R[A] >= int32(X) pc += sBx
+	JmpNLtI      // AsBx+X if !(R[A] < int32(X)) pc += sBx
+	JmpNLeI      // AsBx+X if !(R[A] <= int32(X)) pc += sBx
+	JmpNGtI      // AsBx+X if !(R[A] > int32(X)) pc += sBx
+	JmpNGeI      // AsBx+X if !(R[A] >= int32(X)) pc += sBx
+	JmpStrictEqI // AsBx+X if R[A] === int32(X) pc += sBx
+	JmpStrictNeI // AsBx+X if R[A] !== int32(X) pc += sBx
 
 	opCount
 )
@@ -453,6 +468,17 @@ var opTable = [...]opInfo{
 	JmpNGe:      {"JmpNGe", FmtAsBx, 1},
 	JmpStrictEq: {"JmpStrictEq", FmtAsBx, 1},
 	JmpStrictNe: {"JmpStrictNe", FmtAsBx, 1},
+
+	JmpLtI:       {"JmpLtI", FmtAsBx, 1},
+	JmpLeI:       {"JmpLeI", FmtAsBx, 1},
+	JmpGtI:       {"JmpGtI", FmtAsBx, 1},
+	JmpGeI:       {"JmpGeI", FmtAsBx, 1},
+	JmpNLtI:      {"JmpNLtI", FmtAsBx, 1},
+	JmpNLeI:      {"JmpNLeI", FmtAsBx, 1},
+	JmpNGtI:      {"JmpNGtI", FmtAsBx, 1},
+	JmpNGeI:      {"JmpNGeI", FmtAsBx, 1},
+	JmpStrictEqI: {"JmpStrictEqI", FmtAsBx, 1},
+	JmpStrictNeI: {"JmpStrictNeI", FmtAsBx, 1},
 }
 
 // CompareJump returns the op that jumps when the comparison op (Lt, Le, Gt,
@@ -474,6 +500,18 @@ func CompareJump(op Op, jumpIf bool) (Op, bool) {
 	return 0, false
 }
 
+// Immediate returns the form of the compare-and-branch op (JmpLt ..
+// JmpStrictNe) whose right operand is the integer in the X word instead of
+// a register.
+func (op Op) Immediate() Op { return op - JmpLt + JmpLtI }
+
+// ImmediateOperand reports whether n can be the X word of an immediate
+// compare-and-branch op: an int32 other than -0.
+func ImmediateOperand(n float64) (int32, bool) {
+	i := int32(n)
+	return i, float64(i) == n && !(n == 0 && math.Signbit(n))
+}
+
 // String returns the mnemonic.
 func (op Op) String() string {
 	if int(op) < len(opTable) && opTable[op].name != "" {
@@ -487,6 +525,34 @@ func (op Op) Format() Format { return opTable[op].fmt }
 
 // ExtraWords returns how many ExtraArg words follow an instruction of op.
 func (op Op) ExtraWords() int { return int(opTable[op].extra) }
+
+// Jumps reports whether an instruction of op may continue at the pc its
+// sBx operand names (JumpTarget) instead of the next instruction: Jmp, the
+// conditional and compare-and-branch jumps, and the iteration and with ops
+// that branch (IterNext, IterClose, ForInNext, AsyncIterResult,
+// AsyncIterClose, JmpWith). LoadInt's sBx is a value.
+func (op Op) Jumps() bool {
+	f := op.Format()
+	return f == FmtSBx || f == FmtAsBx && op != LoadInt
+}
+
+// JumpTarget returns the pc that the jump w at pc names: its sBx counts
+// from the word after the instruction's first, the X word of a
+// compare-and-branch or JmpWith included.
+func JumpTarget(pc int, w uint32) int { return pc + 1 + int(DecodeSBx(w)) }
+
+// SavesPC reports whether the engine may run a frame again from the
+// instruction after one of op: a suspension saves that pc to resume at
+// (GenStart, Yield, AsyncGenStart, Await, AsyncYield), and CoerceThis,
+// MapArguments and CallEval may rerun the frame from it. The engine stores
+// it with the frame's environment depth above PCBits.
+func (op Op) SavesPC() bool {
+	switch op {
+	case GenStart, Yield, AsyncGenStart, Await, AsyncYield, CoerceThis, MapArguments, CallEval:
+		return true
+	}
+	return false
+}
 
 // TypeName indices used by TypeofIs (operand C).
 const (
@@ -528,6 +594,11 @@ const (
 	PrivateSetter                    // the function is the setter of an accessor
 	PrivateStatic                    // checked against the class constructor instead of a brand
 )
+
+// CallUndefThis is the Call operand C of a call whose this is undefined (a
+// plain call f(x)): the callee gets undefined and R[A+1] is not read, so no
+// LoadUndef fills it.
+const CallUndefThis = 1
 
 // ThrowError kinds (operand A).
 const (

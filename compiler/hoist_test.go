@@ -13,22 +13,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// loopLoads counts the constant loads (LoadConst, LoadInt) inside fn's
-// outermost loop, from the target of its last back edge to that edge, and
-// before it.
-func loopLoads(t *testing.T, fn *bytecode.Function) (inside, before int) {
-	t.Helper()
-	start, end := -1, -1
+// outerBackEdge returns the target and the pc of fn's backward jump that
+// reaches furthest back, the back edge of its outermost loop: a Jmp or the
+// conditional jump of a loop's condition (rotated loops), or -1, -1.
+func outerBackEdge(fn *bytecode.Function) (start, end int) {
+	start, end = -1, -1
 	for pc := 0; pc < len(fn.Code); {
 		w := fn.Code[pc]
 		op := bytecode.DecodeOp(w)
-		if op == bytecode.Jmp {
+		if f := op.Format(); f == bytecode.FmtSBx || f == bytecode.FmtAsBx && op != bytecode.LoadInt {
 			if off := int(bytecode.DecodeSBx(w)); off < 0 && (start < 0 || pc+1+off < start) {
 				start, end = pc+1+off, pc
 			}
 		}
 		pc += 1 + op.ExtraWords()
 	}
+	return start, end
+}
+
+// loopLoads counts the constant loads (LoadConst, LoadInt) inside fn's
+// outermost loop, from the target of its last back edge to that edge, and
+// before it.
+func loopLoads(t *testing.T, fn *bytecode.Function) (inside, before int) {
+	t.Helper()
+	start, end := outerBackEdge(fn)
 	require.GreaterOrEqual(t, start, 0, "no loop")
 	for pc := 0; pc < len(fn.Code); {
 		op := bytecode.DecodeOp(fn.Code[pc])
@@ -329,23 +337,19 @@ func checkHoistedOnlyRead(t *testing.T, src string, fn *bytecode.Function, sf *s
 	sc.loop(outerLoop(sf))
 	keep := sc.keep()
 	require.NotEmpty(t, keep, "%s: nothing hoisted\n%s", src, d)
-	start, end := -1, -1
-	for pc := 0; pc < len(fn.Code); {
-		w := fn.Code[pc]
-		op := bytecode.DecodeOp(w)
-		if op == bytecode.Jmp {
-			if off := int(bytecode.DecodeSBx(w)); off < 0 && (start < 0 || pc+1+off < start) {
-				start, end = pc+1+off, pc
-			}
-		}
-		pc += 1 + op.ExtraWords()
+	start, end := outerBackEdge(fn)
+	// The loads come before the loop, and before the Jmp that enters a
+	// for or while loop at its condition.
+	first := start
+	if w := fn.Code[max(start-1, 0)]; start > 0 && bytecode.DecodeOp(w) == bytecode.Jmp && bytecode.DecodeSBx(w) > 0 {
+		first--
 	}
-	require.GreaterOrEqual(t, start, len(keep), d)
+	require.GreaterOrEqual(t, first, len(keep), d)
 	hoisted := map[int]bool{}
 	for i := range keep {
-		w := fn.Code[start-len(keep)+i]
+		w := fn.Code[first-len(keep)+i]
 		op := bytecode.DecodeOp(w)
-		require.True(t, op == bytecode.LoadConst || op == bytecode.LoadInt, "%s: pc %d is %s, not a hoisted load\n%s", src, start-len(keep)+i, op, d)
+		require.True(t, op == bytecode.LoadConst || op == bytecode.LoadInt, "%s: pc %d is %s, not a hoisted load\n%s", src, first-len(keep)+i, op, d)
 		hoisted[int(bytecode.DecodeA(w))] = true
 	}
 	for pc := start; pc <= end; {

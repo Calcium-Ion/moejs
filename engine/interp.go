@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"unicode/utf8"
@@ -67,35 +68,56 @@ type funcMeta struct {
 var funcMetas sync.Map // weak.Pointer[bytecode.Function] -> *funcMeta
 
 // metaFor returns the materialized tree for root, building it on first use.
-func (r *Realm) metaFor(root *bytecode.Function) *funcMeta {
+// A tree with a function that fails bytecode.VerifyRegisters is an error,
+// which nothing caches.
+func (r *Realm) metaFor(root *bytecode.Function) (*funcMeta, error) {
 	k := weak.Make(root)
 	if m, ok := funcMetas.Load(k); ok {
-		return m.(*funcMeta)
+		return m.(*funcMeta), nil
 	}
 	n := uint32(0)
-	m := r.materialize(root, nil, &n)
+	m, err := r.materialize(root, nil, &n)
+	if err != nil {
+		return nil, err
+	}
 	m.nfuncs = n
 	actual, loaded := funcMetas.LoadOrStore(k, m)
 	if !loaded {
 		runtime.AddCleanup(root, func(k weak.Pointer[bytecode.Function]) { funcMetas.Delete(k) }, k)
 	}
-	return actual.(*funcMeta)
+	return actual.(*funcMeta), nil
 }
 
 // materialize builds the funcMeta of code and its children in the tree of
 // root (nil: code is the root), numbering the templates pre-order through
 // next.
-func (r *Realm) materialize(code *bytecode.Function, root *funcMeta, next *uint32) *funcMeta {
+func (r *Realm) materialize(code *bytecode.Function, root *funcMeta, next *uint32) (*funcMeta, error) {
 	m := &funcMeta{}
 	if root == nil {
 		root = m
 	}
-	r.fillMeta(m, code, root, next)
-	return m
+	return m, r.fillMeta(m, code, root, next)
 }
 
 // fillMeta is materialize into m, a dynamic tree's when root is.
-func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, next *uint32) {
+//
+// It verifies code first (bytecode.VerifyRegisters): run indexes its
+// registers without bounds checks (window), which is sound only for the
+// registers and instructions the verifier checked. Every function the
+// engine can run is materialized here, before any of its instructions
+// runs: metaFor's trees (modules and their graphs, scripts, Realm.RunScript,
+// EvaluateModule, newClosure's callers, Realm.AllocIC) and dynMeta's
+// (indirect and direct eval, Realm.EvalScript and the Function,
+// GeneratorFunction, AsyncFunction and AsyncGeneratorFunction
+// constructors), each function of a tree with its children
+// (materialize). A template that fails is a compiler bug or a hand-made
+// bytecode.Function: its tree is an error, returned before the caller
+// changes anything (a declaration, an instance, a cache), and none of its
+// code runs.
+func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, next *uint32) error {
+	if err := bytecode.VerifyRegisters(code); err != nil {
+		return fmt.Errorf("engine: %w", err)
+	}
 	m.root, m.index = root, *next
 	m.dyn = root.dyn & dynFlag
 	*next++
@@ -156,9 +178,13 @@ func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, n
 	if len(code.Children) > 0 {
 		m.children = make([]*funcMeta, len(code.Children))
 		for i, c := range code.Children {
-			m.children[i] = r.materialize(c, root, next)
+			var err error
+			if m.children[i], err = r.materialize(c, root, next); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func init() {
@@ -228,7 +254,11 @@ func (r *Realm) EvaluateModuleAsync(code *bytecode.Function) (*ModuleEnv, *Objec
 	if code.Module.Links != nil {
 		return nil, nil, errors.New("engine: a module that requests other modules or uses import() or import.meta must be linked (LinkModules) and evaluated as a graph (EvaluateGraph)")
 	}
-	fn, env := r.instantiateTopLevel(code)
+	meta, err := r.metaFor(code)
+	if err != nil {
+		return nil, nil, err
+	}
+	fn, env := r.instantiateTopLevel(code, meta)
 	res, err := r.CallObject(fn, Undefined(), nil)
 	if err != nil && fn.internal.(*FunctionData).icBase == icUnbound {
 		// The inline caches are still unbound: enterFrame did not run the
@@ -236,8 +266,11 @@ func (r *Realm) EvaluateModuleAsync(code *bytecode.Function) (*ModuleEnv, *Objec
 		return nil, nil, err
 	}
 	menv := &ModuleEnv{Env: env, module: code.Module}
-	if code.Async && res.IsObject() {
+	if code.Async && isPromise(res) {
 		return menv, res.AsObject(), err
+	}
+	if code.Async && err == nil {
+		err = r.noBodyPromise()
 	}
 	return menv, nil, err
 }
@@ -252,17 +285,20 @@ func (r *Realm) RunScript(code *bytecode.Function) (Value, error) {
 	if code.Kind != bytecode.KindScript {
 		return Undefined(), errors.New("engine: RunScript requires a script template")
 	}
+	meta, err := r.metaFor(code)
+	if err != nil {
+		return Undefined(), err
+	}
 	if err := r.globalDeclarationInstantiation(code); err != nil {
 		return Undefined(), err
 	}
-	fn, _ := r.instantiateTopLevel(code)
+	fn, _ := r.instantiateTopLevel(code, meta)
 	return r.CallObject(fn, ObjectValue(r.Global), nil)
 }
 
 // instantiateTopLevel creates the function object and environment of a
-// module or script template.
-func (r *Realm) instantiateTopLevel(code *bytecode.Function) (*Object, *Env) {
-	meta := r.metaFor(code)
+// module or script template whose tree is meta (metaFor).
+func (r *Realm) instantiateTopLevel(code *bytecode.Function, meta *funcMeta) (*Object, *Env) {
 	env := NewEnv(nil, len(code.CaptureLayout))
 	fn, fd := r.newClosure(code, meta, env, Undefined())
 	return fn, fd.env
@@ -525,6 +561,51 @@ func (r *Realm) pushArgs(n int) []Value {
 }
 
 func (r *Realm) popArgs(n int) { r.interp.sp -= n }
+
+// windowRegs is the size of the array through which run indexes a frame's
+// registers: every register operand (a uint8) indexes it without a bounds
+// check.
+const windowRegs = bytecode.MaxRegister + 1
+
+// window returns the registers from base as an array of windowRegs, which
+// run indexes with the uint8 register operands and no bounds checks. Only
+// the frame's first NumRegs registers are its own: past them the array
+// may reach other frames' registers or past the end of the stack's
+// allocation. An access is inside the allocation as long as it is below
+// NumRegs and base+NumRegs <= cap(st.stack); run keeps the stronger
+// base+NumRegs <= len(st.stack), for three reasons the checked build of
+// run (regcheck.go) tests on every access:
+//
+//   - Every register operand and run of registers of the frame's bytecode
+//     lies below NumRegs, and run executes no other instructions than
+//     those: bytecode.VerifyRegisters, which fillMeta runs on every
+//     function the engine can execute, checks the registers of every
+//     instruction it decodes from pc 0, that every jump, handler and
+//     module body lands on one of them, and that the pcs the engine saves
+//     to resume or rerun a frame at, the next instruction's, fit beside
+//     the environment depth (bytecode.PCBits). A register index run
+//     computes (a+1 of a call block, a handler's register) lies in the
+//     verified runs too and is checked against windowRegs besides.
+//   - The frame's registers exist: whoever enters a frame grows the stack
+//     to base+NumRegs first (callValue and enterFrame on a call, a native's
+//     call back into JavaScript, resumeFrame for a generator or an async
+//     function, module and script bodies), and nothing shrinks it below a
+//     live frame (ReleaseCallData runs between calls only).
+//   - The window is current: run takes it again after every operation
+//     that may grow, and so move, the stack, as it re-sliced its registers
+//     when they were a slice.
+//
+// The conversion makes a pointer to more memory than may be allocated
+// there, which checkptr (on under -race) rejects. window is exempt from
+// checkptr, and nothing else: a //go:nocheckptr function is not inlined
+// when checkptr is on, so the exemption stays in this function, run
+// keeps its instrumentation, and only checkptr builds pay for the call.
+// Builds without checkptr inline it.
+//
+//go:nocheckptr
+func (st *interpState) window(base int) *[windowRegs]Value {
+	return (*[windowRegs]Value)(unsafe.Pointer(unsafe.SliceData(st.stack[base:])))
+}
 
 // growStack makes the register stack hold at least top registers. Its
 // length is the extent the calls since the last ReleaseCallData have used,

@@ -104,12 +104,18 @@ func (r *Realm) ImportHooks() *ImportHooks {
 // eval call (bytecode.Function.ScriptOrModule), has a record, which the
 // realm keeps as long as it lives, and code compiled from a string in its
 // code shares (dynRoot.ref); SetHostDefined of any other template does
-// nothing.
-func (r *Realm) SetHostDefined(code *bytecode.Function, host any) {
+// nothing and returns nil. A function of code's tree that fails
+// bytecode.VerifyRegisters is an error, and nothing is recorded.
+func (r *Realm) SetHostDefined(code *bytecode.Function, host any) error {
 	if code == nil || !code.ScriptOrModule {
-		return
+		return nil
 	}
-	r.modules().setScriptOrModule(r.metaFor(code), host)
+	m, err := r.metaFor(code)
+	if err != nil {
+		return err
+	}
+	r.modules().setScriptOrModule(m, host)
+	return nil
 }
 
 // scriptOrModule is a realm's record of a script or module root whose code

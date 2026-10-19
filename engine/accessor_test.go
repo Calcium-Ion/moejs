@@ -427,6 +427,7 @@ func TestAccessorIC(t *testing.T) {
 // TestAccessorICAllocs checks that cached getters and setters cost no
 // allocations beyond the accessor's own work.
 func TestAccessorICAllocs(t *testing.T) {
+	skipInRegcheck(t)
 	for _, src := range []string{
 		`const o = { v: 1, get x() { return this.v; } }; export function run(n) { let s = 0; for (let i = 0; i < n; i++) s += o.x; return s; }`,
 		`const o = Object.create({ get x() { return 1; } }); export function run(n) { let s = 0; for (let i = 0; i < n; i++) s += o.x; return s; }`,

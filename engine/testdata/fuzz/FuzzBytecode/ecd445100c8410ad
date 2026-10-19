@@ -1,0 +1,4 @@
+go test fuzz v1
+string("function f(a){for(A of a+0)A.A=0}f([0,0])")
+bool(true)
+[]byte("02[0\x7f\x00pp0p")

@@ -328,7 +328,7 @@ export function read(o, id) { return o[id] * 10 + o[id + "_b"]; }`, rc.opts)
 			call("dead_" + strconv.Itoa(dead-1))
 			t.Logf("weak tier: %d entries, then %d after a dead transition (sweep at %d)", before, len(tr.weak), tr.sweep)
 			assert.Less(t, len(tr.weak), live+16, "the dead transition swept the tier")
-			assert.LessOrEqual(t, tr.sweep, 2*(live+16)+shapeWeakSweep)
+			assert.LessOrEqual(t, int(tr.sweep), 2*(live+16)+shapeWeakSweep)
 			for i := range live {
 				id := "live_" + strconv.Itoa(i)
 				require.Same(t, objs[i].AsObject().shape.parent, root.weakTransition(StringKey(r.InternGoString(id)), attrDefault), id)

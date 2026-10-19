@@ -1,3 +1,7 @@
+//go:build !moejsregcheck
+
+//go:generate go run ../internal/gen/regcheck
+
 package engine
 
 import (
@@ -19,6 +23,11 @@ var errThrown error = thrownMarker{}
 // the function's return value or the error that escaped it. No panic/recover
 // is involved on the throw path: natives return errors and the loop unwinds
 // through the handler table.
+//
+// It indexes its registers through an array of windowRegs (window) with
+// the register operands and no bounds checks; interp_run_regcheck.go is a
+// copy of this file, made by go generate, whose run checks every one of
+// those accesses (build tag moejsregcheck, regcheck.go).
 func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, callee *Object) (Value, error) {
 	st := &r.interp
 	code := fd.code
@@ -27,7 +36,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 	insns := code.Code
 	consts := meta.consts
 	top := base + int(code.NumRegs)
-	regs := st.stack[base:top:top]
+	regs := st.window(base)
 	fr := &st.frames[fi]
 	// A call starts at 0, a resumed generator at its saved pc with the
 	// environment depth in the high byte (generator.go).
@@ -132,7 +141,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var v Value
 			v, err = r.getGlobalSlow(meta.keys[uint16(x)], e, bytecode.Op(w) == bytecode.GetGlobalOrUndef)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = v
 			}
@@ -152,7 +161,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				censusMiss(code, bytecode.Op(w), x, ipc, e, g.shape)
 			}
 			err = r.setGlobalSlow(meta.keys[uint16(x)], regs[a], e)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 
 		// --- properties ---
 		case bytecode.GetProp:
@@ -174,7 +183,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				}
 				var res Value
 				res, err = r.getNamedSlow(o, v, meta.keys[uint16(x)], e)
-				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				regs, fr = st.window(base), &st.frames[fi]
 				if err == nil {
 					regs[a] = res
 				}
@@ -197,7 +206,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				}
 				var res Value
 				res, err = r.getStringProp(v, meta.keys[uint16(x)], e)
-				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				regs, fr = st.window(base), &st.frames[fi]
 				if err == nil {
 					regs[a] = res
 				}
@@ -205,7 +214,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.getPrimitiveProp(v, meta.keys[uint16(x)])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -232,7 +241,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				}
 				var res Value
 				res, err = r.getNamedSlow(o, v, lengthKey, e)
-				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				regs, fr = st.window(base), &st.frames[fi]
 				if err == nil {
 					regs[a] = res
 				}
@@ -244,7 +253,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.getPrimitiveProp(v, lengthKey)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -270,7 +279,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			} else {
 				err = r.SetV(t, meta.keys[uint16(x)], v)
 			}
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		case bytecode.GetElem:
 			o := regs[uint8(w>>16)]
 			k := regs[uint8(w>>24)]
@@ -296,7 +305,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.getElemSlow(o, k)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -319,12 +328,12 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 						continue
 					}
 					err = r.typedArraySetNumber(obj, f, v)
-					regs, fr = st.stack[base:top:top], &st.frames[fi]
+					regs, fr = st.window(base), &st.frames[fi]
 					break
 				}
 			}
 			err = r.setElemSlow(o, k, v)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 
 		// --- literals ---
 		case bytecode.NewObject:
@@ -336,6 +345,11 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		case bytecode.DefineField:
 			x := insns[pc]
 			pc++
+			// R[A] is the instance being initialized, an object: the
+			// bytecode verifier proves it (bytecode.KindOperands), so run
+			// reads it without a check, which would move run's register
+			// allocation and the placement of its blocks and cost the
+			// call path several percent.
 			o := regs[a].AsObject()
 			v := regs[uint8(w>>16)]
 			e := &r.ic[icBase+x>>16]
@@ -351,8 +365,10 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				censusMiss(code, bytecode.Op(w), x, ipc, e, o.shape)
 			}
 			err = r.defineFieldSlow(o, meta.keys[uint16(x)], v, e)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		case bytecode.ArrayPush:
+			// R[A] is the array literal, which the verifier proves an
+			// array as it does DefineField's instance.
 			arr := regs[a].AsObject()
 			arr.Push(r, regs[uint8(w>>16)])
 			continue
@@ -384,7 +400,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.Add(x, y)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -400,7 +416,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.arithSlow(bytecode.Op(w), x, y)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -413,7 +429,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.Add(x, NumberValue(imm))
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -426,7 +442,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.arithSlow(bytecode.Sub, x, NumberValue(imm))
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -442,7 +458,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.incSlow(x, d)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -454,7 +470,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.negSlow(x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -466,7 +482,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var f float64
 			f, err = r.ToNumber(x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = NumberValue(f)
 			}
@@ -485,7 +501,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.bitNotSlow(x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -497,7 +513,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.ToNumeric(x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -509,7 +525,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var s *String
 			s, err = r.ToString(x)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = StringValue(s)
 			}
@@ -524,7 +540,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.Add(x, y)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -548,7 +564,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res Value
 			res, err = r.bitwiseSlow(bytecode.Op(w), x, y)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -575,7 +591,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				res = StrictEquals(x, y)
 			} else {
 				res, err = r.LooseEquals(x, y)
-				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				regs, fr = st.window(base), &st.frames[fi]
 				if err != nil {
 					break
 				}
@@ -589,7 +605,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			}
 			var res bool
 			res, err = r.compareSlow(bytecode.Op(w), x, y)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = Bool(res)
 			}
@@ -637,13 +653,49 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				res = compareNumbers(bytecode.Lt+k&3, x.AsNumber(), y.AsNumber())
 			} else {
 				res, err = r.compareSlow(bytecode.Lt+k&3, x, y)
-				regs, fr = st.stack[base:top:top], &st.frames[fi]
+				regs, fr = st.window(base), &st.frames[fi]
 				if err != nil {
 					break
 				}
 			}
-			if res == (k < 4) {
-				pc += int(int16(w >> 16)) // relative to the X word
+			if off := int(int16(w >> 16)); off < 0 && r.interruptFlag.Load() != 0 {
+				// The back edge of a rotated loop, taken or not (its exit).
+				return Undefined(), r.interruptError()
+			} else if res == (k < 4) {
+				pc += off // relative to the X word
+			} else {
+				pc++
+			}
+			continue
+		case bytecode.JmpLtI, bytecode.JmpLeI, bytecode.JmpGtI, bytecode.JmpGeI, bytecode.JmpNLtI, bytecode.JmpNLeI, bytecode.JmpNGtI, bytecode.JmpNGeI:
+			// JmpLt .. JmpNGe against the integer in the X word.
+			k := bytecode.Op(w) - bytecode.JmpLtI
+			x, y := regs[a], int(int32(insns[pc]))
+			var res bool
+			if x.IsNumber() {
+				res = compareNumbers(bytecode.Lt+k&3, x.AsNumber(), float64(y))
+			} else {
+				res, err = r.compareSlow(bytecode.Lt+k&3, x, IntValue(y))
+				regs, fr = st.window(base), &st.frames[fi]
+				if err != nil {
+					break
+				}
+			}
+			if off := int(int16(w >> 16)); off < 0 && r.interruptFlag.Load() != 0 {
+				// The back edge of a rotated loop, taken or not (its exit).
+				return Undefined(), r.interruptError()
+			} else if res == (k < 4) {
+				pc += off // relative to the X word
+			} else {
+				pc++
+			}
+			continue
+		case bytecode.JmpStrictEqI, bytecode.JmpStrictNeI:
+			// A value that is not a number reads as a NaN payload or a
+			// denormal (its pointer tag), never as an integer.
+			eq := regs[a].AsNumber() == float64(int32(insns[pc]))
+			if eq == (bytecode.Op(w) == bytecode.JmpStrictEqI) {
+				pc += int(int16(w >> 16))
 			} else {
 				pc++
 			}
@@ -668,9 +720,21 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		// --- calls ---
 		case bytecode.Call:
 			argc := int(uint8(w >> 16))
+			if w>>24 == bytecode.CallUndefThis {
+				// A plain call has a copy of its own: choosing this before
+				// one shared call took 5 instructions more per iteration of
+				// a loop that makes no call (Micro/propGetMono).
+				var res Value
+				res, err = r.callValue(regs[a], Undefined(), st.stack[base+a+2:base+a+2+argc:base+a+2+argc])
+				regs, fr = st.window(base), &st.frames[fi]
+				if err == nil {
+					regs[a] = res
+				}
+				break
+			}
 			var res Value
 			res, err = r.callValue(regs[a], regs[a+1], st.stack[base+a+2:base+a+2+argc:base+a+2+argc])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -678,7 +742,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			argc := int(uint8(w >> 16))
 			var res Value
 			res, err = r.constructValue(regs[a], st.stack[base+a+2:base+a+2+argc:base+a+2+argc])
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				regs[a] = res
 			}
@@ -699,7 +763,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				continue
 			}
 			pc, err = r.iterOp(fd, base, w, pc)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		case bytecode.IterNext:
 			if it, pos := regs[a], regs[a+1]; it.IsObject() && pos.IsNumber() { // array fast mode
 				o := it.AsObject()
@@ -712,18 +776,21 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				}
 			}
 			pc, err = r.iterOp(fd, base, w, pc)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		case bytecode.IterValue, bytecode.IterRest, bytecode.IterClose:
 			pc, err = r.iterOp(fd, base, w, pc)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		case bytecode.IterThrow:
 			thrown = regs[uint8(w>>16)]
 			pc, err = r.iterOp(fd, base, w, pc)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 			if err == nil {
 				err = errThrown
 			}
 		case bytecode.ForInNext:
+			// The record's key list and index are an object and an
+			// index, which the verifier proves as it does DefineField's
+			// instance (forInNext).
 			k, ok := forInNext(&regs[a], &regs[a+1], regs[a+2])
 			if !ok {
 				pc += int(int16(w >> 16))
@@ -753,7 +820,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			fallthrough
 		default:
 			pc, err = r.coldOp(fd, base, ev.env, w, pc) // rare ops, then class ops (interp_cold.go)
-			regs, fr = st.stack[base:top:top], &st.frames[fi]
+			regs, fr = st.window(base), &st.frames[fi]
 		}
 
 		if err == nil {
@@ -770,7 +837,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				return e.suspend(ev.env, ev.depth), nil // a generator suspends
 			case frameOpMarker: // CoerceThis, MapArguments, CallEval (sloppy.go)
 				var coerced Value
-				if coerced, err = r.frameOp(insns[st.frames[fi].pc], code, regs, ev.env, this, callee); err == errFrameOp {
+				if coerced, err = r.frameOp(insns[st.frames[fi].pc], code, st.stack[base:top:top], ev.env, this, callee); err == errFrameOp {
 					// The loop never assigns this (a loop-carried this
 					// slows every instruction) and does not reload regs
 					// and fr after a direct eval: the frame reruns from
@@ -806,7 +873,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			ev.env = ev.env.parent
 			ev.depth--
 		}
-		regs, fr = st.stack[base:top:top], &st.frames[fi]
+		regs, fr = st.window(base), &st.frames[fi]
 		if h.Kind == bytecode.HandlerCatch {
 			regs[h.Reg] = thrown
 		} else {

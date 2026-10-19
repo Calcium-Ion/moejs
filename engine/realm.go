@@ -822,9 +822,14 @@ func (fd *FunctionData) SetConstructor(ctor NativeCtor) { fd.setCtor(ctor) }
 func (r *Realm) ICSlots() []ICEntry { return r.ic }
 
 // AllocIC reserves count IC entries for fn and returns the base index; a
-// second call for the same template returns the same base.
-func (r *Realm) AllocIC(fn *bytecode.Function, count uint32) uint32 {
-	return r.icBaseFor(r.metaFor(fn), count)
+// second call for the same template returns the same base. A function of
+// fn's tree that fails bytecode.VerifyRegisters is an error.
+func (r *Realm) AllocIC(fn *bytecode.Function, count uint32) (uint32, error) {
+	m, err := r.metaFor(fn)
+	if err != nil {
+		return 0, err
+	}
+	return r.icBaseFor(m, count), nil
 }
 
 // icBaseFor returns the base of the count IC entries of the template of m,

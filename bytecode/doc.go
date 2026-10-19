@@ -34,7 +34,9 @@
 // pops closure environments down to StackDepth, stores the thrown value as
 // described by Kind, and resumes at Handler. Rows without a match propagate
 // the error to the caller's frame. Interrupts (Realm.Interrupt) are checked
-// at function entry and at every backward Jmp and are not catchable.
+// at function entry and at every backward jump (Jmp, and the relational
+// compare-and-branch ops JmpLt .. JmpNGe and JmpLtI .. JmpNGeI, which close
+// rotated loops) and are not catchable.
 //
 // # Opcodes
 //
@@ -172,6 +174,9 @@
 // Control flow (offsets relative to the next pc)
 //
 //	Jmp           sBx      pc += sBx; a negative offset is a loop back-edge and checks the interrupt flag
+//	                       (so does a negative offset of the relational compare-and-branch ops below,
+//	                       jumping or not: a for, while or do-while loop whose condition is a relational
+//	                       comparison ends in its jump)
 //	JmpT          A sBx    if ToBoolean(R[A]) pc += sBx
 //	JmpF          A sBx    if !ToBoolean(R[A]) pc += sBx
 //	JmpNullish    A sBx    if R[A] is null or undefined pc += sBx
@@ -182,10 +187,14 @@
 //	                       only decides a conditional jump; they convert and throw as Lt .. Ge do
 //	JmpNLt        A sBx +X if !(R[A] < R[X]) pc += sBx; JmpNLe, JmpNGt, JmpNGe likewise (NaN jumps)
 //	JmpStrictEq   A sBx +X if R[A] === R[X] pc += sBx; JmpStrictNe with !==
+//	JmpLtI .. JmpStrictNeI A sBx +X  JmpLt .. JmpStrictNe (same order) with the right operand the integer
+//	                       int32(X) instead of R[X]: the compiler emits them for a comparison with an integer
+//	                       literal that no register holds (n < 2)
 //
 // Calls
 //
-//	Call       A B         R[A] = R[A](this = R[A+1], args R[A+2 .. A+1+B]); TypeError if not callable
+//	Call       A B C       R[A] = R[A](this = R[A+1], args R[A+2 .. A+1+B]); TypeError if not callable;
+//	                       C = CallUndefThis: this is undefined and R[A+1] is not read (a plain call)
 //	CallSpread A           R[A] = R[A](this = R[A+1], ...array R[A+2])
 //	New        A B         R[A] = new R[A](R[A+2 .. A+1+B]); TypeError if not a constructor
 //	NewSpread  A           R[A] = new R[A](...array R[A+2])
@@ -267,7 +276,8 @@
 //	DelElemSloppy A B C    R[A] = delete R[B][R[C]]; false instead of a TypeError when not configurable
 //	SetSuperSloppy A B C   set super property R[B] of base R[A] to R[C] with receiver R[A+1], ignoring a
 //	                       rejected assignment
-//	ToObject      A B      R[A] = ToObject(R[B]); TypeError on null or undefined
+//	ToObject      A B      R[A] = ToObject(R[B]); TypeError on null or undefined. Also makes the object a
+//	                       member initializer or sloppy eval code defines fields on one for the verifier
 //	JmpWith       A sBx +X pc += sBx if the object environment of with object R[A] has binding K[X]:
 //	                       HasProperty, then a truthy @@unscopables entry blocks it; falls through when R[A]
 //	                       is not an object (a function's %evalvars before a direct eval declares a var)

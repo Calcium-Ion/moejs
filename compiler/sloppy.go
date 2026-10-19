@@ -313,6 +313,7 @@ func (f *funcState) evalVarCopy(name string, v int, vs *syntax.Scope) {
 		}
 		o := f.alloc()
 		f.loadLoc(ev, o)
+		f.emitAB(bytecode.ToObject, o, o) // for the verifier (evalDeclarations)
 		f.emitAB(bytecode.DefineField, o, v)
 		f.emitExtra(bytecode.ExtraArg(f.nameConst(name), f.newIC()))
 		return

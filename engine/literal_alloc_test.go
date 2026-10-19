@@ -36,6 +36,7 @@ func callAllocs(t *testing.T, src string, args ...Value) (float64, *Realm, Value
 // array or object literal, Object.keys of a small object and map over a
 // small array are each one allocation, and the values are right.
 func TestLiteralAllocations(t *testing.T) {
+	skipInRegcheck(t)
 	allocs, r, fn := callAllocs(t, `export function f(x) { return ["input_text", "text"].includes(x); }`, str("text"))
 	assert.Equal(t, 1.0, allocs, "two-element literal")
 	v, err := r.Call(fn, Undefined(), []Value{str("text")})
@@ -94,6 +95,7 @@ func jsonOf(t *testing.T, r *Realm, v Value) string {
 // yields a fresh object on every evaluation with the literal's pattern and
 // canonical flags, and costs only that object.
 func TestRegExpLiteralPerEvaluation(t *testing.T) {
+	skipInRegcheck(t)
 	allocs, _, _ := callAllocs(t, `export function f() { const a = /\s+/g, b = /[A-Z]/i; return a !== b; }`)
 	assert.Equal(t, 2.0, allocs, "two literals, one object each")
 	_, r, fn := callAllocs(t, `export function f(s) { const a = /\s+/g, b = /[A-Z]/i; return [a !== f.last, a.flags, b.flags, a.source, s.replace(a, " "), b.test(s), (f.last = a) === a]; }`, str("x  Y"))

@@ -444,8 +444,13 @@ func (c *compiler) newFuncState(parent *funcState, fn *syntax.Function, kind byt
 	return f
 }
 
-// finish seals the function template.
+// finish seals the function template. Its registers fit the 8-bit
+// operands (alloc and compileBody fail first), as the engine's verifier
+// requires of every template.
 func (f *funcState) finish() *bytecode.Function {
+	if f.maxRegs > bytecode.MaxRegister+1 {
+		f.c.fail(f.curPos, "SyntaxError: function needs more than 256 registers"+unsupportedSuffix)
+	}
 	out := f.out
 	out.Code = f.code
 	out.Consts = f.consts
@@ -1032,6 +1037,11 @@ func (f *funcState) compileBody() {
 		}
 	}
 	f.maxRegs = f.nregs
+	if f.maxRegs > bytecode.MaxRegister+1 {
+		// The parameters, the rest array and the arguments object take
+		// their registers past alloc's check.
+		f.c.fail(fn.Pos, "SyntaxError: function needs more than 256 registers"+unsupportedSuffix)
+	}
 	for i, p := range fn.Params {
 		if b := paramBinding(p); b != nil && !b.Captured {
 			f.c.locs[b] = location{reg: i}

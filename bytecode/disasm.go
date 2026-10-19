@@ -68,6 +68,9 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 			if op == UndefRange || op == Call || op == New {
 				sb.WriteString(" ")
 				sb.WriteString(strconv.Itoa(int(DecodeB(w))))
+				if op == Call && DecodeC(w) == CallUndefThis {
+					sb.WriteString(" this=undefined")
+				}
 				break
 			}
 			writeReg(sb, DecodeB(w))
@@ -114,10 +117,10 @@ func disassemble(sb *strings.Builder, fn *Function, indent string) {
 				break
 			}
 			sb.WriteString(" -> ")
-			writePC(sb, pc+1+int(DecodeSBx(w)))
+			writePC(sb, JumpTarget(pc, w))
 		case FmtSBx:
 			sb.WriteString(" -> ")
-			writePC(sb, pc+1+int(DecodeSBx(w)))
+			writePC(sb, JumpTarget(pc, w))
 		}
 		pc++
 		for i := 0; i < int(info.extra) && pc < len(code); i++ {
@@ -181,6 +184,8 @@ func writeExtra(sb *strings.Builder, op Op, i int, x uint32) {
 	case GetElemRef, JmpLt, JmpLe, JmpGt, JmpGe, JmpNLt, JmpNLe, JmpNGt, JmpNGe, JmpStrictEq, JmpStrictNe:
 		sb.WriteString("r")
 		sb.WriteString(strconv.Itoa(int(x)))
+	case JmpLtI, JmpLeI, JmpGtI, JmpGeI, JmpNLtI, JmpNLeI, JmpNGtI, JmpNGeI, JmpStrictEqI, JmpStrictNeI:
+		sb.WriteString(strconv.Itoa(int(int32(x))))
 	case CallEval:
 		sb.WriteString("E")
 		sb.WriteString(strconv.Itoa(int(x)))

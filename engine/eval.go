@@ -200,10 +200,14 @@ func (r *Realm) EvalScript(name, src string) (Value, error) {
 	if err != nil {
 		return Undefined(), r.compileError(err)
 	}
+	d, err := r.dynMeta(code, nil)
+	if err != nil {
+		return Undefined(), err
+	}
 	if err := r.globalDeclarationInstantiation(code); err != nil {
 		return Undefined(), err
 	}
-	return r.CallObject(r.scriptClosure(r.dynMeta(code, nil)), ObjectValue(r.Global), nil)
+	return r.CallObject(r.scriptClosure(d), ObjectValue(r.Global), nil)
 }
 
 // activeSource returns the source name and the root of the innermost
@@ -296,7 +300,10 @@ func (r *Realm) compileEval(s *String, scope *bytecode.EvalScope) (*dynRoot, err
 		return nil, r.compileError(err)
 	}
 	r.charge(compiledSize(code))
-	d := r.dynMeta(code, r.scriptOrModuleOf(root))
+	d, err := r.dynMeta(code, r.scriptOrModuleOf(root))
+	if err != nil {
+		return nil, err
+	}
 	if hasTemplate(code) {
 		return d, nil
 	}
@@ -455,7 +462,10 @@ func (r *Realm) compileFunction(c Compiler, kind dynamicKind, params, body strin
 		return nil, r.compileError(err)
 	}
 	r.charge(compiledSize(code))
-	d := r.dynMeta(code, r.scriptOrModuleOf(root))
+	d, err := r.dynMeta(code, r.scriptOrModuleOf(root))
+	if err != nil {
+		return nil, err
+	}
 	if hasTemplate(code) {
 		return d, nil
 	}

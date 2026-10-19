@@ -201,8 +201,7 @@ func (f *funcState) synthetic(fn *syntax.Function, dst int, name string, home in
 // instanceMembers is the body of Class.Fields: InitializeInstanceElements
 // on `this`.
 func (f *funcState) instanceMembers(c *syntax.Class) {
-	this := f.alloc()
-	f.emitA(bytecode.LoadThis, this)
+	this := f.loadThisObject()
 	if c.BrandBinding != nil {
 		mark := f.nregs
 		f.emitAB(bytecode.AddBrand, this, f.bindingReg(c.BrandBinding))
@@ -218,8 +217,7 @@ func (f *funcState) instanceMembers(c *syntax.Class) {
 // staticMembers is the body of Class.Static: the static fields and blocks
 // on `this` (the class) in order.
 func (f *funcState) staticMembers(c *syntax.Class) {
-	this := f.alloc()
-	f.emitA(bytecode.LoadThis, this)
+	this := f.loadThisObject()
 	for _, m := range c.Members {
 		switch {
 		case m.Kind == syntax.ClassField && m.Static:
@@ -229,11 +227,23 @@ func (f *funcState) staticMembers(c *syntax.Class) {
 			f.setPos(m.Pos)
 			b := f.allocN(2)
 			f.emitClosure(b, f.compileFunction(m.Block, ""))
-			f.emitA(bytecode.LoadUndef, b+1)
-			f.emitAB(bytecode.Call, b, 0)
+			f.emitABC(bytecode.Call, b, 0, bytecode.CallUndefThis)
 			f.free(mark)
 		}
 	}
+}
+
+// loadThisObject loads the `this` of a member initializer into a new
+// register, as an object: the engine calls an initializer only on the
+// object being initialized (or the class), but DefineField reads its
+// instance without looking, and the bytecode verifier proves its kind
+// only from an op that makes an object (bytecode.RegisterWrites). On an
+// object ToObject is the identity.
+func (f *funcState) loadThisObject() int {
+	this := f.alloc()
+	f.emitA(bytecode.LoadThis, this)
+	f.emitAB(bytecode.ToObject, this, this)
+	return this
 }
 
 // field defines field m on R[obj] (DefineField): its initializer is

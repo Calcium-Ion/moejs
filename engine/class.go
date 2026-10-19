@@ -83,9 +83,20 @@ func (r *Realm) classOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 			regs[a] = ObjectValue(h)
 		}
 	case bytecode.SetHome:
-		regs[a].AsObject().internal.(*FunctionData).SetHomeObject(regs[b].AsObject())
+		_, fn, err := r.closureArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		home, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		fn.SetHomeObject(home)
 	case bytecode.CreateClass:
-		f := regs[a].AsObject()
+		f, _, err := r.closureArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
 		if c&2 != 0 {
 			key, err := r.ToPropertyKey(regs[a+1])
 			if err != nil {
@@ -99,7 +110,15 @@ func (r *Realm) classOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		}
 		return pc, r.createClass(f, regs[b], c&1 != 0, base+a+1)
 	case bytecode.DefineClassMethod:
-		return pc, r.defineClassMethod(regs[a].AsObject(), regs[b], regs[c].AsObject())
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		fn, _, err := r.closureArg(regs[c], w)
+		if err != nil {
+			return pc, err
+		}
+		return pc, r.defineClassMethod(o, regs[b], fn)
 	case bytecode.ToPropertyKey:
 		key, err := r.ToPropertyKey(regs[b])
 		if err != nil {
@@ -155,31 +174,68 @@ func (r *Realm) classOp(fd *FunctionData, base int, w uint32, pc int) (int, erro
 		default:
 			return pc, r.TypeError("Derived constructors may only return object or undefined")
 		}
-	case bytecode.NewPrivateName:
+	case bytecode.NewPrivateName: // a ConstString (bytecode.VerifyRegisters)
 		regs[a] = privateValue(newPrivateName(meta.consts[w>>16].AsString()))
 	case bytecode.SetPrivateMethod:
 		flags := code.Code[pc]
 		pc++
-		definePrivateMethod(regs[a].asPrivate(), regs[b].AsObject(), regs[c], flags)
+		pn, err := r.privateArg(regs[a], w)
+		if err != nil {
+			return pc, err
+		}
+		fn, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		// The owner is the class of a static method, else the brand.
+		if flags&bytecode.PrivateStatic != 0 {
+			_, err = r.objectArg(regs[c], w)
+		} else {
+			_, err = r.privateArg(regs[c], w)
+		}
+		if err != nil {
+			return pc, err
+		}
+		definePrivateMethod(pn, fn, regs[c], flags)
 	case bytecode.GetPrivate:
-		v, err := r.privateGet(regs[b], regs[c].asPrivate())
+		pn, err := r.privateArg(regs[c], w)
+		if err != nil {
+			return pc, err
+		}
+		v, err := r.privateGet(regs[b], pn)
 		if err != nil {
 			return pc, err
 		}
 		st.stack[base+a] = v
 	case bytecode.SetPrivate:
-		return pc, r.privateSet(regs[a], regs[b].asPrivate(), regs[c])
-	case bytecode.DefPrivate:
-		return pc, r.privateDefine(regs[a], regs[b].asPrivate(), regs[c])
-	case bytecode.AddBrand:
-		return pc, r.privateAddBrand(regs[a], regs[b].asPrivate())
+		pn, err := r.privateArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		return pc, r.privateSet(regs[a], pn, regs[c])
+	case bytecode.DefPrivate, bytecode.AddBrand: // on the instance being initialized
+		pn, err := r.privateArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		if _, err := r.objectArg(regs[a], w); err != nil {
+			return pc, err
+		}
+		if bytecode.Op(w) == bytecode.AddBrand {
+			return pc, r.privateAddBrand(regs[a], pn)
+		}
+		return pc, r.privateDefine(regs[a], pn, regs[c])
 	case bytecode.InPrivate:
-		ok, err := r.privateIn(regs[c], regs[b].asPrivate())
+		pn, err := r.privateArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		ok, err := r.privateIn(regs[c], pn)
 		if err != nil {
 			return pc, err
 		}
 		regs[a] = Bool(ok)
-	case bytecode.ThrowError:
+	case bytecode.ThrowError: // a ConstString (bytecode.VerifyRegisters)
 		msg := meta.consts[w>>16].AsString().GoString()
 		if uint8(a) == bytecode.ThrowReferenceError {
 			return pc, r.ReferenceError("%s", msg)
@@ -289,6 +345,9 @@ func (r *Realm) superCall(fn, nt Value, args []Value) (Value, error) {
 			fn = Null() // the parent of `class extends null`
 		}
 		return Undefined(), r.TypeError("Super constructor %s is not a constructor", r.DisplayString(fn))
+	}
+	if !nt.IsObject() { // the compiler passes the constructor's new.target
+		return Undefined(), r.TypeError("internal: SuperCall expects new.target")
 	}
 	return r.Construct(fn, args, nt.AsObject())
 }

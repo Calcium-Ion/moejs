@@ -105,6 +105,9 @@ These run, with a result that differs from the specification:
   realm of its `newTarget`, for one) never arises, and a function or
   generator runs only in the runtime that created it (the host API returns
   `ErrForeign` for one of another runtime).
+- A function that needs more than 256 registers, its parameters (and a
+  rest parameter or `arguments` after them) included, is a SyntaxError:
+  register operands are 8 bits.
 - Listing the keys of a typed array of more than 2^24 elements
   (`Object.keys`, `for`-`in`, `Reflect.ownKeys`) throws a RangeError, where
   V8 lists them. Reading and writing its elements is not limited.

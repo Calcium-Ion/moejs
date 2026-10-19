@@ -114,12 +114,6 @@ func (r *Realm) sloppyOp(fd *FunctionData, base int, w uint32, pc int) (int, err
 		return pc, err
 	case bytecode.SetSuperSloppy:
 		return pc, r.setSuperSloppy(regs[a], regs[a+1], regs[b], regs[uint8(w>>24)])
-	case bytecode.ToObject:
-		o, err := r.ToObject(regs[b])
-		if err == nil {
-			regs[a] = ObjectValue(o)
-		}
-		return pc, err
 	case bytecode.JmpWith:
 		if !regs[a].IsObject() {
 			// The %evalvars object of a function whose direct evals have
@@ -132,16 +126,24 @@ func (r *Realm) sloppyOp(fd *FunctionData, base int, w uint32, pc int) (int, err
 			return pc + 1, err
 		}
 		return pc + int(int16(w>>16)), nil
-	case bytecode.WithGet:
+	case bytecode.WithGet: // the with object, which ToObject made
 		x := code.Code[pc]
-		v, err := r.withGet(regs[b].AsObject(), keys[uint16(x)], x>>16 != 0)
+		o, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc + 1, err
+		}
+		v, err := r.withGet(o, keys[uint16(x)], x>>16 != 0)
 		if err == nil {
 			st.stack[base+a] = v
 		}
 		return pc + 1, err
 	case bytecode.WithSet:
 		x := code.Code[pc]
-		return pc + 1, r.withSet(regs[a].AsObject(), keys[uint16(x)], regs[b], x>>16 != 0)
+		o, err := r.objectArg(regs[a], w)
+		if err != nil {
+			return pc + 1, err
+		}
+		return pc + 1, r.withSet(o, keys[uint16(x)], regs[b], x>>16 != 0)
 	case bytecode.CoerceThis, bytecode.MapArguments:
 		return pc, errFrameOp
 	case bytecode.CallEval:
@@ -164,7 +166,11 @@ func (r *Realm) sloppyOp(fd *FunctionData, base int, w uint32, pc int) (int, err
 func (r *Realm) frameOp(w uint32, code *bytecode.Function, regs []Value, env *Env, this Value, callee *Object) (Value, error) {
 	switch bytecode.Op(w) {
 	case bytecode.MapArguments:
-		r.mapArguments(regs[uint8(w>>8)].AsObject(), code, env, callee)
+		v := regs[uint8(w>>8)]
+		if !v.IsObject() || v.AsObject().class != ClassArguments {
+			return this, r.wrongKind(w, "an arguments object")
+		}
+		r.mapArguments(v.AsObject(), code, env, callee)
 		return this, nil
 	case bytecode.CallEval:
 		st := &r.interp

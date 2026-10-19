@@ -15,8 +15,10 @@ import (
 // that invariant the GC always sees a valid pointer word and this
 // representation is exactly as safe as a plain interface value.
 //
-// This file is the only place in the package that names unsafe.Pointer for
-// values. All other files use the constructors and accessors below.
+// This file and the payload accessors (value_as.go, value_as_regcheck.go
+// in the checked build) are the only places in the package that name
+// unsafe.Pointer for values. All other files use the constructors and
+// accessors.
 
 // Value is the engine's universal JavaScript value. Numbers, booleans,
 // undefined, null and the internal hole marker are stored inline (ptr == nil);
@@ -191,32 +193,11 @@ func (v Value) isPrivate() bool { return v.ptr != nil && v.bits == tagPrivate }
 
 func (v Value) isImportRef() bool { return v.ptr != nil && v.bits == tagImport }
 
-// importTarget returns the slot an import reference points to. Only valid
-// when isImportRef.
-func (v Value) importTarget() *Value { return (*Value)(v.ptr) }
-
-// asPrivate returns the *PrivateName payload. Only valid when isPrivate.
-func (v Value) asPrivate() *PrivateName { return (*PrivateName)(v.ptr) }
-
 // AsNumber returns the float64 payload. Only valid when IsNumber.
 func (v Value) AsNumber() float64 { return math.Float64frombits(v.bits) }
 
 // AsBool returns the boolean payload. Only valid when IsBool.
 func (v Value) AsBool() bool { return v.bits == bitsTrue }
-
-// AsString returns the *String payload. Only valid when IsString.
-func (v Value) AsString() *String { return (*String)(v.ptr) }
-
-// AsObject returns the *Object payload. Only valid when IsObject.
-func (v Value) AsObject() *Object { return (*Object)(v.ptr) }
-
-// AsSymbol returns the *Symbol payload. Only valid when IsSymbol.
-func (v Value) AsSymbol() *Symbol { return (*Symbol)(v.ptr) }
-
-// AsBigInt returns the *BigInt payload. Only valid when IsBigInt.
-func (v Value) AsBigInt() *BigInt { return (*BigInt)(v.ptr) }
-
-func (v Value) asAccessor() *Accessor { return (*Accessor)(v.ptr) }
 
 // Bits exposes the raw payload for hashing and debugging.
 func (v Value) Bits() uint64 { return v.bits }

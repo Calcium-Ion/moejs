@@ -90,6 +90,7 @@ export function fresh() { return id`+"`w`"+`; }
 // site and realm (later evaluations allocate nothing) and that
 // code without tagged templates leaves the realm's cache untouched.
 func TestTaggedTemplateCost(t *testing.T) {
+	skipInRegcheck(t)
 	allocs, _, _ := callAllocs(t, "function id(s) { return s; } export function f() { return id`a${1}b`; }")
 	assert.Equal(t, 0.0, allocs, "cached template object")
 

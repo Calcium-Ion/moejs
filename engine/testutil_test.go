@@ -12,7 +12,11 @@ var bytecodeStubFunction = bytecode.Function{
 // testClosure creates a closure over code, treated as its own template
 // tree, with no environment, as the interpreter creates one.
 func testClosure(r *Realm, code *bytecode.Function) (*Object, *FunctionData) {
-	return r.newClosure(code, r.metaFor(code), nil, Undefined())
+	m, err := r.metaFor(code)
+	if err != nil {
+		panic(err)
+	}
+	return r.newClosure(code, m, nil, Undefined())
 }
 
 // concatRealm backs concat; the string-representation tests have no realm of

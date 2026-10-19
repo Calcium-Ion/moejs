@@ -457,6 +457,50 @@ func TestCompileLimits(t *testing.T) {
 	assert.Contains(t, err.Error(), "more than 256 registers")
 }
 
+// TestCompileParameterLimits checks that parameters count against the
+// 256 registers: a function of 255 or 256 parameters whose body needs no
+// temporary compiles to that many registers, and 257 or more, 256 with a
+// rest parameter or the arguments object after them, or 256 and one
+// temporary, are the SyntaxError of a function needing more than 256
+// registers, as the engine's verifier refuses a wider frame.
+func TestCompileParameterLimits(t *testing.T) {
+	params := func(n int) string {
+		ps := make([]string, n)
+		for i := range ps {
+			ps[i] = "p" + itoa(i)
+		}
+		return strings.Join(ps, ", ")
+	}
+	compile := func(src string) (*bytecode.Function, error) {
+		s, err := syntax.ParseScript("t.js", src, syntax.Options{})
+		require.NoError(t, err)
+		return CompileScript(s)
+	}
+	for _, c := range []struct {
+		n          int
+		rest, body string
+		regs       int // 0: the SyntaxError
+	}{
+		{255, "", "return p0;", 255},
+		{256, "", "return p255;", 256},
+		{256, "", "", 256},
+		{255, ", ...r", "return r;", 256},
+		{257, "", "return p0;", 0},
+		{300, "", "", 0},
+		{256, ", ...r", "return r;", 0},
+		{256, "", "return arguments;", 0},
+		{256, "", "return [p0];", 0},
+	} {
+		code, err := compile("function f(" + params(c.n) + c.rest + ") { " + c.body + " }")
+		if c.regs == 0 {
+			assert.ErrorContains(t, err, "SyntaxError: function needs more than 256 registers", "%d parameters%s, %q", c.n, c.rest, c.body)
+			continue
+		}
+		require.NoError(t, err, "%d parameters%s, %q", c.n, c.rest, c.body)
+		assert.Equal(t, c.regs, int(code.Children[0].NumRegs), "%d parameters%s, %q", c.n, c.rest, c.body)
+	}
+}
+
 func itoa(i int) string {
 	if i == 0 {
 		return "0"
@@ -717,9 +761,9 @@ func TestAssignmentIntoRegister(t *testing.T) {
 export function out(g) { var a = 1; a = g(); return a; }
 export function inTry(g) { var a = 1; try { a = g(); } catch (e) {} return a; }
 export function simple(g) { var a = 1; try { a = 2; a = g; a = function () {}; } catch (e) {} return a; }`)
-	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.LoadUndef, bytecode.Call, bytecode.Ret, bytecode.RetUndef},
+	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.Call, bytecode.Ret, bytecode.RetUndef},
 		ops(child(t, fn, "out")), "the callee and the result share the variable's register")
-	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.LoadUndef, bytecode.Call, bytecode.Move, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
+	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.Move, bytecode.Call, bytecode.Move, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
 		ops(child(t, fn, "inTry")), "the result is moved to the variable once the call returns")
 	assert.Equal(t, []bytecode.Op{bytecode.UndefRange, bytecode.LoadInt, bytecode.LoadInt, bytecode.Move, bytecode.Closure, bytecode.Jmp, bytecode.Move, bytecode.Ret, bytecode.RetUndef},
 		ops(child(t, fn, "simple")))

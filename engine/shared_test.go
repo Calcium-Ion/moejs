@@ -293,7 +293,7 @@ export function conc() {
 		assert.Equal(t, IntValue(i), v)
 	}
 	assert.Equal(t, maxSharedDataTransitions, cached)
-	assert.Equal(t, maxSharedDataTransitions, root.sharedTrans.Load().data)
+	assert.Equal(t, maxSharedDataTransitions, int(root.sharedTrans.Load().data))
 	assert.True(t, f3.object("dataRootCode").Shape().IsShared())
 	sym := f1.r.NewObject()
 	require.NoError(t, sym.SetProp(f1.r, SymbolKey(NewSymbol(nil)), IntValue(1)))

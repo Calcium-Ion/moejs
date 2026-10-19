@@ -47,7 +47,8 @@ func (*Script) referrer() {}
 // see too. A declaration that conflicts with an existing global binding
 // throws before anything runs. The jobs the script queued run before
 // RunScript returns. A throw is an *Exception, an interrupt an
-// *InterruptedError.
+// *InterruptedError; a script whose bytecode the engine's verifier
+// rejects (a compiler bug) does not run, and the error says why.
 func (rt *Runtime) RunScript(s *Script) (res Value, err error) {
 	r := rt.realm
 	defer func() {
@@ -57,11 +58,11 @@ func (rt *Runtime) RunScript(s *Script) (res Value, err error) {
 	}()
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
 	r.HoldJobs()
-	if err = r.CheckInterrupt(); err == nil {
-		if s.code.ScriptOrModule {
-			// The referrer of its import() calls.
-			r.SetHostDefined(s.code, s)
-		}
+	if err = r.CheckInterrupt(); err == nil && s.code.ScriptOrModule {
+		// The referrer of its import() calls.
+		err = r.SetHostDefined(s.code, s)
+	}
+	if err == nil {
 		res, err = r.RunScript(s.code)
 	}
 	return res, r.ReleaseJobs(err)

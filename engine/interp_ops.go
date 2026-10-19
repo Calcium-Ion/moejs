@@ -801,7 +801,15 @@ func (r *Realm) forInInit(v Value) (keys, obj Value, err error) {
 	return ObjectValue(r.NewArrayFromSlice(list)), ObjectValue(o), nil
 }
 
-// forInNext yields the next key that is still a property of obj.
+// forInNext yields the next key that is still a property of obj. keys and
+// idx are the key list and the index of a for-in record, an object and a
+// non-negative integer, which the bytecode verifier proves
+// (bytecode.KindOperands), as run's ForInNext relies on. A key that is no
+// string is skipped: the list is the array of strings ForInInit made, but
+// no proof covers what it holds. Bytecode may hand the record another
+// object, and a suspended generator's list stays reachable through the
+// registers it left on the stack, which a later frame may read before it
+// writes them.
 func forInNext(keys, idx *Value, obj Value) (Value, bool) {
 	if !obj.IsObject() {
 		return Undefined(), false
@@ -813,7 +821,7 @@ func forInNext(keys, idx *Value, obj Value) (Value, bool) {
 		k := list[i]
 		*idx = IntValue(i + 1)
 		// Keys deleted during iteration are skipped.
-		if forInHas(o, keyOfString(o, k.AsString())) {
+		if k.IsString() && forInHas(o, keyOfString(o, k.AsString())) {
 			return k, true
 		}
 	}

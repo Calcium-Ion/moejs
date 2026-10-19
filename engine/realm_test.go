@@ -684,10 +684,15 @@ func TestInstallersAndICAlloc(t *testing.T) {
 	_, err := r.Construct(ObjectValue(r.RegExpCtor), nil, nil)
 	assert.NoError(t, err)
 
-	base := r.AllocIC(&bytecodeStubFunction, 3)
+	allocIC := func(fn *bytecode.Function, count uint32) uint32 {
+		base, err := r.AllocIC(fn, count)
+		require.NoError(t, err)
+		return base
+	}
+	base := allocIC(&bytecodeStubFunction, 3)
 	assert.Equal(t, uint32(0), base)
-	assert.Equal(t, base, r.AllocIC(&bytecodeStubFunction, 3))
+	assert.Equal(t, base, allocIC(&bytecodeStubFunction, 3))
 	assert.Len(t, r.ICSlots(), 3)
 	other := bytecodeStubFunction
-	assert.Equal(t, uint32(3), r.AllocIC(&other, 1))
+	assert.Equal(t, uint32(3), allocIC(&other, 1))
 }

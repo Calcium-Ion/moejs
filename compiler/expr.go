@@ -541,6 +541,18 @@ func (f *funcState) binaryOp(e *syntax.BinaryExpr, dst, left int, jmp *condJumpT
 	if b < 0 {
 		b = f.operand(e.X, e.Y)
 	}
+	if jmp != nil && f.hoistedReg(e.Y) < 0 {
+		// An integer the loop nest does not hold in a register is the
+		// jump's X word itself.
+		if k, ok := f.fold(e.Y); ok && k.kind == kNumber {
+			if i, ok := bytecode.ImmediateOperand(k.num); ok {
+				jop, _ := bytecode.CompareJump(op, jmp.jumpIf)
+				f.emitJump(jop.Immediate(), b, jmp.lbl)
+				f.emitExtra(uint32(i))
+				return
+			}
+		}
+	}
 	c := f.operand(e.Y)
 	if jmp != nil {
 		jop, _ := bytecode.CompareJump(op, jmp.jumpIf)
@@ -1172,6 +1184,10 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 	defer f.free(mark)
 	base := f.callBase(dst)
 	f.allocN(2)
+	// A plain Call with an undefined this says so in its C operand
+	// (CallUndefThis) instead of loading undefined into R[base+1].
+	plain := !isDirectEval(e) && !hasSpread(e.Args)
+	undefThis := false
 	// Callee and this.
 	switch callee := e.Callee.(type) {
 	case *syntax.MemberExpr:
@@ -1190,7 +1206,7 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 		m, ok := callee.X.(*syntax.MemberExpr)
 		if !ok {
 			f.expr(callee, base)
-			f.emitA(bytecode.LoadUndef, base+1)
+			undefThis = f.undefThis(plain, base)
 			break
 		}
 		saved := f.optLabel
@@ -1213,7 +1229,7 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 			break
 		}
 		f.expr(callee, base)
-		f.emitA(bytecode.LoadUndef, base+1)
+		undefThis = f.undefThis(plain, base)
 	}
 	f.setPos(e.Pos)
 	if e.Optional {
@@ -1237,10 +1253,31 @@ func (f *funcState) call(e *syntax.CallExpr, dst int) {
 		f.emitExtra(f.evalSite(e.Pos))
 	case spread:
 		f.emitA(bytecode.CallSpread, base)
+	case undefThis:
+		f.emitABC(bytecode.Call, base, len(e.Args), bytecode.CallUndefThis)
 	default:
 		f.emitAB(bytecode.Call, base, len(e.Args))
 	}
 	f.emitMove(dst, base)
+}
+
+// undefThis gives the call block at base an undefined this: by the Call's
+// operand when the call is plain (it reports true), else by loading it.
+func (f *funcState) undefThis(plain bool, base int) bool {
+	if !plain {
+		f.emitA(bytecode.LoadUndef, base+1)
+	}
+	return plain
+}
+
+// hasSpread reports whether an argument list has a spread element.
+func hasSpread(list []syntax.Expr) bool {
+	for _, a := range list {
+		if _, ok := a.(*syntax.SpreadElem); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // callPos is the source position reported for a call: the property name of
@@ -1257,14 +1294,7 @@ func callPos(callee syntax.Expr) int {
 // args compiles an argument list into the call block starting at base+2 and
 // reports whether it was packed into a single spread array.
 func (f *funcState) args(list []syntax.Expr, base int) bool {
-	spread := false
-	for _, a := range list {
-		if _, ok := a.(*syntax.SpreadElem); ok {
-			spread = true
-			break
-		}
-	}
-	if !spread {
+	if !hasSpread(list) {
 		if len(list) > bytecode.MaxRegister {
 			f.c.fail(f.curPos, "SyntaxError: too many arguments in one call"+unsupportedSuffix)
 		}
@@ -1315,6 +1345,7 @@ func (f *funcState) taggedTemplate(e *syntax.TaggedTemplate, dst int) {
 	defer f.free(mark)
 	base := f.callBase(dst)
 	f.allocN(2)
+	undefThis := false
 	switch tag := e.Tag.(type) {
 	case *syntax.MemberExpr:
 		f.expr(tag.Object, base+1)
@@ -1326,7 +1357,7 @@ func (f *funcState) taggedTemplate(e *syntax.TaggedTemplate, dst int) {
 			break
 		}
 		f.expr(tag, base)
-		f.emitA(bytecode.LoadUndef, base+1)
+		undefThis = true
 	}
 	q := e.Quasi
 	f.setPos(q.Pos)
@@ -1347,7 +1378,11 @@ func (f *funcState) taggedTemplate(e *syntax.TaggedTemplate, dst int) {
 		f.expr(x, base+3+i)
 	}
 	f.setPos(callPos(e.Tag))
-	f.emitAB(bytecode.Call, base, 1+len(q.Exprs))
+	if undefThis {
+		f.emitABC(bytecode.Call, base, 1+len(q.Exprs), bytecode.CallUndefThis)
+	} else {
+		f.emitAB(bytecode.Call, base, 1+len(q.Exprs))
+	}
 	f.emitMove(dst, base)
 }
 

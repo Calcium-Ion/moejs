@@ -348,6 +348,9 @@ func (f *funcState) evalDeclarations(e *syntax.Eval, vs *syntax.Scope) {
 		f.emitAB(bytecode.SetProto, obj, t)
 		f.storeLoc(f.c.locs[ev], obj)
 		f.bind(have)
+		// The object, for the verifier, which proves DefineField's
+		// instance only from an op that makes one (loadThisObject).
+		f.emitAB(bytecode.ToObject, obj, obj)
 	}
 	for _, fd := range e.Funcs {
 		name := fd.Func.Name.Name

@@ -312,12 +312,10 @@ func (f *funcState) forStmt(s *syntax.ForStmt) {
 		f.emitNone(bytecode.CopyEnv)
 	}
 	hoist := f.hoistLoop(s)
-	loop, cont, exit := f.newLabel(), f.newLabel(), f.newLabel()
+	loop, cont, cond, exit := f.newLabel(), f.newLabel(), f.newLabel(), f.newLabel()
+	f.loopEntry(s.Cond, cond)
 	f.bind(loop)
-	if s.Cond != nil {
-		f.setPosNode(s.Cond)
-		f.condJump(s.Cond, exit, false)
-	}
+	f.loopTop(s.Cond, exit)
 	f.pushLoopTarget(names, exit, cont)
 	f.stmt(s.Body)
 	f.popTarget()
@@ -328,11 +326,60 @@ func (f *funcState) forStmt(s *syntax.ForStmt) {
 	if s.Update != nil {
 		f.exprEffect(s.Update)
 	}
-	f.setPos(s.Pos)
-	f.emitJump(bytecode.Jmp, 0, loop)
+	f.bind(cond)
+	f.loopBack(s.Cond, s.Pos, loop)
 	f.bind(exit)
 	f.endHoist(hoist)
 	f.leaveScope(es, mark)
+}
+
+// rotates reports whether a loop with condition c is rotated, ending in
+// its condition's jump (loopBack): when c is a relational comparison that
+// compiles to one compare-and-branch op (compareJump). Only JmpLt .. JmpGe
+// and their immediate forms then close loops, so only they check the
+// interrupt flag; a loop with any other condition tests it at the top and
+// ends in a Jmp, as do the equality tests, whose ops stay unchecked.
+func (f *funcState) rotates(c syntax.Expr) bool {
+	if c == nil {
+		return false
+	}
+	if _, ok := f.fold(c); ok {
+		return false
+	}
+	b, ok := compareJump(c)
+	return ok && b.Op != syntax.StrictEq && b.Op != syntax.StrictNeq
+}
+
+// loopEntry enters a rotated for or while loop at its condition at cond.
+func (f *funcState) loopEntry(c syntax.Expr, cond *label) {
+	if f.rotates(c) {
+		f.emitJump(bytecode.Jmp, 0, cond)
+	}
+}
+
+// loopBack closes a loop: a rotated one at its condition, which jumps back
+// to loop while cond holds, so an iteration takes one jump, the
+// condition's, where a test at the top and a Jmp at the bottom took two;
+// for and while enter it with a Jmp to the condition. A backward
+// compare-and-branch checks the interrupt flag whichever way it goes, so
+// a loop checks once per iteration, its last included, as it did with the
+// Jmp. Any other loop ends in a Jmp at pos.
+func (f *funcState) loopBack(cond syntax.Expr, pos int, loop *label) {
+	if !f.rotates(cond) {
+		f.setPos(pos)
+		f.emitJump(bytecode.Jmp, 0, loop)
+		return
+	}
+	f.setPosNode(cond)
+	f.condJump(cond, loop, true)
+}
+
+// loopTop tests the condition of a loop that does not rotate at its top.
+func (f *funcState) loopTop(cond syntax.Expr, exit *label) {
+	if cond != nil && !f.rotates(cond) {
+		f.setPosNode(cond)
+		f.condJump(cond, exit, false)
+	}
 }
 
 func (f *funcState) whileStmt(s *syntax.WhileStmt) {
@@ -340,15 +387,14 @@ func (f *funcState) whileStmt(s *syntax.WhileStmt) {
 	mark := f.nregs
 	hoist := f.hoistLoop(s)
 	loop, cont, exit := f.newLabel(), f.newLabel(), f.newLabel()
+	f.loopEntry(s.Cond, cont)
 	f.bind(loop)
-	f.setPosNode(s.Cond)
-	f.condJump(s.Cond, exit, false)
+	f.loopTop(s.Cond, exit)
 	f.pushLoopTarget(names, exit, cont)
 	f.stmt(s.Body)
 	f.popTarget()
 	f.bind(cont)
-	f.setPos(s.Pos)
-	f.emitJump(bytecode.Jmp, 0, loop)
+	f.loopBack(s.Cond, s.Pos, loop)
 	f.bind(exit)
 	f.endHoist(hoist)
 	f.free(mark)
@@ -364,11 +410,11 @@ func (f *funcState) doWhile(s *syntax.DoWhileStmt) {
 	f.stmt(s.Body)
 	f.popTarget()
 	f.bind(cont)
-	f.setPosNode(s.Cond)
-	// The back-edge is a Jmp: conditional jumps do not check for an
-	// interrupt.
-	f.condJump(s.Cond, exit, false)
-	f.emitJump(bytecode.Jmp, 0, loop)
+	if !f.rotates(s.Cond) {
+		f.setPosNode(s.Cond)
+		f.condJump(s.Cond, exit, false)
+	}
+	f.loopBack(s.Cond, s.Pos, loop)
 	f.bind(exit)
 	f.endHoist(hoist)
 	f.free(mark)

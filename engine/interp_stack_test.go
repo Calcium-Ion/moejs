@@ -218,6 +218,7 @@ export function capture() { const o = {}; Error.captureStackTrace(o); return o.s
 // TestErrorStackCaptureAllocs checks that a shallow throw records its frames
 // in the error object and a deep one past the scratch buffer still works.
 func TestErrorStackCaptureAllocs(t *testing.T) {
+	skipInRegcheck(t)
 	f := evalModule(t, `
 export function make() { return new Error("x"); }
 function rec(n) { return n === 0 ? new Error("d") : rec(n - 1); }

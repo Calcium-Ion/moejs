@@ -49,8 +49,9 @@ const (
 )
 
 // genDepthShift places the environment depth of a suspended frame above its
-// resume pc in frameInfo.pc (the compiler keeps both in range).
-const genDepthShift = 24
+// resume pc in frameInfo.pc. The compiler keeps the depth in range, and
+// bytecode.VerifyRegisters the pcs (bytecode.PCBits).
+const genDepthShift = bytecode.PCBits
 
 // genFrame is the internal payload of a ClassGenerator object: the suspended
 // frame and the generator's state. It is also the error value by which the
@@ -72,6 +73,14 @@ type genFrame struct {
 }
 
 func (g *genFrame) Error() string { return "internal: generator suspension" }
+
+// runs reports whether g is the state a frame of fd runs: a suspension
+// saves the frame's pc and registers into g, and its resumption runs them
+// as g's frame, so a frame of another function, or one that suspends into
+// a completed generator (which keeps no registers), would resume as code
+// it is not: at a pc that starts no instruction of it, with registers its
+// verified flow never wrote (bytecode.VerifyRegisters), or past its window.
+func (g *genFrame) runs(fd *FunctionData) bool { return g.fd == fd && g.state == genExecuting }
 
 // save copies the frame's window into g and records the resume pc; run's
 // unwinding path completes the suspension (suspend).
@@ -113,7 +122,9 @@ func (r *Realm) genOp(fd *FunctionData, base int, w uint32, pc int) (int, error)
 	a, b := int(uint8(w>>8)), int(uint8(w>>16))
 	switch bytecode.Op(w) {
 	case bytecode.GenFunc:
-		r.makeGeneratorFunction(regs[a].AsObject())
+		if err := r.genFunc(regs[a], w); err != nil {
+			return pc, err
+		}
 	case bytecode.GenStart:
 		o, err := r.newGenerator(st.frames[st.nframes-1].fn, fd, regs[a])
 		if err != nil {
@@ -125,7 +136,17 @@ func (r *Realm) genOp(fd *FunctionData, base int, w uint32, pc int) (int, error)
 		g.out = regs[a]
 		return pc, g.save(regs, pc)
 	case bytecode.Yield:
-		g := regs[b].AsObject().internal.(*genFrame)
+		o, err := r.objectArg(regs[b], w)
+		if err != nil {
+			return pc, err
+		}
+		g, ok := o.internal.(*genFrame)
+		if !ok {
+			return pc, r.wrongKind(w, "a generator")
+		}
+		if !g.runs(fd) {
+			return pc, r.wrongKind(w, "the generator its frame runs")
+		}
 		out := regs[a]
 		if w>>24 == 0 {
 			out = r.createIterResult(out, false)
@@ -146,6 +167,21 @@ func (r *Realm) genOp(fd *FunctionData, base int, w uint32, pc int) (int, error)
 		return r.asyncOp(fd, base, w, pc)
 	}
 	return pc, nil
+}
+
+// genFunc is GenFunc, of a function's code or a module's prologue: v is
+// the closure a Closure just made of a generator function, which it
+// checks (Realm.wrongKind) and completes.
+func (r *Realm) genFunc(v Value, w uint32) error {
+	o, fd, err := r.closureArg(v, w)
+	if err != nil {
+		return err
+	}
+	if !fd.code.Generator || fd.code.Async {
+		return r.wrongKind(w, "a generator function")
+	}
+	r.makeGeneratorFunction(o)
+	return nil
 }
 
 // makeGeneratorFunction completes the fresh closure o of a generator

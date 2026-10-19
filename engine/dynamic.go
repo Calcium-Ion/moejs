@@ -92,14 +92,17 @@ func (r *Realm) dynState() *dynState {
 
 // dynMeta builds the realm-private meta tree of the template code compiled
 // from a string, which belongs to the script or module of the record ref
-// (nil: none).
-func (r *Realm) dynMeta(code *bytecode.Function, ref *scriptOrModule) *dynRoot {
+// (nil: none). A function of the tree that fails bytecode.VerifyRegisters
+// is an error (fillMeta).
+func (r *Realm) dynMeta(code *bytecode.Function, ref *scriptOrModule) (*dynRoot, error) {
 	d := &dynRoot{code: code, ref: ref, realm: r}
 	d.dyn = dynFlag
 	n := uint32(0)
-	r.fillMeta(&d.funcMeta, code, &d.funcMeta, &n)
+	if err := r.fillMeta(&d.funcMeta, code, &d.funcMeta, &n); err != nil {
+		return nil, err
+	}
 	d.nfuncs = n
-	return d
+	return d, nil
 }
 
 // scriptClosure returns a function object of the dynamic script template of

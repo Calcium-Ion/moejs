@@ -1,0 +1,4 @@
+go test fuzz v1
+string("var o = {m() { return this.k; }, k: 3}; function f(a, b, c) { return o.m() + a + b + c; } f(1, 2, 3); new (class C { x = 1; constructor(a) { this.a = a; ruct")
+bool(true)
+[]byte("07000")
