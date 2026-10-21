@@ -200,6 +200,98 @@ func TestJSONStringifyStringEscapes(t *testing.T) {
 	}
 }
 
+// TestJSONStringifyEscapeRuns quotes ASCII strings with escapes in a row
+// and runs of every length up to two words between them, from every offset
+// of a word: the runs quoteASCII stores whole and those it copies, with
+// room in the output and without it (through the builder), for
+// JSON.stringify (alone, and after a string that makes the builder UTF-16)
+// and for AppendJSON, whose output fills its buffer at a different escape
+// for each prefix.
+func TestJSONStringifyEscapeRuns(t *testing.T) {
+	r := NewRealm()
+	filler := "abcdefghijklmnopqrstuvwxyz0123456789"
+	for _, e := range []string{"\n", `"`, `\`, "\x01", "\t\t", "\n\x1f\"", "\x7f"} {
+		for start := range 9 {
+			for gap := range 18 {
+				s := filler[:start] + e + filler[:gap] + e + filler[:gap%5] + e + filler[:20]
+				u := utf16.Encode([]rune(s))
+				want := refQuoteJSON(u)
+				require.Equal(t, want, stringifyUnits(t, r, FromGoString(s)), "%q", s)
+				arr := r.NewArrayFromSlice([]Value{StringValue(FromGoString("é")), StringValue(FromGoString(s))})
+				got, err := r.JSONStringify(ObjectValue(arr))
+				require.NoError(t, err)
+				require.Equal(t, `["é",`+string(utf16.Decode(want))+`]`, got.GoString(), "%q", s)
+			}
+		}
+	}
+	long := strings.Repeat("\tab\n\"c\\defghijklmn\x02o", 40)
+	for prefix := range 40 {
+		s := filler[:prefix%len(filler)] + strings.Repeat("x", prefix) + long
+		want := string(utf16.Decode(refQuoteJSON(utf16.Encode([]rune(s)))))
+		_, _, err := r.AppendJSON(nil, NumberValue(1)) // a small size hint
+		require.NoError(t, err)
+		for _, dst := range [][]byte{nil, make([]byte, 0, len(want)-3), []byte("abc")} {
+			out, ok, err := r.AppendJSON(dst, StringValue(FromGoString(s)))
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, string(dst)+want, string(out), "prefix=%d", prefix)
+		}
+	}
+}
+
+// TestJSONStringifyDenseEscapes quotes ASCII strings with an escape every
+// few bytes across several interrupt strides, so that runs and escapes
+// written in place meet the strides' ends, for JSON.stringify and for
+// AppendJSON.
+func TestJSONStringifyDenseEscapes(t *testing.T) {
+	r := NewRealm()
+	for _, seg := range []string{"\tif (x) {\n\t\treturn \"y\";\n", "\n\"", "ab\x01", "abcdefg\\"} {
+		for _, extra := range []int{0, 1, 5, 7} {
+			s := strings.Repeat("x", extra) + strings.Repeat(seg, (3*interruptStride+5)/len(seg))
+			want := string(utf16.Decode(refQuoteJSON(utf16.Encode([]rune(s)))))
+			got, err := r.JSONStringify(StringValue(FromGoString(s)))
+			require.NoError(t, err)
+			require.Equal(t, want, got.GoString(), "%q %d", seg, extra)
+			out, ok, err := r.AppendJSON(nil, StringValue(FromGoString(s)))
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, want, string(out), "%q %d", seg, extra)
+		}
+	}
+}
+
+// TestAppendJSONSpareUntouched checks that an output that fits in dst's
+// spare capacity leaves the bytes of dst past it as they were: the words
+// quoteASCII stores whole end within the output.
+func TestAppendJSONSpareUntouched(t *testing.T) {
+	r := NewRealm()
+	for _, seg := range []string{"ab\ncd\"ef", "\n\t", "abcdefg\n", "a\x01bc", "abcdefghijklmn\\"} {
+		for reps := 1; reps < 40; reps++ {
+			s := StringValue(FromGoString(strings.Repeat(seg, reps)))
+			want, _, err := r.AppendJSON(nil, s)
+			require.NoError(t, err)
+			for _, plen := range []int{0, 3} {
+				for extra := range 12 {
+					// Room for the last output and an eighth (AppendJSON's
+					// jsonSizeHint), so that the output stays in dst.
+					arr := make([]byte, plen+max(len(want)+len(want)/8+1, 256)+extra)
+					for i := range arr {
+						arr[i] = 0xAA
+					}
+					out, ok, err := r.AppendJSON(arr[:plen], s)
+					require.NoError(t, err)
+					require.True(t, ok)
+					require.Equal(t, string(want), string(out[plen:]))
+					require.Same(t, &arr[0], &out[0], "%q x%d: the output left dst", seg, reps)
+					for i := len(out); i < len(arr); i++ {
+						require.Equal(t, byte(0xAA), arr[i], "%q x%d plen=%d: byte %d past the output of %d", seg, reps, plen, i, len(out))
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestJSONStringifyLongStrings checks very long strings: an escape-free
 // one (one copy), one escape in each stride, and one escape per byte.
 func TestJSONStringifyLongStrings(t *testing.T) {
@@ -411,6 +503,211 @@ func TestJSONParseStringErrors(t *testing.T) {
 		_, err := r.JSONParse(FromGoString(c.text))
 		require.Error(t, err, c.text)
 		require.Contains(t, err.Error(), c.msg, c.text)
+	}
+}
+
+// TestJSONParseEscapedStrings parses literals that start with an escape, so
+// that the rest goes through strSlow, with a special at every offset after
+// it: runs of backslashes before a quote (escaped or closing by their
+// parity), a \u escape of a unit >= 0x80 that widens an ASCII value, bytes
+// >= 0x80, control characters and bad escapes; at the word and stride
+// boundaries of long literals, the short ones on both sides of the 64
+// bytes decoded on the stack, in ASCII and in WTF-8 text.
+func TestJSONParseEscapedStrings(t *testing.T) {
+	r := NewRealm()
+	prefixes := []string{`\n`, `\t\t\t`, `\\`, `\"`, `\u0041`, `\u00e9`, `\ud83d\ude00`, `é\n`, `\\u4f60`, `\u4f60\n`}
+	specials := []string{``, `\"`, `\\`, `\\\"`, `\\\\`, `\\\\\"`, `\"\"`, `\u00e9`, `\u0080`, `\u07ff`, `\u0800`, `\ud800`, `\udc00`, `\ud83d\ude00`,
+		`\u005c`, `\u0022`, `\/`, `\b\f\r`, `é`, `中`, `😀`, "\x00", "\x1f", `\x`, `\u12`, `\`, `"`, `\\"`,
+		`\\u00e9`, `\\\u00e9`, `\u4f60\u597d\u4f60`, `\u中0`, `\u0中`}
+	filler := "abcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	for _, n := range jsonTestLengths {
+		base := make([]byte, n)
+		for i := range base {
+			base[i] = filler[i%len(filler)]
+		}
+		for _, pre := range prefixes {
+			for _, p := range append(jsonOffsets(n), n) {
+				for _, sp := range specials {
+					body := pre + string(base[:p]) + sp + string(base[p:])
+					for _, text := range []string{`"` + body + `"`, `["中", "` + body + `"]`} {
+						want, ok := refParseJSONString(body)
+						v, err := r.JSONParseGoString(text)
+						if !ok {
+							require.Error(t, err, "%q", text)
+							verr := err
+							_, err = r.JSONParse(FromGoString(text))
+							require.Error(t, err, "%q", text)
+							require.Equal(t, verr.Error(), err.Error(), "%q", text)
+							continue
+						}
+						require.NoError(t, err, "%q", text)
+						if text[0] == '[' {
+							v = v.AsObject().Elements()[1]
+						}
+						s := v.AsString()
+						require.Equal(t, want, s.UTF16(), "%q", text)
+						wide := false
+						for _, c := range want {
+							wide = wide || c >= 0x80
+						}
+						require.Equal(t, wide, s.kind == strUTF16, "%q", text)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestJSONParseEscapedStringErrors checks the errors of literals with an
+// escape before the error, which jsonStrEnd finds no closing quote for or
+// strSlow's decoding meets first.
+func TestJSONParseEscapedStringErrors(t *testing.T) {
+	r := NewRealm()
+	for _, c := range []struct{ text, msg string }{
+		{"\"a\\nb\x01\"", "Bad control character in string literal in JSON at position 5"},
+		{"\"a\\nb\x01", "Bad control character in string literal in JSON at position 5"},
+		{"[\"a\\nb\x01\"]", "Bad control character in string literal in JSON at position 6"},
+		{`"a\nb\qc"`, "Bad escaped character in JSON at position 6"},
+		{`"a\nb\u12g4"`, "Bad Unicode escape in JSON at position 9"},
+		{`"a\nb\u12"`, "Unexpected end of JSON input"},
+		{`"a\nb\u1`, "Unexpected end of JSON input"},
+		{`"a\nb\`, "Unexpected end of JSON input"},
+		{`"a\nb\"`, "Unterminated string in JSON at position 7"},
+		{`"a\nb\\\"cd`, "Unterminated string in JSON at position 11"},
+		{`"a\n中\"`, "Unterminated string in JSON at position 9"},
+		{`"` + strings.Repeat(`a\n`, 100) + `\q"`, "Bad escaped character in JSON at position 302"},
+		{`"` + strings.Repeat(`é\n`, 100) + `\q"`, "Bad escaped character in JSON at position 402"},
+		// A control character after a run of backslashes, escaped or not.
+		{"\"ab\\\\\\\\\x01\"", "Bad control character in string literal in JSON at position 7"},
+		{"\"ab\\\\\\\x01\"", "Bad escaped character in JSON at position 6"},
+		{"\"ab\\\\\\\\\\\\\x1f", "Bad control character in string literal in JSON at position 9"},
+		{"[\"ab\\\\\\\\\x01\"]", "Bad control character in string literal in JSON at position 8"},
+		{`"` + strings.Repeat("a", 70) + `\\\\` + "\x01" + `"`, "Bad control character in string literal in JSON at position 75"},
+		{`"` + strings.Repeat("a", 70) + `é` + "\x01" + `"`, "Bad control character in string literal in JSON at position 73"},
+		{`"é` + strings.Repeat("a", 70) + `你` + "\x02", "Bad control character in string literal in JSON at position 76"},
+		// \u digits that run into the closing quote, at the end of the text.
+		{`"ab\u12"`, "Unexpected end of JSON input"},
+		{`"ab\u1"`, "Unexpected end of JSON input"},
+		{`"ab\u"`, "Unexpected end of JSON input"},
+		{`"ab\u123"`, "Bad Unicode escape in JSON at position 8"},
+		{`"ab\u00e"`, "Bad Unicode escape in JSON at position 8"},
+		{`["ab\u12"]`, "Bad Unicode escape in JSON at position 8"},
+		{`"abé\u12"`, "Unexpected end of JSON input"},
+		{`"` + strings.Repeat("a", 70) + `\n\u12"`, "Unexpected end of JSON input"},
+		{`"` + strings.Repeat("a", 70) + `\n\u123"`, "Bad Unicode escape in JSON at position 78"},
+		{`"` + strings.Repeat("a", 70) + `é\u12g4"`, "Bad Unicode escape in JSON at position 77"},
+		{`"` + strings.Repeat("a", 70) + `é\q"`, "Bad escaped character in JSON at position 74"},
+		{`"é` + strings.Repeat("a", 70) + `你\u12"`, "Unexpected end of JSON input"},
+		{`"你\\\"`, "Unterminated string in JSON at position 8"},
+		// \u and bytes >= 0x80 for digits (FuzzJSON, FuzzJSONCheck).
+		{"\"\\u\xb20\"", "Bad Unicode escape in JSON at position 3"},
+		{"[\"\\u\xff0\"", "Bad Unicode escape in JSON at position 4"},
+		{"\"é\\uéé0\"", "Bad Unicode escape in JSON at position 5"},
+		{"\"\\u4f6é\"", "Bad Unicode escape in JSON at position 6"},
+		{"\"" + strings.Repeat("a", 70) + "\\u\xb20\"", "Bad Unicode escape in JSON at position 73"},
+		{"\"é\\n\\u00中\"", "Bad Unicode escape in JSON at position 9"},
+	} {
+		_, err := r.JSONParseGoString(c.text)
+		require.Error(t, err, c.text)
+		require.Contains(t, err.Error(), c.msg, c.text)
+	}
+}
+
+// TestJSONParseBadLaterKey checks that a key after the first that does not
+// parse is reported, also when a colon follows where it should be.
+func TestJSONParseBadLaterKey(t *testing.T) {
+	r := NewRealm()
+	for _, c := range []struct{ text, msg string }{
+		{`{"a":1,:{}}`, "Unexpected token : in JSON at position 7"},
+		{`{"a":1, :2}`, "Unexpected token : in JSON at position 8"},
+		{`{"0":[0,100000,1000E00,true,false,null],:{}}`, "Unexpected token : in JSON at position 40"},
+		{`{"a":1,"\q":2}`, "Bad escaped character in JSON at position 9"},
+		{"{\"a\":1,\"b\x01\":2}", "Bad control character in string literal in JSON at position 9"},
+		{`{"a":1,"b`, "Unterminated string in JSON at position 9"},
+		{`{"a":{"b":1,:2}}`, "Unexpected token : in JSON at position 12"},
+	} {
+		_, err := r.JSONParse(FromGoString(c.text))
+		require.Error(t, err, c.text)
+		require.Contains(t, err.Error(), c.msg, c.text)
+	}
+}
+
+// TestJSONParseEscapedStringAllocs checks that an escaped literal is decoded
+// once into one buffer: a short ASCII one into a string co-allocated with
+// its header, a long one into a buffer of its literal's length besides the
+// header, one whose value is not ASCII into its code units, and one that a
+// \u escape widens within its first 64 value bytes into exactly its units.
+// One that widens later drops the byte buffer it began in.
+func TestJSONParseEscapedStringAllocs(t *testing.T) {
+	r := NewRealm()
+	for _, c := range []struct {
+		text   string
+		allocs float64
+	}{
+		{`"ab\ncd"`, 1},
+		{`"` + strings.Repeat(`abc\n\t\"def`, 1000) + `"`, 2},
+		{`"` + strings.Repeat(`中文\n`, 1000) + `"`, 2},
+		{`"` + strings.Repeat(`中文`, 1000) + `"`, 2},
+		{`"` + strings.Repeat(`abc\n`, 1000) + `\u00e9"`, 3},
+		{`"Please summarize:\n` + strings.Repeat(`\u4f60`, 500) + `"`, 2},
+		{`"` + strings.Repeat(`\u0041`, 1000) + `"`, 2},
+		{`"` + strings.Repeat(`\u4f60\u597d\uff0c ok\n`, 500) + `"`, 2},
+		{`"` + strings.Repeat(`\u4f60\u597d中\n`, 500) + `"`, 2},
+		{`"ab\u00e9"`, 2},
+	} {
+		_, err := r.JSONParseGoString(c.text)
+		require.NoError(t, err)
+		require.Equal(t, c.allocs, testing.AllocsPerRun(10, func() { r.JSONParseGoString(c.text) }), c.text[:min(20, len(c.text))])
+	}
+}
+
+// TestJSONParseEscapedStringCharge checks what a parse of an escaped
+// literal charges to a memory limit: the buffers it allocated and the
+// header.
+func TestJSONParseEscapedStringCharge(t *testing.T) {
+	r := NewRealmWith(RealmOptions{MemoryLimit: 1 << 30})
+	long := strings.Repeat(`abc\n\t\"def`, 1000)
+	units := strings.Repeat(`中文\n`, 1000)
+	for _, c := range []struct {
+		text string
+		want int
+	}{
+		{`"ab\ncd"`, stringHeaderSize + 5},
+		{`"` + long + `"`, stringHeaderSize + len(long) - 16}, // less the escapes of the first 64 bytes, decoded on the stack
+		{`"` + units + `"`, stringHeaderSize + 2*4000},        // the literal's units: an escape's two bytes count two
+		{`"` + strings.Repeat(`中文`, 1000) + `"`, stringHeaderSize + 2*2000},
+		// \u escapes: measured, so the value's own length; widened past the
+		// first 64 bytes, the byte buffer besides (the literal less the 13
+		// escapes decoded on the stack).
+		{`"` + strings.Repeat(`abc\n`, 1000) + `\u00e9"`, 5006 - 13 + stringHeaderSize + 2*4001},
+		{`"Please summarize:\n` + strings.Repeat(`\u4f60`, 500) + `"`, stringHeaderSize + 2*518},
+		// Not ASCII, its \u escapes past 64 bytes from its first escape: the
+		// loose bound of 696 units, copied to the 195 it holds (416 bytes,
+		// their size class).
+		{`"` + strings.Repeat("中", 30) + `\n` + strings.Repeat("x", 64) + strings.Repeat(`\u4f60`, 100) + `"`, 2*(30+2+64+600) + stringHeaderSize + 416},
+		{`"` + strings.Repeat(`\u4f60\u597d\uff0c ok\n`, 1000) + `"`, stringHeaderSize + 2*7000},
+		{`"` + strings.Repeat(`\u4f60\u597d中\n`, 1000) + `"`, stringHeaderSize + 2*4000},
+		{`"` + strings.Repeat(`\u0041b`, 1000) + `"`, stringHeaderSize + 2000},
+		{`"ab\u00e9"`, stringHeaderSize + 2*3},
+	} {
+		before := r.Stats().RequestAllocatedBytes
+		_, err := r.JSONParseGoString(c.text)
+		require.NoError(t, err)
+		require.Equal(t, int64(c.want), r.Stats().RequestAllocatedBytes-before, c.text[:min(20, len(c.text))])
+	}
+}
+
+// TestWTF8Units checks wtf8Units against utf16 over text with sequences of
+// each length at every offset of the eight-byte words, and over encoded
+// surrogates.
+func TestWTF8Units(t *testing.T) {
+	for _, seq := range []string{"a", "é", "中", "😀", "\xed\xa0\x80", "\xed\xbf\xbf"} {
+		for n := range 40 {
+			for p := 0; p <= n; p++ {
+				s := strings.Repeat("x", p) + seq + strings.Repeat("y", n-p) + seq + seq
+				require.Equal(t, len(appendWTF8Units(nil, s)), wtf8Units(s), "%q", s)
+			}
+		}
 	}
 }
 

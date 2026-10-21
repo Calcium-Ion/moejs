@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 	"testing"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/stretchr/testify/assert"
@@ -229,6 +230,59 @@ func TestStringBuilder(t *testing.T) {
 	grow.Grow(100)
 	grow.WriteGoString("x")
 	assert.Equal(t, "x", grow.String().GoString())
+}
+
+// TestStringBuilderWrites writes every kind of piece after prefixes of
+// every length around the inline bytes and the first heap capacities, so
+// that each write meets each store (inline, heap ASCII with and without
+// room, UTF-16) and the moves between them, and checks the result against
+// the code units written. The sizes of the builder and of the structs that
+// embed it are part of their size classes.
+func TestStringBuilderWrites(t *testing.T) {
+	assert.Equal(t, uintptr(120), unsafe.Sizeof(StringBuilder{}))
+	assert.Equal(t, uintptr(224), unsafe.Sizeof(jsonParser{}))
+	assert.Equal(t, uintptr(360), unsafe.Sizeof(jsonStringifier{}))
+	filler := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 8)
+	wide := FromGoString("éü中")
+	pieces := []struct {
+		name  string
+		write func(*StringBuilder)
+		units []uint16
+	}{
+		{"bytes", func(sb *StringBuilder) { sb.writeASCIIBytes("xyz") }, []uint16{'x', 'y', 'z'}},
+		{"no bytes", func(sb *StringBuilder) { sb.writeASCIIBytes("") }, nil},
+		{"long bytes", func(sb *StringBuilder) { sb.writeASCIIBytes(filler[:70]) }, utf16.Encode([]rune(filler[:70]))},
+		{"byte", func(sb *StringBuilder) { sb.WriteASCII('q') }, []uint16{'q'}},
+		{"two bytes", func(sb *StringBuilder) { sb.writeASCII2('\\', 'n') }, []uint16{'\\', 'n'}},
+		{"units", func(sb *StringBuilder) { sb.WriteUTF16(wide.units()) }, wide.units()},
+		{"string", func(sb *StringBuilder) { sb.WriteString(wide) }, wide.units()},
+		{"ASCII string", func(sb *StringBuilder) { sb.WriteString(FromGoString(filler[:9])) }, utf16.Encode([]rune(filler[:9]))},
+	}
+	for n := 0; n <= 2*smallASCIIMax+20; n++ {
+		for _, first := range pieces {
+			for _, second := range pieces {
+				for _, upgraded := range []bool{false, true} {
+					var sb StringBuilder
+					var want []uint16
+					if upgraded {
+						sb.WriteUnit(0xe9)
+						want = append(want, 0xe9)
+					}
+					sb.writeASCIIBytes(filler[:n])
+					want = append(want, utf16.Encode([]rune(filler[:n]))...)
+					first.write(&sb)
+					second.write(&sb)
+					want = append(append(want, first.units...), second.units...)
+					require.Equal(t, len(want), sb.Len(), "n=%d %s %s %v", n, first.name, second.name, upgraded)
+					if got := sb.String().UTF16(); len(want) == 0 {
+						require.Empty(t, got)
+					} else {
+						require.Equal(t, want, got, "n=%d %s %s %v", n, first.name, second.name, upgraded)
+					}
+				}
+			}
+		}
+	}
 }
 
 // TestStringBuilderLen checks Len through every move between the builder's

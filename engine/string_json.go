@@ -77,6 +77,140 @@ func jsonScan(s string, i int, high uint64) int {
 	return len(s)
 }
 
+// jsonQuoteSpecial is jsonSpecial without the backslash: the top bit of
+// each byte of x that is a control character or '"', or >= 0x80 when high
+// is swarMSB. Only the lowest flag is exact.
+func jsonQuoteSpecial(x, high uint64) uint64 {
+	q := x ^ ('"' * swarLSB)
+	return ((x-0x20*swarLSB)&^x | (q-swarLSB)&^q | x&high) & swarMSB
+}
+
+// jsonQuoteScan is jsonScan for jsonQuoteSpecial's bytes.
+//
+// GC safety: as in isASCII, the []byte view of s is read-only and local.
+func jsonQuoteScan(s string, i int, high uint64) int {
+	b := unsafe.Slice(unsafe.StringData(s), len(s))[i:]
+	for len(b) >= 32 {
+		m0 := jsonQuoteSpecial(binary.LittleEndian.Uint64(b), high)
+		m1 := jsonQuoteSpecial(binary.LittleEndian.Uint64(b[8:]), high)
+		m2 := jsonQuoteSpecial(binary.LittleEndian.Uint64(b[16:]), high)
+		m3 := jsonQuoteSpecial(binary.LittleEndian.Uint64(b[24:]), high)
+		if m0|m1|m2|m3 != 0 {
+			at := len(s) - len(b)
+			switch {
+			case m0 != 0:
+				return at + bits.TrailingZeros64(m0)>>3
+			case m1 != 0:
+				return at + 8 + bits.TrailingZeros64(m1)>>3
+			case m2 != 0:
+				return at + 16 + bits.TrailingZeros64(m2)>>3
+			}
+			return at + 24 + bits.TrailingZeros64(m3)>>3
+		}
+		b = b[32:]
+	}
+	for len(b) >= 8 {
+		if m := jsonQuoteSpecial(binary.LittleEndian.Uint64(b), high); m != 0 {
+			return len(s) - len(b) + bits.TrailingZeros64(m)>>3
+		}
+		b = b[8:]
+	}
+	for j, c := range b {
+		if c < 0x20 || c == '"' || c&byte(high) != 0 {
+			return len(s) - len(b) + j
+		}
+	}
+	return len(s)
+}
+
+// jsonStrEnd returns the index of the quote that closes the string literal
+// of s with an escape at i, and whether the literal has a byte >= 0x80 (high
+// is as for strSlow); -1 when a control character or the end of s comes
+// first. A quote after an odd number of backslashes is escaped: in a valid
+// literal the backslashes in a row pair up from the first, the last one
+// escaping the quote when they are odd. It stops at quotes, not at each
+// escape, so it costs a fraction of decoding.
+func jsonStrEnd(s string, i int, high uint64) (end int, wide bool) {
+	wide = high == 0
+	for i = jsonQuoteScan(s, i, high); i < len(s); i = jsonQuoteScan(s, i+1, high) {
+		switch c := s[i]; {
+		case c == '"':
+			k := i - 1 // the opening quote stops it
+			for s[k] == '\\' {
+				k--
+			}
+			if (i-k)&1 != 0 {
+				return i, wide
+			}
+		case c >= 0x80:
+			wide, high = true, 0
+		default:
+			return -1, wide
+		}
+	}
+	return -1, wide
+}
+
+// jsonHasEscapeU reports whether s has a backslash followed by a 'u': a \u
+// escape, or the u after an escaped backslash. Eight pairs a step: the
+// word at a byte is compared with backslashes and the word one byte on with
+// u's, and their OR has a zero byte where a pair matches (the test for a
+// zero byte in a word is exact).
+//
+// GC safety: as in isASCII, the []byte view of s is read-only and local.
+func jsonHasEscapeU(s string) bool {
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	pair := func(b []byte) uint64 {
+		z := (binary.LittleEndian.Uint64(b) ^ '\\'*swarLSB) | (binary.LittleEndian.Uint64(b[1:]) ^ 'u'*swarLSB)
+		return (z - swarLSB) &^ z
+	}
+	for len(b) >= 33 {
+		if (pair(b)|pair(b[8:])|pair(b[16:])|pair(b[24:]))&swarMSB != 0 {
+			return true
+		}
+		b = b[32:]
+	}
+	for len(b) >= 9 {
+		if pair(b)&swarMSB != 0 {
+			return true
+		}
+		b = b[8:]
+	}
+	for k := 0; k+1 < len(b); k++ {
+		if b[k] == '\\' && b[k+1] == 'u' {
+			return true
+		}
+	}
+	return false
+}
+
+// wtf8Units returns the number of UTF-16 code units of the WTF-8 text s:
+// one per byte that is not a continuation byte (10xxxxxx), and two for a
+// four-byte sequence (its lead is 11110xxx). Eight bytes a step, the flags
+// in the top bit of each byte summed by a multiplication.
+//
+// GC safety: as in isASCII, the []byte view of s is read-only and local.
+func wtf8Units(s string) int {
+	n := len(s)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	for len(b) >= 8 {
+		x := binary.LittleEndian.Uint64(b)
+		cont := x &^ (x << 1) & swarMSB
+		lead4 := x & (x << 1) & (x << 2) & (x << 3) & swarMSB
+		n += int((lead4>>7)*swarLSB>>56) - int((cont>>7)*swarLSB>>56)
+		b = b[8:]
+	}
+	for _, c := range b {
+		switch {
+		case c&0xC0 == 0x80:
+			n--
+		case c >= 0xF0:
+			n++
+		}
+	}
+	return n
+}
+
 // jsonPlainMin is the length from which a FromGo string remembers its scan
 // for the bytes JSON quoting escapes (jsonDeferred): a payload (an image, a
 // document) a hook forwards. A shorter one is scanned each time it is
@@ -180,6 +314,8 @@ func (p *jsonParser) plain(lit string) *String {
 
 // quoteASCII writes the quoted body of the ASCII string str. The interrupt
 // is checked every interruptStride bytes.
+//
+// GC safety: as in isASCII, the []byte view of str is read-only and local.
 func (js *jsonStringifier) quoteASCII(str string) error {
 	sb := &js.sb
 	if len(str) < 16 { // most keys and many values: bytes are quicker
@@ -195,6 +331,7 @@ func (js *jsonStringifier) quoteASCII(str string) error {
 		return nil
 	}
 	sb.Grow(len(str) + 1)
+	view := unsafe.Slice(unsafe.StringData(str), len(str))
 	run := 0
 	for base := 0; base < len(str); base += interruptStride {
 		end := min(base+interruptStride, len(str))
@@ -203,10 +340,43 @@ func (js *jsonStringifier) quoteASCII(str string) error {
 				return err
 			}
 		}
-		for i := jsonScan(str[:end], base, 0); i < end; i = jsonScan(str[:end], i+1, 0) {
-			writeASCIIString(sb, str[run:i])
-			js.escapeByte(str[i])
-			run = i + 1
+		var x uint64 // the word at run when it holds i, else 0
+		for i := jsonScan(str[:end], base, 0); i < end; {
+			if n, room := len(sb.b), cap(sb.b)-len(sb.b); room >= i-run+14 {
+				// The heap bytes have room: the run and the escape are
+				// written in place and only the length is stored
+				// (writeASCIIBytes). A run within its word is stored
+				// whole, the escape written over the bytes after it.
+				d := sb.b[n : n+room]
+				k := i - run
+				if x != 0 {
+					binary.LittleEndian.PutUint64(d, x)
+				} else {
+					copy(d, str[run:i])
+				}
+				if e := jsonEscape[str[i]]; e != 0 {
+					d[k], d[k+1] = '\\', e
+					k += 2
+				} else {
+					c := str[i]
+					d[k], d[k+1], d[k+2], d[k+3], d[k+4], d[k+5] = '\\', 'u', '0', '0', lowerHex[c>>4], lowerHex[c&15]
+					k += 6
+				}
+				sb.b = sb.b[:n+k]
+			} else {
+				writeASCIIString(sb, str[run:i])
+				js.escapeByte(str[i])
+			}
+			// The next special: escaped text has them close together, so
+			// the first word is tested here, as jsonScan would.
+			run, x = i+1, 0
+			if run+8 > end {
+				i = jsonScan(str[:end], run, 0)
+			} else if w := binary.LittleEndian.Uint64(view[run:]); jsonSpecial(w, 0) != 0 {
+				i, x = run+bits.TrailingZeros64(jsonSpecial(w, 0))>>3, w
+			} else {
+				i = jsonScan(str[:end], run+8, 0)
+			}
 		}
 	}
 	writeASCIIString(sb, str[run:])
@@ -237,11 +407,9 @@ func (js *jsonStringifier) quoteUTF16(u []uint16) error {
 			js.escapeByte(byte(c))
 			continue
 		}
-		sb.writeASCIIBytes(`\u`)
-		sb.WriteASCII(lowerHex[c>>12])
-		sb.WriteASCII(lowerHex[c>>8&15])
-		sb.WriteASCII(lowerHex[c>>4&15])
-		sb.WriteASCII(lowerHex[c&15])
+		sb.writeASCII2('\\', 'u')
+		sb.writeASCII2(lowerHex[c>>12], lowerHex[c>>8&15])
+		sb.writeASCII2(lowerHex[c>>4&15], lowerHex[c&15])
 	}
 	sb.WriteUTF16(u[run:])
 	return nil
@@ -260,9 +428,7 @@ func (js *jsonStringifier) quoteUTF8(u []uint16) error {
 		switch c := u[i]; {
 		case c < 0x80:
 			if c < 0x20 || c == '"' || c == '\\' {
-				sb.b = b
-				js.escapeByte(byte(c))
-				b = sb.b
+				b = appendJSONEscape(b, byte(c))
 				continue
 			}
 			b = append(b, byte(c))

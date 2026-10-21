@@ -45,6 +45,7 @@ func FuzzJSON(f *testing.F) {
 		`[1,]`, `{"a":1,}`, `01`, `1.`, `.5`, `+1`, `-`, `"\x41"`, `'a'`, `[1 2]`,
 		"\ufeff1", "1\n\r\t ", `{"a" 1}`, `nul`, `[`, `"`, `"\u12"`, `tRue`,
 		strings.Repeat("[", 400) + strings.Repeat("]", 400),
+		`["a\\\"b\\", "\\\\\"", "\n\t\"\u00e9x", "é\n\\"]`, `"a\n` + strings.Repeat(`\t`, 40) + `\""`, "\"\\n\x01\"",
 	} {
 		f.Add(s)
 	}

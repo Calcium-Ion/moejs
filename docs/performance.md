@@ -110,40 +110,41 @@ moejs vs Sobek, 100 iterations per operation:
 
 ![moejs plugin benchmark](assets/plugin-bench.en.png)
 
-Throughput of new-api's plugin workloads on the engines a Go program can embed, with QuickJS called straight from C as a reference, measured on 2026-10-08 with moejs v0.1.0-alpha.6.
+Throughput of new-api's plugin workloads on the engines a Go program can embed, with QuickJS called straight from C as a reference, measured on 2026-10-21 with moejs v0.1.0-alpha.9.
 
-- Intel Core i5-13500H with the benchmark pinned to the 8 threads of its 4 performance cores (taskset 0-7, GOMAXPROCS=8), Debian 12, Go 1.26.6, gcc 12.2.
+- Intel Xeon E5-2667 v4 (Broadwell, 3.2 GHz), a KVM guest with 14 vCPUs and 15 GB of RAM, with the benchmark pinned to 8 of the vCPUs (taskset 0-7, GOMAXPROCS=8), Debian 13, Go 1.26.6, gcc 14.2.
 - One runtime per worker. A call hands JSON bytes to the engine to parse, calls the plugin, and serializes the result into bytes the host owns. Each run warms up for 2 s and measures 6 s (small and agent requests) or 8 s (large requests). Runs go back to back, the engine order changes for every cell, and every cell is the median of 3 rounds.
+- Each run records the CPU time other processes in the guest used while it ran; none averaged more than a quarter of a core. Load from other guests on the host does not show up there, so every run first waited for a short probe showing the host quiet, and a run more than 5 % slower than both other rounds of its cell was repeated.
 - Small requests are 269 real calls to new-api's 10 task plugins. Agent requests are 8 different coding sessions of 100k tokens each (o200k_base): a system prompt, 12 tool definitions, a user task and the results of 67 to 102 tool calls (Go source, grep hits and test output). The agent plugin was written for this benchmark against the interface of new-api's task plugin buildSubmitRequest: it converts every message, renames the model, prefixes the system prompt, drops parameters and JSON Schema keywords the upstream rejects, and returns url, headers and body. Large requests take 25 MB in and 17 MB out.
 - Memory is the Go heap still live after a GC plus the bytes glibc malloc has in use, read while every worker is stopped right after its last call. It includes the 32 runtimes and leaves out garbage waiting for collection.
 - quickjs-go v0.7.7 turns its goroutine check on by default, which reads a goroutine stack on every API call; the charts show both settings. Both serialize with JSON.stringify, because Value.JSONStringify leaks. Sobek is the 2026-07-08 version.
 - modernc.org/quickjs v0.25.0 is QuickJS translated to pure Go by the modernc toolchain, with no cgo. It has no JSON API, so the argument goes in as text that JSON.parse reads inside the engine, and JSON.stringify writes the result. It allocates through its own allocator, which gives no in-use figure, so it has no memory number.
-- The C hosts are built with gcc 12.2: QuickJS 2026-06-04 with -O2, quickjs-ng 0.15.1 (the copy shipped in quickjs-go) with -O3.
+- The C hosts are built with gcc 14.2: QuickJS 2026-06-04 with -O2, quickjs-ng 0.15.1 (the copy shipped in quickjs-go) with -O3.
 - ParseJSONString reads the caller's string in place, so the caller must not change those bytes while the call's values are in use.
 
 Requests per second, median of 3 rounds:
 
 | Scenario | Workers | moejs (no copy) | moejs | Sobek | QuickJS pure Go (modernc) | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| Small requests | 1 | 52,750 | 54,138 | 9,566 | 19,073 | 12,093 | 29,792 | 46,446 | 34,228 |
-| Small requests | 8 | 146,944 | 132,222 | 21,803 | 62,751 | 12,908 | 108,980 | 205,938 | 140,049 |
-| Small requests | 32 | 146,959 | 140,397 | 23,689 | 59,712 | 12,258 | 106,111 | 201,756 | 134,291 |
-| Agent requests, 100k tokens | 1 | 640 | 603 | 159 | 195 | 303 | 303 | 440 | 323 |
-| Agent requests, 100k tokens | 8 | 1,894 | 1,828 | 559 | 602 | 1,045 | 1,065 | 1,740 | 1,275 |
-| Agent requests, 100k tokens | 32 | 2,001 | 1,954 | 546 | 554 | 1,016 | 1,037 | 1,721 | 1,253 |
-| One 8 MiB image | 1 | 141 | 107 | 4.2 | 5.6 | 11.9 | 11.9 | 11.6 | 14.8 |
-| One 8 MiB image | 8 | 514 | 236 | 16.1 | 18.0 | 41.1 | 41.9 | 56.5 | 54.0 |
-| One 8 MiB image | 32 | 504 | 241 | 15.4 | 17.0 | 41.0 | 40.9 | 58.0 | 53.0 |
-| Eight 1 MiB images | 1 | 147 | 113 | 4.4 | 5.5 | 12.2 | 12.0 | 11.8 | 14.6 |
-| Eight 1 MiB images | 8 | 532 | 253 | 16.5 | 18.0 | 42.2 | 41.5 | 58.8 | 53.6 |
-| Eight 1 MiB images | 32 | 500 | 252 | 15.7 | 16.5 | 40.5 | 41.5 | 57.3 | 53.2 |
+| Small requests | 1 | 30,073 | 29,720 | 4,983 | 10,519 | 6,243 | 14,428 | 32,912 | 15,965 |
+| Small requests | 8 | 176,507 | 167,400 | 24,047 | 46,701 | 5,160 | 99,633 | 262,285 | 127,922 |
+| Small requests | 32 | 180,656 | 173,501 | 24,077 | 44,074 | 5,304 | 98,157 | 262,340 | 127,314 |
+| Agent requests, 100k tokens | 1 | 580 | 562 | 99 | 109 | 154 | 157 | 300 | 219 |
+| Agent requests, 100k tokens | 8 | 3,238 | 2,933 | 564 | 407 | 1,075 | 1,116 | 2,405 | 1,734 |
+| Agent requests, 100k tokens | 32 | 3,559 | 3,294 | 565 | 377 | 1,005 | 1,078 | 2,189 | 1,605 |
+| One 8 MiB image | 1 | 83.6 | 65.3 | 2.5 | 3.0 | 5.7 | 5.6 | 10.0 | 11.0 |
+| One 8 MiB image | 8 | 561 | 269 | 18.1 | 14.9 | 40.9 | 40.7 | 77.7 | 79.1 |
+| One 8 MiB image | 32 | 570 | 284 | 18.4 | 15.7 | 41.3 | 41.0 | 77.0 | 78.5 |
+| Eight 1 MiB images | 1 | 83.6 | 65.2 | 2.6 | 2.9 | 5.7 | 5.7 | 10.0 | 9.6 |
+| Eight 1 MiB images | 8 | 546 | 268 | 19.0 | 14.9 | 40.9 | 41.0 | 77.5 | 72.9 |
+| Eight 1 MiB images | 32 | 565 | 282 | 19.9 | 14.0 | 41.2 | 40.7 | 76.2 | 78.9 |
 
 Memory in use at 32 workers, MiB (modernc has no in-use figure):
 
 | Scenario | moejs (no copy) | moejs | Sobek | QuickJS pure Go (modernc) | quickjs-go (default) | quickjs-go (check off) | QuickJS (C) | quickjs-ng (C) |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|
-| One 8 MiB image | 384 | 1,152 | 1,101 | — | 1,111 | 1,111 | 1,138 | 1,140 |
-| Eight 1 MiB images | 366 | 1,134 | 1,104 | — | 1,111 | 1,111 | 1,138 | 1,140 |
+| One 8 MiB image | 384 | 1,152 | 1,101 | — | 1,110 | 1,110 | 1,138 | 1,140 |
+| Eight 1 MiB images | 366 | 1,134 | 1,104 | — | 1,110 | 1,110 | 1,138 | 1,141 |
 
 ## Another machine
 

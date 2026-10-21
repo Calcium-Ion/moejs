@@ -192,11 +192,18 @@ func (sb *StringBuilder) WriteASCII(c byte) {
 	sb.b = append(sb.b, c)
 }
 
-// writeASCIIBytes appends bytes that are all < 0x80.
+// writeASCIIBytes appends bytes that are all < 0x80. Within the heap
+// slice's capacity it stores only the slice's length: storing it whole, as
+// sb.b = append(sb.b, s...) does at every call, stores the data pointer,
+// which costs a write barrier while the collector marks. (WriteASCII's
+// append of one byte is compiled to store only the length already.)
 func (sb *StringBuilder) writeASCIIBytes(s string) {
 	if sb.u != nil {
 		n := len(sb.u)
-		sb.u = slices.Grow(sb.u, len(s))[:n+len(s)]
+		if cap(sb.u)-n < len(s) {
+			sb.u = slices.Grow(sb.u, len(s))
+		}
+		sb.u = sb.u[:n+len(s)]
 		u := sb.u[n:][:len(s)]
 		for i := range len(s) {
 			u[i] = uint16(s[i])
@@ -209,6 +216,13 @@ func (sb *StringBuilder) writeASCIIBytes(s string) {
 			return
 		}
 		sb.spill(max(2*len(sb.inline), int(sb.n)+len(s)))
+	}
+	// The length is stored before the copy, from the slice as loaded:
+	// after the copy, a call, the slice would be loaded and checked again.
+	if b, n := sb.b, len(sb.b); n+len(s) <= cap(b) {
+		sb.b = sb.b[:n+len(s)]
+		copy(b[n:n+len(s)], s)
+		return
 	}
 	sb.b = append(sb.b, s...)
 }
@@ -246,7 +260,7 @@ func (sb *StringBuilder) WriteString(s *String) {
 		return
 	}
 	sb.upgrade()
-	sb.u = append(sb.u, s.units()...)
+	sb.appendUnits(s.units())
 }
 
 // writeRope is WriteString of a rope, out of line so that the view (flat)
@@ -260,7 +274,7 @@ func (sb *StringBuilder) writeRope(s *String) {
 		return
 	}
 	sb.upgrade()
-	sb.u = append(sb.u, f.units()...)
+	sb.appendUnits(f.units())
 }
 
 // WriteUTF16 appends raw code units: one at a time until the first unit >=
@@ -270,7 +284,31 @@ func (sb *StringBuilder) WriteUTF16(u []uint16) {
 		sb.WriteUnit(u[0])
 		u = u[1:]
 	}
-	sb.u = append(sb.u, u...)
+	sb.appendUnits(u)
+}
+
+// appendUnits appends u to the UTF-16 storage, storing only its length
+// within its capacity (writeASCIIBytes).
+func (sb *StringBuilder) appendUnits(u []uint16) {
+	n := len(sb.u)
+	if n+len(u) > cap(sb.u) {
+		sb.u = slices.Grow(sb.u, len(u))
+	}
+	b := sb.u
+	sb.u = sb.u[:n+len(u)]
+	copy(b[n:n+len(u)], u)
+}
+
+// writeASCII2 appends the bytes a and b, both < 0x80: an escape.
+func (sb *StringBuilder) writeASCII2(a, b byte) {
+	if d, n := sb.b, len(sb.b); n+2 <= cap(d) {
+		sb.b = sb.b[:n+2]
+		d = d[:n+2]
+		d[n], d[n+1] = a, b
+		return
+	}
+	sb.WriteASCII(a)
+	sb.WriteASCII(b)
 }
 
 // String finishes the builder and returns the result. The builder must not be

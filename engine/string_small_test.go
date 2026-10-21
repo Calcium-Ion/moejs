@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"math"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,5 +85,27 @@ func TestStringSize(t *testing.T) {
 	assert.Equal(t, uintptr(48), unsafe.Sizeof(String{}))
 	assert.Equal(t, uintptr(64), unsafe.Sizeof(asciiBuf16{}))
 	assert.Equal(t, uintptr(80), unsafe.Sizeof(asciiBuf32{}))
+	assert.Equal(t, uintptr(96), unsafe.Sizeof(asciiBuf48{}))
 	assert.Equal(t, uintptr(112), unsafe.Sizeof(asciiBuf64{}))
+}
+
+var smallASCIISink *String
+
+// TestSmallASCIISizeClasses checks that a co-allocated string takes the
+// size class of its length: the header and up to 16, 32, 48 or 64 bytes,
+// 64 to 112 bytes.
+func TestSmallASCIISizeClasses(t *testing.T) {
+	for n := 1; n <= smallASCIIMax; n++ {
+		per := uint64(math.MaxUint64)
+		for range 3 { // the least of three: the runtime allocates now and then
+			var m0, m1 runtime.MemStats
+			runtime.ReadMemStats(&m0)
+			for range 1000 {
+				smallASCIISink, _ = newASCIIBuf(n)
+			}
+			runtime.ReadMemStats(&m1)
+			per = min(per, (m1.TotalAlloc-m0.TotalAlloc)/1000)
+		}
+		assert.Equal(t, uint64(64+16*((n-1)/16)), per, "n=%d", n)
+	}
 }

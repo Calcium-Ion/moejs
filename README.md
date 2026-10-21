@@ -29,8 +29,10 @@ server can give every concurrent request its own runtime.
 The chart runs new-api's plugin workloads on the engines a Go program can
 embed: small task-plugin calls, 100k-token coding-agent requests that a plugin
 rewrites for the upstream, and requests that carry an 8 MiB image. QuickJS
-called straight from C is shown in grey for reference. How it was measured is
-in [docs/performance.md](docs/performance.md#plugin-scenarios).
+called straight from C is shown in grey for reference. The chart was
+measured on 2026-10-21 with moejs v0.1.0-alpha.9 on 8 vCPUs of an Intel
+Xeon E5-2667 v4; the setup is in
+[docs/performance.md](docs/performance.md#plugin-scenarios).
 
 The table below times single calls on new-api's 10 task plugins and 269
 recorded calls, on the Go caller's side, including converting the arguments

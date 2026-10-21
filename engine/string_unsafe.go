@@ -52,8 +52,10 @@ func bytesToString(b []byte) string {
 // its bytes live in one allocation, so a short concatenation, case
 // conversion or builder result costs one allocation instead of two.
 // smallASCIIMax is the longest content that qualifies (a 64-byte payload
-// puts the combined object in the 144-byte size class; longer payloads keep
-// their own allocation).
+// puts the combined object in the 112-byte size class; longer payloads keep
+// their own allocation). There is a buffer for each size class the header
+// and up to 64 bytes fill (64, 80, 96 and 112 bytes), so that a string
+// takes the class of its length.
 const smallASCIIMax = 64
 
 type asciiBuf16 struct {
@@ -64,6 +66,11 @@ type asciiBuf16 struct {
 type asciiBuf32 struct {
 	s String
 	b [32]byte
+}
+
+type asciiBuf48 struct {
+	s String
+	b [48]byte
 }
 
 type asciiBuf64 struct {
@@ -97,6 +104,9 @@ func newASCIIBuf(n int) (*String, []byte) {
 		s, b = &x.s, x.b[:n:n]
 	case n <= 32:
 		x := &asciiBuf32{}
+		s, b = &x.s, x.b[:n:n]
+	case n <= 48:
+		x := &asciiBuf48{}
 		s, b = &x.s, x.b[:n:n]
 	case n <= smallASCIIMax:
 		x := &asciiBuf64{}

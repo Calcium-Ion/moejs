@@ -23,7 +23,7 @@ moejs 支持 ES 模块、类、async/await、Proxy、BigInt 等现代 JavaScript
   <img src="docs/assets/plugin-bench.zh.png" alt="moejs 插件场景基准：小请求、10 万 token agent 请求和 8 MiB 图片请求的吞吐，以及 32 并发时真正占用的内存">
 </p>
 
-这张图在 Go 程序能嵌入的几个引擎上跑 new-api 的插件负载：任务插件的小请求、插件改写后发往上游的 10 万 token 编码 agent 请求，以及带一张 8 MiB 图片的请求。灰底里是 C 直接调用 QuickJS 的结果，作为参考。测量方法见 [docs/performance.zh_CN.md](docs/performance.zh_CN.md#插件场景)。
+这张图在 Go 程序能嵌入的几个引擎上跑 new-api 的插件负载：任务插件的小请求、插件改写后发往上游的 10 万 token 编码 agent 请求，以及带一张 8 MiB 图片的请求。灰底里是 C 直接调用 QuickJS 的结果，作为参考。数据于 2026-10-21 测量，moejs 为 v0.1.0-alpha.9，机器是 Intel Xeon E5-2667 v4 的 8 个 vCPU，测量方法见 [docs/performance.zh_CN.md](docs/performance.zh_CN.md#插件场景)。
 
 下表是单次调用的耗时：测试负载是 new-api 的 10 个任务插件和 269 个录制下来的调用，计时在 Go 调用方进行，包括参数和结果的转换。
 
