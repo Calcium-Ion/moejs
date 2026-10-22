@@ -843,10 +843,13 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			case *Exception:
 				thrown = e.Value
 			case *genFrame:
+				out := e.suspend(ev.env, ev.depth) // a generator suspends
 				if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+					// After suspend: the frame stays resumable once the
+					// host clears the interrupt.
 					return Undefined(), r.interruptError()
 				}
-				return e.suspend(ev.env, ev.depth), nil // a generator suspends
+				return out, nil
 			case frameOpMarker: // CoerceThis, MapArguments, CallEval (sloppy.go)
 				var coerced Value
 				if coerced, err = r.frameOp(insns[st.frames[fi].pc], code, st.stack[base:top:top], ev.env, this, callee); err == errFrameOp {
