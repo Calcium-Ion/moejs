@@ -1695,6 +1695,26 @@ func (w *liveWalker) str(s *String) {
 		if l, r := s.children(); l != nil {
 			w.ropes = append(w.ropes, l, r)
 		}
+	case strLazy:
+		// Its data, its source (or the text it was parsed from, its share
+		// root) and what it decoded to, which another goroutine may be
+		// publishing meanwhile (resolve).
+		w.size += int64(unsafe.Sizeof(lazyStringBlock{})) - int64(stringHeaderSize)
+		if s.right != nil {
+			w.str(s.right)
+		} else {
+			w.size += int64(len(s.s))
+		}
+		f := s.lazyData().published()
+		switch {
+		case f == nil:
+		case f.kind == strASCII && f.flags&strInBuf == 0 && unsafe.StringData(f.s) == unsafe.StringData(s.s):
+			if w.mark(unsafe.Pointer(f)) { // its units are the source
+				w.size += int64(stringHeaderSize)
+			}
+		default:
+			w.str(f)
+		}
 	}
 }
 

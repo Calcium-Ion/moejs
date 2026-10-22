@@ -211,15 +211,9 @@ func wtf8Units(s string) int {
 	return n
 }
 
-// jsonPlainMin is the length from which a FromGo string remembers its scan
-// for the bytes JSON quoting escapes (jsonDeferred): a payload (an image, a
-// document) a hook forwards. A shorter one is scanned each time it is
-// quoted, which costs little.
-//
-// FromGo tests such a string for ASCII only (isASCIILong): a host that
-// releases its call data after each hook converts the payload again for
-// every hook that reads it, and most hooks never quote it. The scan waits
-// for the first use that needs it, quote or Unmarshal's bound.
+// jsonPlainMin is the byte length from which eligible retained strings cache
+// whether they are ASCII with nothing to escape. Quoting or a JSON size bound
+// first records the result; shorter strings use the ordinary quoting path.
 const jsonPlainMin = 64 << 10
 
 // isASCIILong is isASCII for a long string: 32 bytes a step, tested
@@ -277,18 +271,6 @@ func jsonASCII(g string) (ascii, plain bool) {
 	return g[i] < 0x80 && isASCII(g[i:]), false
 }
 
-// scanJSON scans the jsonDeferred string s for the bytes JSON quoting
-// escapes, records what it found in json and reports whether there are
-// none.
-func (s *String) scanJSON() bool {
-	s.json = 0
-	if _, plain := jsonASCII(s.s); plain {
-		s.json = jsonPlain
-		return true
-	}
-	return false
-}
-
 // jsonShortMax is the longest literal JSON.parse shares between repeats.
 const jsonShortMax = 16
 
@@ -328,11 +310,13 @@ func (r *Realm) sharedPlain(lit string) *String {
 	return &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain, right: r.lazy.mem.jsonText}
 }
 
-// quoteASCII writes the quoted body of the ASCII string str. The interrupt
-// is checked every interruptStride bytes.
+// quoteBytes writes the quoted body of str, escaping its ASCII bytes and
+// copying any other byte as it is: str is ASCII, or valid UTF-8 for a raw
+// stringifier (AppendJSON), whose output is UTF-8. The interrupt is
+// checked every interruptStride bytes.
 //
 // GC safety: as in isASCII, the []byte view of str is read-only and local.
-func (js *jsonStringifier) quoteASCII(str string) error {
+func (js *jsonStringifier) quoteBytes(str string) error {
 	sb := &js.sb
 	if len(str) < 16 { // most keys and many values: bytes are quicker
 		run := 0
@@ -571,7 +555,8 @@ func ownCap(n int) int { return max(256, 2*n) }
 // only by the parser (parseText).
 func (r *Realm) JSONParseGoString(text string) (Value, error) {
 	p := jsonParser{r: r}
-	if isASCII(text) || utf8.ValidString(text) {
+	if utf8.ValidString(text) {
+		p.knownUTF8 = true
 		return p.parseText(text, nil)
 	}
 	return p.parse(FromGoString(text))
