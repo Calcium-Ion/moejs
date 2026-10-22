@@ -162,8 +162,13 @@ func (s *String) unitLen() int32 {
 	if s.n >= 0 {
 		return s.n
 	}
-	return s.resolved().n
+	return s.lazyLen()
 }
+
+// lazyLen keeps the decode call out of unitLen so Len stays inlinable.
+//
+//go:noinline
+func (s *String) lazyLen() int32 { return s.resolved().n }
 
 // isEmpty avoids decoding: constructors use emptyString for empty input,
 // so a lazy string with n == -1 is always nonempty.
@@ -203,7 +208,7 @@ func (s *String) at(i int) uint16 {
 // ASCII returns the underlying Go string and true when the string is ASCII.
 func (s *String) ASCII() (string, bool) {
 	f := s
-	if s.needsFlat() {
+	if s.kind >= strRope { // needsFlat, spelled out to stay inlinable
 		f = s.flat(new(String))
 	}
 	return f.s, f.kind == strASCII // a resolved UTF-16 string's s is ""

@@ -614,7 +614,10 @@ func (r *Realm) callValue(fn Value, this Value, args []Value) (Value, error) {
 		res, err = r.callOther(fd, this, args)
 	}
 	r.callDepth--
-	return r.finishCall(res, err)
+	if r.flatDue() {
+		return r.finishCall(res, err)
+	}
+	return res, err
 }
 
 // constructValue implements `new fn(...args)`.
@@ -642,7 +645,10 @@ func (r *Realm) constructValue(fn Value, args []Value) (Value, error) {
 		return r.Construct(fn, args, nil)
 	}
 	r.callDepth--
-	return r.finishCall(res, err)
+	if r.flatDue() {
+		return r.finishCall(res, err)
+	}
+	return res, err
 }
 
 // calleeError is the TypeError of a call or `new` instruction whose callee
