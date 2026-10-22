@@ -99,7 +99,7 @@ func ToBoolean(v Value) bool {
 		f := v.AsNumber()
 		return f != 0 && f == f
 	case TypeString:
-		return v.AsString().Len() != 0
+		return !v.AsString().isEmpty()
 	case TypeUndefined, TypeNull, TypeHole:
 		return false
 	case TypeBigInt:

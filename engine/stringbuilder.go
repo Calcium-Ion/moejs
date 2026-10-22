@@ -62,7 +62,7 @@ func (sb *StringBuilder) spill(c int) {
 // from a UTF-16 string never goes through the ASCII buffer and an upgrade.
 func (sb *StringBuilder) growFor(s *String, n int) {
 	f := s
-	if s.kind == strRope {
+	if s.needsFlat() {
 		f = s.flat(new(String))
 	}
 	if f.kind == strUTF16 && sb.u == nil && sb.b == nil && sb.n == 0 {
@@ -251,7 +251,7 @@ func (sb *StringBuilder) WriteGoString(s string) {
 
 // WriteString appends a JavaScript string.
 func (sb *StringBuilder) WriteString(s *String) {
-	if s.kind == strRope {
+	if s.needsFlat() {
 		sb.writeRope(s)
 		return
 	}
@@ -330,6 +330,18 @@ func (sb *StringBuilder) String() *String {
 	s := asciiStringCopy(sb.inline[:sb.n])
 	sb.n = 0
 	return s
+}
+
+// retained is the heap storage the next String takes over from sb: an
+// upper bound for one that FromUTF16 copies to ASCII.
+func (sb *StringBuilder) retained() int {
+	switch {
+	case sb.u != nil:
+		return 2 * cap(sb.u)
+	case sb.b != nil:
+		return cap(sb.b)
+	}
+	return int(sb.n)
 }
 
 // truncate drops the code units written after the first n.

@@ -396,7 +396,7 @@ func (r *Realm) initRegExpSubject(sub *reSubject, s *String, c *compiledRegExp) 
 	// sub keeps s, a rope as it came (the cache compares pointers), and f
 	// is what is read.
 	f := s
-	if s.kind == strRope {
+	if s.needsFlat() {
 		f = s.flat(new(String))
 	}
 	unicode := c.flags.unicode

@@ -127,11 +127,11 @@ type memAccount struct {
 	hits     int64
 	last     *MemoryLimitError // the last hit's, since the last reset
 	hitting  bool              // memoryLimitHit runs: its own charges do not hit again
-	// flat is what flattening this realm's ropes allocated since the last
-	// charge: a rope flattens wherever it is first read, which may be on
-	// another goroutine than the realm's (a value the host kept), so the
-	// rope (ropeNode) adds here atomically and the next charge takes it
-	// over.
+	// flat is what flattening this realm's ropes, and decoding its lazy
+	// strings, allocated since the last fold. Either can happen on another
+	// goroutine than the realm's (a value the host kept), so the producer
+	// adds here atomically. The realm's goroutine folds it in at a charge,
+	// a loop back-edge and a call's return, and applies the limit there.
 	flat atomic.Int64
 }
 
@@ -310,6 +310,53 @@ func (r *Realm) overBudgetSlow(n int) bool {
 	return m.lastLive+m.allocated+m.flat.Load()+int64(n) > m.limit
 }
 
+// flatDue reports that rope flattening or lazy decoding has added bytes the
+// account has not folded yet. It is the check a loop back-edge inlines; the
+// fold itself is foldFlatSlow.
+func (r *Realm) flatDue() bool {
+	lz := r.lazy
+	return lz != nil && lz.mem != nil && lz.mem.flat.Load() != 0
+}
+
+// foldFlat moves deferred rope-flatten and lazy-decode bytes into the
+// account and interrupts the realm when they pass the limit. It reports
+// whether that raised the interrupt. Producers only add to flat, from any
+// goroutine; the realm's goroutine folds at a loop back-edge and as a call
+// returns, which is where a script is stopped.
+func (r *Realm) foldFlat() bool {
+	if !r.flatDue() {
+		return false
+	}
+	return r.foldFlatSlow(r.lazy.mem)
+}
+
+//go:noinline
+func (r *Realm) foldFlatSlow(m *memAccount) bool {
+	n := m.flat.Swap(0)
+	if n == 0 {
+		return false
+	}
+	m.allocated += n
+	m.total += n
+	if m.lastLive+m.allocated <= m.limit {
+		return false
+	}
+	hits := m.hits
+	r.memoryLimitHit(m)
+	return m.hits != hits
+}
+
+// finishCall folds deferred storage on normal and exceptional returns.
+// A newly raised memory interrupt replaces the result or an ordinary
+// error. An existing InterruptedError is preserved, even if its flag was
+// cleared while unwinding.
+func (r *Realm) finishCall(res Value, err error) (Value, error) {
+	if _, interrupted := err.(*InterruptedError); interrupted || !r.foldFlat() {
+		return res, err
+	}
+	return Undefined(), r.interruptError()
+}
+
 // chargeSlow adds n bytes of kind to the account and interrupts the realm
 // when they pass the limit.
 //
@@ -367,7 +414,7 @@ func (r *Realm) substring(s *String, start, end int) *String {
 		// view (flat), which only its kind is read of, so it stays on the
 		// stack.
 		f := s
-		if s.kind == strRope {
+		if s.needsFlat() {
 			f = s.flat(new(String))
 		}
 		n := 0

@@ -269,7 +269,7 @@ func hostMap[V any](js *jsonStringifier, h *hostHeap, m map[string]V, depth int,
 			js.sb.WriteASCII(',')
 		}
 		js.sb.WriteASCII('"')
-		if err = js.quoteASCII(seg[i].k); err != nil {
+		if err = js.quoteBytes(seg[i].k); err != nil {
 			break
 		}
 		js.sb.writeASCIIBytes(`":`)
@@ -316,7 +316,7 @@ func (js *jsonStringifier) quoteGo(g string) error {
 	js.sb.WriteASCII('"')
 	if plain {
 		writeASCIIString(&js.sb, g)
-	} else if err := js.quoteASCII(g); err != nil {
+	} else if err := js.quoteBytes(g); err != nil {
 		return err
 	}
 	js.sb.WriteASCII('"')
