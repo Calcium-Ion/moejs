@@ -212,6 +212,55 @@ export function one(s) { return s.length; }
 	require.Zero(t, r.Stats().MemoryLimitHits)
 }
 
+// TestLazyDecodeLimitAtAwaitKeepsFrame stops an async function over budget
+// at an await on a pending promise, which allocates nothing, so the decode
+// is settled as the frame suspends. A pooled realm keeps the frame after the
+// host clears the interrupt; settling the promise later must resume it in
+// the block environment it suspended in, not the one of its last await.
+func TestLazyDecodeLimitAtAwaitKeepsFrame(t *testing.T) {
+	const src = `
+let r1, r2, s, out = 0;
+const p1 = new Promise(r => { r1 = r; });
+const p2 = new Promise(r => { r2 = r; });
+async function f() {
+  await p1;
+  {
+    let n = 0;
+    const g = () => n;
+    n = s.length;
+    await p2;
+    out = g() + 1;
+  }
+}
+export function start(x) { s = x; f(); }
+export function go1() { r1(); }
+export function go2() { r2(); }
+export function read() { return out; }
+`
+	r := NewRealmWith(RealmOptions{MemoryLimit: 64 << 10})
+	env := evalModuleOn(t, r, src)
+	v, err := r.JSONParseGoString(`"` + strings.Repeat("中", 16384) + `"`)
+	require.NoError(t, err)
+	call := func(name string, args ...Value) (Value, error) {
+		fn, ok := env.GetBindingValue(name)
+		require.True(t, ok, name)
+		return r.Call(fn, Undefined(), args)
+	}
+	_, err = call("start", v)
+	require.NoError(t, err)
+
+	_, err = call("go1")
+	require.ErrorIs(t, err, ErrMemoryLimit)
+
+	r.ClearInterrupt()
+	r.ResetAllocation()
+	_, err = call("go2")
+	require.NoError(t, err)
+	got, err := call("read")
+	require.NoError(t, err)
+	require.Equal(t, float64(16385), got.AsNumber())
+}
+
 // TestLazyDecodeOtherGoroutineLeavesTheAccount is a host reading a lazy
 // string off the realm's goroutine: the read only adds to flat, and the
 // realm folds that in when it next runs.
