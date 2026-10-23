@@ -183,10 +183,16 @@ func (s *String) sourceUTF8() (string, bool) {
 }
 
 // sameLazyContent reports that two lazy strings retaining the same bytes
-// text decode to the same content: one mode, or text modes and valid UTF-8,
-// which the text modes decode alike.
+// text decode to the same content: one mode, both JSON modes (one decoder),
+// or text modes and valid UTF-8, which the text modes decode alike.
 func sameLazyContent(a, b *lazyStringData, text string) bool {
-	return a.mode == b.mode || b.textMode() && a.validUTF8(text)
+	if a.mode == b.mode {
+		return true
+	}
+	if a.textMode() != b.textMode() {
+		return false
+	}
+	return !a.textMode() || a.validUTF8(text)
 }
 
 // lazyHash is Hash of a lazy string, cached in its holder: the String's
