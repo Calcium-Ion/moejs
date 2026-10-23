@@ -105,7 +105,7 @@ func (r *Realm) fromGoOther(v any, h *hostHeap) (Value, error) {
 	}
 	switch x := v.(type) {
 	case string:
-		return StringValue(FromGoString(x)), nil
+		return StringValue(r.hostString(x)), nil
 	case NativeFunc:
 		return ObjectValue(r.NewNativeFunction(AtomEmpty, 0, x)), nil
 	case func(*Realm, Value, []Value) (Value, error):

@@ -1,9 +1,7 @@
 package engine
 
 import (
-	"encoding/binary"
 	"math"
-	"math/bits"
 	"strconv"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -140,8 +138,10 @@ func (r *Realm) reviveJSONElement(o *Object, k PropertyKey, reviver Value, depth
 }
 
 type jsonParser struct {
-	r   *Realm
-	src string // ASCII text or WTF-8 working copy
+	r *Realm
+	// src is valid UTF-8 shared with the caller (knownUTF8), or a WTF-8
+	// copy of a JS string's units, which may encode lone surrogates.
+	src string
 	// short holds recent short plain literals by content (strSlot): a
 	// repeated value (a role, a type, a status) is one String.
 	short [hostStrSlots]*String
@@ -156,6 +156,9 @@ type jsonParser struct {
 	// quiet: observe no interrupt (a parse for FromGo, which may run where
 	// no error can be returned, materializing a json.RawMessage).
 	quiet bool
+	// knownUTF8 applies to the whole src. Unescaped fields inherit this
+	// guarantee without another UTF-8 check; false means unknown, not invalid.
+	knownUTF8 bool
 	// used is the largest length the value stack had when a container
 	// closed (closed), saturating; it shares the word of work and quiet.
 	used  uint16
@@ -179,17 +182,12 @@ type jsonStack struct {
 const jsonStackMax = 256
 
 func (p *jsonParser) parse(text *String) (Value, error) {
-	f := text
-	if text.kind == strRope {
-		f = text.flat(new(String))
-	}
-	if f.kind == strASCII {
-		return p.parseText(f.s)
-	}
-	return p.parseText(wtf8FromUTF16(f.units()))
+	src, knownUTF8 := text.wtf8()
+	p.knownUTF8 = knownUTF8
+	return p.parseText(src)
 }
 
-// parseText parses src, ASCII or WTF-8; the strings of the result may alias
+// parseText parses src, UTF-8 or WTF-8; the strings of the result may alias
 // it.
 func (p *jsonParser) parseText(src string) (Value, error) {
 	p.src = src
@@ -424,12 +422,9 @@ func (p *jsonParser) str() (*String, error) {
 			if high != 0 {
 				return p.plain(src[start:i]), nil
 			}
-			lit := src[start:i]
-			n := wtf8Units(lit)
-			p.r.chargeString(2 * n)
-			return utf16String(appendWTF8Units(make([]uint16, 0, n), lit)), nil
+			return p.unescapedString(src[start:i]), nil
 		case c == '\\':
-			return p.strSlow(start, i, high)
+			return p.strSlow(start, i)
 		case c < 0x20:
 			p.pos = i
 			return nil, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
@@ -440,273 +435,114 @@ func (p *jsonParser) str() (*String, error) {
 	return nil, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
 }
 
-// strSlow continues a string literal from its first escape at i; high is
-// str's: swarMSB while the bytes before i are ASCII. It finds the closing
-// quote first (jsonStrEnd, which stops at quotes, not at every escape), then
-// decodes the literal once into a buffer of the literal's length, which
-// bounds the value's. (A builder grown as it decoded cost a new buffer and
-// a copy at each step: a long text's escaped strings made several times
-// their size in garbage.)
-//
-// \u escapes are six bytes for one unit, and one of a unit >= 0x80 makes
-// the value UTF-16: the Chinese text an ensure_ascii encoder writes
-// (Python's json.dumps by default) is all such escapes. So an ASCII
-// literal's first 64 value bytes are decoded on the stack, where such an
-// escape widens the value before any buffer is allocated, and a literal
-// that widens is measured first (jsonEscapesSave): its units are allocated
-// at their number, and so are its bytes after a \u escape in those 64. A
-// literal with bytes >= 0x80 is measured the same way when a \u escape
-// comes within 64 bytes of its first escape (jsonHasEscapeU); the bound of
-// one whose \u escapes come later is loose, five units an escape, and
-// unitsString copies its units when that wastes a quarter. (Testing the
-// whole of every literal for \u escapes cost the agent requests 3.7 %
-// instructions; neither raw UTF-8 text nor ensure_ascii text mixes them.)
-func (p *jsonParser) strSlow(start, i int, high uint64) (*String, error) {
-	end, wide := jsonStrEnd(p.src, i, high)
-	if end < 0 { // a control character or the end of the text first
-		var err error
-		if end, wide, err = p.strExtent(i, high); err != nil {
-			return nil, err
-		}
-	}
-	p.pos = end + 1
-	lit := p.src[start:end]
-	if wide {
-		n := wtf8Units(lit)
-		if jsonHasEscapeU(lit[i-start : min(len(lit), i-start+smallASCIIMax)]) {
-			saved, _ := jsonEscapesSave(lit, i-start)
-			n -= saved
-		}
-		return p.strUnits(make([]uint16, 0, n), start, i, end)
-	}
-	i0, j := i, i-start
-	if j < smallASCIIMax {
-		// The value's bytes up to 64, from as many bytes of the literal at
-		// most: an escape is one byte for two or six.
-		var buf [smallASCIIMax]byte
-		copy(buf[:], lit[:j])
-		var err error
-		if j, i, wide, err = p.unescapeASCII(buf[:], j, i, min(end, i+smallASCIIMax-j)); err != nil {
-			return nil, err
-		}
-		if wide {
-			return p.strWiden(buf[:j], i, end)
-		}
-		if i >= end {
-			p.r.chargeString(j)
-			return asciiStringCopy(buf[:j]), nil
-		}
-		// The rest of the literal bounds the rest; after a \u escape, the
-		// rest is measured.
-		n := end - i
-		if jsonHasEscapeU(p.src[i0:i]) {
-			saved, units := jsonEscapesSave(p.src[:end], i)
-			if units {
-				return p.strWiden(buf[:j], i, end)
-			}
-			n -= saved
-		}
-		b := make([]byte, j+n)
-		return p.strASCII(b, copy(b, buf[:j]), i, end)
-	}
-	b := make([]byte, len(lit))
-	return p.strASCII(b, copy(b, lit[:j]), i, end)
-}
-
-// strASCII continues strSlow on the heap: it decodes the literal from i to
-// end into b after its first j bytes. i may be within a run.
-func (p *jsonParser) strASCII(b []byte, j, i, end int) (*String, error) {
-	if k := jsonScan(p.src[:end], i, 0); k > i {
-		j += copy(b[j:], p.src[i:k])
-		i = k
-	}
-	j, i, wide, err := p.unescapeASCII(b, j, i, end)
-	if err != nil {
-		return nil, err
-	}
-	if wide { // more than 64 ASCII bytes first
-		p.r.charge(len(b))
-		return p.strWiden(b[:j], i, end)
-	}
-	p.r.chargeString(len(b))
-	if j < len(b)-len(b)/4 { // mostly escapes
-		p.r.chargeString(j)
-		return asciiStringCopy(b[:j]), nil
-	}
-	return &String{s: bytesToString(b[:j]), n: int32(j), kind: strASCII}, nil
-}
-
-// strUnits decodes the literal from start to end, whose first escape is at
-// i, into u as code units.
-func (p *jsonParser) strUnits(u []uint16, start, i, end int) (*String, error) {
-	u, err := p.unescapeUnits(appendWTF8Units(u, p.src[start:i]), i, end)
-	if err != nil {
-		return nil, err
-	}
-	return p.unitsString(u), nil
-}
-
-// strWiden continues strSlow in code units from i, after the bytes b
-// decoded before it, for a literal that has an escape of a unit >= 0x80
-// from i on. The literal is ASCII there: a byte is a unit, less what the
-// escapes save.
-func (p *jsonParser) strWiden(b []byte, i, end int) (*String, error) {
-	saved, _ := jsonEscapesSave(p.src[:end], i)
-	u := make([]uint16, len(b), len(b)+end-i-saved)
-	for k, c := range b {
-		u[k] = uint16(c)
-	}
-	if k := jsonScan(p.src[:end], i, 0); k > i { // within a run
-		u = appendWTF8Units(u, p.src[i:k])
-		i = k
-	}
-	u, err := p.unescapeUnits(u, i, end)
-	if err != nil {
-		return nil, err
-	}
-	return p.unitsString(u), nil
-}
-
-// unitsString returns the string of the units u decoded into a buffer sized
-// for their literal, copied to a buffer of their length when that saves a
-// quarter, and charges what it allocated.
-func (p *jsonParser) unitsString(u []uint16) *String {
-	if len(u) < cap(u)-cap(u)/4 {
-		p.r.charge(2 * cap(u))
-		u = append([]uint16(nil), u...)
-	}
-	p.r.chargeString(2 * cap(u))
-	return utf16String(u)
-}
-
-// jsonEscapesSave returns the bytes the escapes of the literal lit save from
-// i on (each stands for one code unit), and whether a \u escape among them
-// is of a unit >= 0x80. It stops, with what it found so far, at a control
-// character or an escape decoding rejects, which decoding reports:
-// whatever it returns bounds the value then.
-func jsonEscapesSave(lit string, i int) (saved int, units bool) {
-	i = jsonScan(lit, i, 0)
-	for i+1 < len(lit) && lit[i] == '\\' {
-		if lit[i+1] != 'u' {
-			saved++
-			i += 2
-		} else {
-			if i+6 > len(lit) || (lit[i+2]|lit[i+3]|lit[i+4]|lit[i+5]) >= 0x80 {
-				// Not four hex digits, where decoding fails. (Counted, a
-				// sequence of bytes >= 0x80 among them would save more
-				// bytes than units, below what a literal with bytes >=
-				// 0x80 holds in units.)
-				return
-			}
-			// A unit below 0x80 is 00 and a digit below 8. (Of an escape
-			// that is not one, decoding fails, whatever this says.)
-			units = units || lit[i+2] != '0' || lit[i+3] != '0' || lit[i+4] > '7'
-			saved += 5
-			i += 6
-		}
-		if i < len(lit) && lit[i] != '\\' {
-			i = jsonScan(lit, i, 0)
-		}
-	}
-	return
-}
-
-// jsonUnescape maps the letter of a one-letter escape to its byte, and
-// other bytes to 0.
-var jsonUnescape = [256]byte{'"': '"', '\\': '\\', '/': '/', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}
-
-// unescapeASCII decodes the literal from i, the escape or control character
-// after a run, up to end, its closing quote or a bound before it, into b
-// after its first j bytes, and returns the bytes written and where it
-// stopped: past end, or, wide, at the backslash of an escape of a unit >=
-// 0x80, the first. An escape that starts before end is decoded whole.
-//
-// GC safety: as in isASCII, the []byte view of the text is read-only and
-// local.
-func (p *jsonParser) unescapeASCII(b []byte, j, i, end int) (n, next int, wide bool, err error) {
+// strSlow checks a string literal from the first escape at i without decoding
+// it. JSON syntax errors are reported during parsing, even if no one reads
+// the resulting string; escapedString handles decoding or retaining its bytes.
+func (p *jsonParser) strSlow(start, i int) (*String, error) {
 	src := p.src
-	view := unsafe.Slice(unsafe.StringData(src), len(src))
-	for i < end {
-		if src[i] != '\\' {
-			p.pos = i
-			return 0, 0, false, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
-		}
-		i++
-		switch e := src[i]; {
-		case jsonUnescape[e] != 0:
-			b[j] = jsonUnescape[e]
-			i++
-		case e == 'u':
-			v, err := p.hexEscape(i)
-			if err != nil {
-				return 0, 0, false, err
-			}
-			if v >= 0x80 {
-				return j, i - 1, true, nil
-			}
-			b[j] = byte(v)
-			i += 5
-		default:
-			p.pos = i
-			return 0, 0, false, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
-		}
-		j++
-		if i >= end || src[i] == '\\' { // escapes often come in a row (indentation)
-			continue
-		}
-		// The run to the next escape: often within the next word (as in
-		// jsonScan, which this calls past it), which is then stored whole,
-		// the bytes after the run to be written over or left past the
-		// value.
-		var k int
-		if i+8 > end {
-			k = jsonScan(src[:end], i, 0)
-		} else if x := binary.LittleEndian.Uint64(view[i:]); jsonSpecial(x, 0) == 0 {
-			k = jsonScan(src[:end], i+8, 0)
-		} else if k = i + bits.TrailingZeros64(jsonSpecial(x, 0))>>3; j+8 <= len(b) {
-			binary.LittleEndian.PutUint64(b[j:], x)
-			j += k - i
-			i = k
-			continue
-		}
-		j += copy(b[j:], src[i:k])
-		i = k
-	}
-	return j, i, false, nil
-}
-
-// unescapeUnits is unescapeASCII for a value that is not ASCII, appending
-// code units to u.
-func (p *jsonParser) unescapeUnits(u []uint16, i, end int) ([]uint16, error) {
-	src := p.src
-	for i < end {
-		if src[i] != '\\' {
+	// Raw copying requires valid UTF-8 and stringify's exact escape spelling.
+	// Slash and Unicode escapes disable copying: stringify may spell them differently.
+	canCopyJSON := p.knownUTF8
+	for i < len(src) {
+		switch c := src[i]; {
+		case c == '"':
+			p.pos = i + 1
+			return p.escapedString(src[start:i], canCopyJSON), nil
+		case c < 0x20:
 			p.pos = i
 			return nil, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
-		}
-		i++
-		switch e := src[i]; {
-		case jsonUnescape[e] != 0:
-			u = append(u, uint16(jsonUnescape[e]))
+		case c == '\\':
 			i++
-		case e == 'u':
-			v, err := p.hexEscape(i)
-			if err != nil {
-				return nil, err
+			if i >= len(src) {
+				p.pos = i
+				return nil, p.unexpected()
 			}
-			u = append(u, v)
-			i += 5
+			switch src[i] {
+			case '"', '\\', 'b', 'f', 'n', 'r', 't':
+				i++
+			case '/':
+				canCopyJSON = false
+				i++
+			case 'u':
+				canCopyJSON = false
+				if i+4 >= len(src) {
+					p.pos = len(src)
+					return nil, p.unexpected()
+				}
+				for k := 1; k <= 4; k++ {
+					d := digitValue(src[i+k])
+					if d < 0 || d >= 16 {
+						p.pos = i + k
+						return nil, p.r.SyntaxError("Bad Unicode escape in JSON at position %d", p.pos)
+					}
+				}
+				i += 5
+			default:
+				p.pos = i
+				return nil, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
+			}
 		default:
-			p.pos = i
-			return nil, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
+			i++
 		}
-		if i < end && src[i] != '\\' {
-			k := jsonScan(src[:end], i, 0)
-			u = appendWTF8Units(u, src[i:k])
-			i = k
-		}
+		i = jsonScan(src, i, 0)
 	}
-	return u, nil
+	p.pos = len(src)
+	return nil, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
+}
+
+// unescapedString inherits the parser's encoding knowledge without revalidation.
+func (p *jsonParser) unescapedString(text string) *String {
+	s := p.r.lazyString(text, lazyWTF8)
+	if p.knownUTF8 && s.isLazy() {
+		s.lazyData().facts.Store(factUTF8Valid)
+	}
+	return s
+}
+
+func (p *jsonParser) escapedString(text string, canCopyJSON bool) *String {
+	mode := lazyJSONContents
+	if canCopyJSON {
+		mode = lazyJSONVerbatim
+	}
+	return p.r.lazyString(text, mode)
+}
+
+// decodeJSONContents is shared by eager and lazy strings. strSlow has already
+// checked the JSON syntax; src excludes the quotes and may contain WTF-8.
+// This step decodes content, including escapes and lone UTF-16 surrogates.
+func decodeJSONContents(sb *StringBuilder, src string) {
+	var units []uint16 // scratch for the runs that are not ASCII
+	i := jsonScan(src, 0, 0)
+	sb.Grow(i + 16)
+	run := 0
+	for i < len(src) {
+		units = writeWTF8Run(sb, src[run:i], units)
+		i++ // the backslash
+		switch src[i] {
+		case '"', '\\', '/':
+			sb.WriteASCII(src[i])
+		case 'b':
+			sb.WriteASCII('\b')
+		case 'f':
+			sb.WriteASCII('\f')
+		case 'n':
+			sb.WriteASCII('\n')
+		case 'r':
+			sb.WriteASCII('\r')
+		case 't':
+			sb.WriteASCII('\t')
+		case 'u':
+			var v uint16
+			for k := 1; k <= 4; k++ {
+				v = v<<4 | uint16(digitValue(src[i+k]))
+			}
+			sb.WriteUnit(v)
+			i += 4
+		}
+		run = i + 1
+		i = jsonScan(src, run, 0)
+	}
+	writeWTF8Run(sb, src[run:], units)
 }
 
 // hexEscape returns the unit of the \u escape whose u is at i.
@@ -748,49 +584,16 @@ var hexDigits = func() (t [256]byte) {
 	return
 }()
 
-// strExtent finds the error of a string literal that jsonStrEnd found no
-// closing quote for, scanning on from the escape at i as decoding would; it
-// returns the closing quote and wide as jsonStrEnd does if it finds no
-// error.
-func (p *jsonParser) strExtent(i int, high uint64) (end int, wide bool, err error) {
-	src := p.src
-	wide = high == 0
-	for i < len(src) {
-		switch c := src[i]; {
-		case c == '"':
-			return i, wide, nil
-		case c < 0x20:
-			p.pos = i
-			return 0, false, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
-		case c >= 0x80:
-			wide, high = true, 0
-			i = jsonScan(src, i+1, 0)
-			continue
-		}
-		i++ // the backslash
-		if i >= len(src) {
-			p.pos = i
-			return 0, false, p.unexpected()
-		}
-		switch e := src[i]; {
-		case jsonUnescape[e] != 0:
-		case e == 'u':
-			v, err := p.hexEscape(i)
-			if err != nil {
-				return 0, false, err
-			}
-			if v >= 0x80 {
-				wide, high = true, 0
-			}
-			i += 4
-		default:
-			p.pos = i
-			return 0, false, p.r.SyntaxError("Bad escaped character in JSON at position %d", i)
-		}
-		i = jsonScan(src, i+1, high)
+// writeWTF8Run appends the WTF-8 run s to sb, decoding it through scratch
+// when it is not ASCII; it returns scratch for the next run.
+func writeWTF8Run(sb *StringBuilder, s string, scratch []uint16) []uint16 {
+	if isASCII(s) {
+		sb.writeASCIIBytes(s)
+		return scratch
 	}
-	p.pos = len(src)
-	return 0, false, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
+	scratch = appendWTF8Units(scratch[:0], s)
+	sb.WriteUTF16(scratch)
+	return scratch
 }
 
 // appendWTF8Units decodes a WTF-8 byte run into UTF-16 code units.
@@ -1442,30 +1245,52 @@ func writeASCIIBytes(sb *StringBuilder, b []byte) {
 const lowerHex = "0123456789abcdef"
 
 // quote implements QuoteJSONString (well-formed: lone surrogates as \uXXXX);
-// the interrupt flag is checked every interruptStride units of a long string.
+// long escaping scans check interrupts at interruptStride intervals.
 func (js *jsonStringifier) quote(s *String) error {
+	if s.isLazy() {
+		return js.quoteLazy(s)
+	}
 	if s.kind == strRope {
 		return js.quoteRope(s)
 	}
 	js.sb.WriteASCII('"')
 	var err error
 	switch {
-	case s.json != 0: // plain, or a long FromGo string not scanned yet
-		if int8(s.json) < 0 { // jsonDeferred
-			if !s.scanJSON() {
-				err = js.quoteASCII(s.s)
-				break
-			}
-		}
+	case s.json == jsonPlain:
 		writeASCIIString(&js.sb, s.s)
 	case s.kind == strASCII:
-		err = js.quoteASCII(s.s)
+		err = js.quoteBytes(s.s)
 	case js.raw:
 		err = js.quoteUTF8(s.units())
 	default:
 		err = js.quoteUTF16(s.units())
 	}
 	if err != nil {
+		return err
+	}
+	js.sb.WriteASCII('"')
+	return nil
+}
+
+// quoteLazy writes retained bytes when the output encoding permits it, and
+// otherwise quotes the decoded content. Plain ASCII is copied in both
+// output modes; AppendJSON's UTF-8 output also copies verbatim JSON and
+// quotes valid UTF-8 text in place (quoteBytes), as quoteGo does.
+func (js *jsonStringifier) quoteLazy(s *String) error {
+	d := s.lazyData()
+	copyJSON := d.plainJSON(s.s) || js.raw && d.mode == lazyJSONVerbatim
+	if !copyJSON && !(js.raw && d.validUTF8(s.s)) {
+		return js.quote(s.resolved())
+	}
+	if copyJSON {
+		if err := js.r.CheckInterrupt(); err != nil {
+			return err
+		}
+	}
+	js.sb.WriteASCII('"')
+	if copyJSON {
+		writeASCIIString(&js.sb, s.s)
+	} else if err := js.quoteBytes(s.s); err != nil {
 		return err
 	}
 	js.sb.WriteASCII('"')
@@ -1482,7 +1307,7 @@ func (js *jsonStringifier) quoteRope(s *String) error {
 	var err error
 	switch {
 	case f.kind == strASCII:
-		err = js.quoteASCII(f.s)
+		err = js.quoteBytes(f.s)
 	case js.raw:
 		err = js.quoteUTF8(f.units())
 	default:

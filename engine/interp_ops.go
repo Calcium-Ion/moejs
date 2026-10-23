@@ -611,6 +611,9 @@ func (r *Realm) callValue(fn Value, this Value, args []Value) (Value, error) {
 		res, err = r.callOther(fd, this, args)
 	}
 	r.callDepth--
+	if r.flatDue() {
+		return r.finishCall(res, err)
+	}
 	return res, err
 }
 
@@ -639,6 +642,9 @@ func (r *Realm) constructValue(fn Value, args []Value) (Value, error) {
 		return r.Construct(fn, args, nil)
 	}
 	r.callDepth--
+	if r.flatDue() {
+		return r.finishCall(res, err)
+	}
 	return res, err
 }
 

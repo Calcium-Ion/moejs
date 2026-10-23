@@ -613,7 +613,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		// --- control flow ---
 		case bytecode.Jmp:
 			off := int(int16(w >> 16))
-			if off < 0 && r.interruptFlag.Load() != 0 {
+			if off < 0 && (r.interruptFlag.Load() != 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
 				return Undefined(), r.interruptError()
 			}
 			pc += off
@@ -658,8 +658,10 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					break
 				}
 			}
-			if off := int(int16(w >> 16)); off < 0 && r.interruptFlag.Load() != 0 {
+			if off := int(int16(w >> 16)); off < 0 && (r.interruptFlag.Load() != 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
 				// The back edge of a rotated loop, taken or not (its exit).
+				// Pending rope and lazy-string bytes are folded here, so a
+				// loop that only reads lengths stops.
 				return Undefined(), r.interruptError()
 			} else if res == (k < 4) {
 				pc += off // relative to the X word
@@ -681,7 +683,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					break
 				}
 			}
-			if off := int(int16(w >> 16)); off < 0 && r.interruptFlag.Load() != 0 {
+			if off := int(int16(w >> 16)); off < 0 && (r.interruptFlag.Load() != 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
 				// The back edge of a rotated loop, taken or not (its exit).
 				return Undefined(), r.interruptError()
 			} else if res == (k < 4) {
@@ -747,8 +749,14 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				regs[a] = res
 			}
 		case bytecode.Ret:
+			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+				return Undefined(), r.interruptError()
+			}
 			return regs[a], nil
 		case bytecode.RetUndef:
+			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+				return Undefined(), r.interruptError()
+			}
 			return Undefined(), nil
 		case bytecode.Throw:
 			thrown = regs[a]
@@ -834,7 +842,13 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 			case *Exception:
 				thrown = e.Value
 			case *genFrame:
-				return e.suspend(ev.env, ev.depth), nil // a generator suspends
+				out := e.suspend(ev.env, ev.depth) // a generator suspends
+				if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+					// After suspend: the frame stays resumable once the
+					// host clears the interrupt.
+					return Undefined(), r.interruptError()
+				}
+				return out, nil
 			case frameOpMarker: // CoerceThis, MapArguments, CallEval (sloppy.go)
 				var coerced Value
 				if coerced, err = r.frameOp(insns[st.frames[fi].pc], code, st.stack[base:top:top], ev.env, this, callee); err == errFrameOp {
@@ -861,6 +875,11 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		}
 		h := findHandler(code.Handlers, st.frames[fi].pc)
 		if h == nil {
+			// Frames resumed or run without a call (await, module
+			// bodies) leave here before their rejection or module error.
+			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+				return Undefined(), r.interruptError()
+			}
 			if err == errThrown {
 				return Undefined(), &Exception{Value: thrown}
 			}

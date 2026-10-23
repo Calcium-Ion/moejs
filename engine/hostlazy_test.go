@@ -1059,9 +1059,9 @@ export function plain() {
 	assert.NotSame(t, &h.sentinel, lo.shape)
 }
 
-// TestHostLazySharedStrings: an ASCII Go string converted twice in a period
+// TestHostLazySharedStrings: the same Go string converted twice in a period
 // becomes one String (sharing an immutable string is unobservable); equal
-// contents in different Go strings, and non-ASCII strings, do not share.
+// contents in different Go strings do not share, for ASCII and non-ASCII alike.
 // The keys sort so that no ASCII string is converted between model and
 // upstream: one whose cache slot collided would evict model.
 func TestHostLazySharedStrings(t *testing.T) {
@@ -1078,7 +1078,7 @@ func TestHostLazySharedStrings(t *testing.T) {
 	assert.Same(t, get("model"), get("upstream"))
 	assert.NotSame(t, get("model"), get("zother"))
 	assert.True(t, get("model").Equals(get("zother")))
-	assert.NotSame(t, get("u1"), get("u2"))
+	assert.Same(t, get("u1"), get("u2"))
 	assert.True(t, get("u1").Equals(get("u2")))
 }
 
@@ -1283,5 +1283,25 @@ func TestHostStrDedupeIgnoresAddresses(t *testing.T) {
 		used = h.used.strings
 		require.Same(t, h.str(g[0]), h.str(g[0]))
 		require.NotSame(t, h.str(g[0]), h.str(strings.Clone(g[0])))
+	}
+}
+
+func TestHostLazyStringStorageMemoryLimit(t *testing.T) {
+	for _, count := range []int{1000, 30000} {
+		r := NewRealmWith(RealmOptions{MemoryLimit: 1 << 20})
+		input := make([]string, count)
+		for i := range input {
+			input[i] = strconv.Itoa(i)
+		}
+		v, err := r.FromGo(input)
+		require.NoError(t, err)
+		_, _ = v.AsObject().GetIndex(r, 0)
+		if count == 30000 {
+			require.Error(t, r.CheckInterrupt())
+			require.Positive(t, r.Stats().MemoryLimitHits)
+		} else {
+			require.NoError(t, r.CheckInterrupt())
+			require.Zero(t, r.Stats().MemoryLimitHits)
+		}
 	}
 }

@@ -404,6 +404,21 @@ export function setInside() { const a = []; for (let i = 0; i < 1000; i++) a.pus
 	assert.Zero(t, rt4.Stats().RequestAllocatedBytes)
 }
 
+// TestMemoryLimitLazyModuleThrow: a linked module body runs without a call;
+// the strings it decoded count before its exception becomes the load error.
+func TestMemoryLimitLazyModuleThrow(t *testing.T) {
+	dep, err := moejs.Compile("dep.js", `export const y = 1;`)
+	require.NoError(t, err)
+	mod, err := moejs.Compile("entry.js", `import "dep"; const x = JSON.parse(input); throw x.length;`)
+	require.NoError(t, err)
+	mod, err = moejs.Link(mod, func(moejs.Referrer, string) (*moejs.Module, error) { return dep, nil })
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: 64 << 10})
+	require.NoError(t, rt.SetGlobal("input", `"`+strings.Repeat("中", 40000)+`"`))
+	requireMemoryHit(t, rt.Load(mod), 64<<10)
+	assert.Equal(t, int64(1), rt.Stats().MemoryLimitHits)
+}
+
 // TestMemoryLimitOff: SetMemoryLimit(0) removes the limit and its counters.
 func TestMemoryLimitOff(t *testing.T) {
 	rt, mod, _ := newMemRuntime(t, 1<<20)
