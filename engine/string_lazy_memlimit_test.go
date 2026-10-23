@@ -76,6 +76,71 @@ export function unwind(xs, i) {
 	}
 }
 
+func TestLazySameSourceEqualsWithoutDecode(t *testing.T) {
+	const json = `a\n\u4e2d`
+	const text = "a中"
+	cases := []struct {
+		name string
+		a, b *String
+		want bool
+	}{
+		{"json_modes", newLazyString(json, lazyJSONContents), newLazyString(json, lazyJSONVerbatim), true},
+		{"text_modes", newLazyString(text, lazyText), newLazyString(text, lazyWTF8), true},
+		{"text_and_json", newLazyString(text, lazyText), newLazyString(text, lazyJSONContents), true},
+	}
+	for _, c := range cases {
+		for _, pair := range [][2]*String{{c.a, c.b}, {c.b, c.a}} {
+			require.Equal(t, c.want, pair[0].Equals(pair[1]), c.name)
+		}
+		if c.name != "text_and_json" {
+			require.Nil(t, c.a.lazyData().decoded, c.name)
+			require.Nil(t, c.b.lazyData().decoded, c.name)
+		}
+	}
+}
+
+// A job that resumes a frame without a call (an awaiting async function or
+// async generator) and ends in a rejection must still account for its reads.
+func TestLazyJobRejectionHonorsMemoryLimit(t *testing.T) {
+	const src = `
+export function asyncFn(xs) {
+  for (let i = 0; i < xs.length; i++) {
+    (async function () { await 0; throw xs[i].length; })();
+  }
+}
+export function asyncGen(xs) {
+  for (let i = 0; i < xs.length; i++) {
+    async function* gen() { await 0; throw xs[i].length; }
+    gen().next();
+  }
+}
+export function lastJob(xs) {
+  async function* gen() { await 0; throw xs[0].length; }
+  gen().next();
+}
+`
+	one := `"` + strings.Repeat("中", 16384) + `"`
+	input := "[" + strings.Repeat(one+",", 31) + one + "]"
+	for _, name := range []string{"asyncFn", "asyncGen", "lastJob"} {
+		t.Run(name, func(t *testing.T) {
+			limit := int64(64 << 10)
+			if name == "lastJob" {
+				limit = 32 << 10
+			}
+			r := NewRealmWith(RealmOptions{MemoryLimit: limit})
+			env := evalModuleOn(t, r, src)
+			r.ResetAllocation()
+			v, err := r.JSONParseGoString(input)
+			require.NoError(t, err)
+			fn, ok := env.GetBindingValue(name)
+			require.True(t, ok)
+			_, err = r.Call(fn, Undefined(), []Value{v})
+			require.ErrorIs(t, err, ErrMemoryLimit)
+			require.Equal(t, int64(1), r.Stats().MemoryLimitHits)
+		})
+	}
+}
+
 // A new deferred-memory check must not replace errors when the read fits
 // the budget or an interruption was already observed by the native call.
 func TestLazyCallPreservesExistingErrors(t *testing.T) {

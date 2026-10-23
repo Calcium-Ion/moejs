@@ -876,6 +876,11 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		}
 		h := findHandler(code.Handlers, st.frames[fi].pc)
 		if h == nil {
+			// Frames resumed or run without a call (await, module
+			// bodies) leave here before their rejection or module error.
+			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+				return Undefined(), r.interruptError()
+			}
 			if err == errThrown {
 				return Undefined(), &Exception{Value: thrown}
 			}
