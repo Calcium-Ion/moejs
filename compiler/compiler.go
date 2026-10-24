@@ -34,7 +34,7 @@ func (e *Error) Error() string {
 }
 
 // unsupportedSuffix is appended to every deferred-feature message.
-const unsupportedSuffix = " is not supported yet (see TODO.md)"
+const unsupportedSuffix = " is not supported yet"
 
 // CompileModule compiles a parsed module into its top-level function
 // template (Kind == KindModule). The module's bindings become the slots of
@@ -44,14 +44,32 @@ const unsupportedSuffix = " is not supported yet (see TODO.md)"
 // returns the promise of its evaluation.
 func CompileModule(m *syntax.Module) (*bytecode.Function, error) {
 	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
-		return compileModuleWith(m, noHoist)
+		return compileModuleWith(m, nil, noHoist)
 	})
 }
 
-// compileModuleWith is CompileModule without hoisting in the functions of
-// noHoist.
-func compileModuleWith(m *syntax.Module, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
-	c := newCompiler(m.File, nil, noHoist)
+// CompileModuleStop is CompileModule calling stop, when not nil, before
+// every stopEvery-th statement of each statement list it compiles, the
+// first included, and after every stopEvery elements of an array or
+// object literal or arguments of a call: the error stop returns ends the
+// compile, which returns it as is.
+func CompileModuleStop(m *syntax.Module, stop func() error) (*bytecode.Function, error) {
+	if stop == nil {
+		return CompileModule(m) // whose closure holds less
+	}
+	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
+		return compileModuleWith(m, stop, noHoist)
+	})
+}
+
+// compileModuleWith is CompileModuleStop without hoisting in the functions
+// of noHoist.
+func compileModuleWith(m *syntax.Module, stop func() error, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
+	var sc *scriptState // a module needs none, but to hold stop
+	if stop != nil {
+		sc = &scriptState{stop: stop}
+	}
+	c := newCompiler(m.File, sc, noHoist)
 	defer c.recover(&err)
 	defer c.release()
 	f := c.newFuncState(nil, nil, bytecode.KindModule, m.Scope)
@@ -129,18 +147,19 @@ func (c *compiler) links(m *syntax.Module) *bytecode.Links {
 // declarative environment, both read and written by name. The script is
 // sloppy mode code unless its directive prologue says "use strict".
 func CompileScript(s *syntax.Script) (*bytecode.Function, error) {
-	return compileScriptStop(s, nil)
+	return CompileScriptStop(s, nil)
 }
 
-// compileScriptStop is CompileScript, calling stop as scriptState.stop.
-func compileScriptStop(s *syntax.Script, stop func() error) (*bytecode.Function, error) {
+// CompileScriptStop is CompileScript calling stop as CompileModuleStop
+// does.
+func CompileScriptStop(s *syntax.Script, stop func() error) (*bytecode.Function, error) {
 	return compileUnit(func(noHoist map[*syntax.Function]bool) (*bytecode.Function, error) {
 		return compileScriptWith(s, stop, noHoist)
 	})
 }
 
-// compileScriptWith is compileScriptStop without hoisting in the functions of
-// noHoist.
+// compileScriptWith is CompileScriptStop without hoisting in the functions
+// of noHoist.
 func compileScriptWith(s *syntax.Script, stop func() error, noHoist map[*syntax.Function]bool) (fn *bytecode.Function, err error) {
 	c := newCompiler(s.File, &scriptState{stop: stop}, noHoist)
 	defer c.recover(&err)
@@ -245,7 +264,7 @@ func newCompiler(file *syntax.File, script *scriptState, noHoist map[*syntax.Fun
 type scriptState struct {
 	globals []*syntax.Binding // the script-scope bindings, by global location slot
 	withs   []*syntax.Scope   // the with statements around the code being compiled, innermost last
-	stop    func() error      // code from a string: ends the compile with its error (Hook, syntax.Options.Stop)
+	stop    func() error      // ends the compile with its error (Hook, CompileModuleStop, syntax.Options.Stop)
 	evals   *evalMemo         // the direct eval call sites' scopes (eval.go)
 }
 
@@ -276,10 +295,19 @@ func (c *compiler) recover(err *error) {
 	}
 }
 
-// poll calls the stop function of a compile of code from a string before
-// the statement at index i of a list, every stopEvery statements.
+// poll calls the compile's stop function before the statement at index i
+// of a list, every stopEvery statements.
 func (c *compiler) poll(i int) {
 	if i&(stopEvery-1) == 0 && c.script != nil && c.script.stop != nil {
+		c.stopNow()
+	}
+}
+
+// pollItem calls the compile's stop function after every stopEvery items
+// of a list (array and object literals, arguments), of which n were
+// compiled.
+func (c *compiler) pollItem(n int) {
+	if n&(stopEvery-1) == stopEvery-1 && c.script != nil && c.script.stop != nil {
 		c.stopNow()
 	}
 }

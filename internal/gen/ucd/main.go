@@ -4,7 +4,9 @@
 // 67, the properties of strings of the v flag, simple case folding and the
 // non-u Canonicalize mapping. With -norm it generates
 // engine/unicode_norm_tables.go instead, the normalization data of
-// String.prototype.normalize (norm.go).
+// String.prototype.normalize (norm.go), and with -seg
+// engine/unicode_seg_tables.go, the text segmentation data of
+// Intl.Segmenter (seg.go).
 //
 // The UCD files are downloaded from unicode.org at generation time only
 // (-cache keeps a local copy); the output is deterministic and committed.
@@ -18,6 +20,10 @@
 // and from engine/ (see the go:generate line in string_normalize.go):
 //
 //	go run ../internal/gen/ucd -norm unicode_norm_tables.go [-normtest file] [-cache dir]
+//
+// and from engine/ (see the go:generate line in segment.go):
+//
+//	go run ../internal/gen/ucd -seg unicode_seg_tables.go [-segtest dir] [-cache dir]
 package main
 
 import (
@@ -85,9 +91,15 @@ func main() {
 	flag.StringVar(&cacheDir, "cache", "", "directory for downloaded UCD files (reused when present)")
 	norm := flag.String("norm", "", "write the normalization tables to this file instead")
 	normTest := flag.String("normtest", "", "with -norm, also write the trimmed NormalizationTest.txt (gzip) here")
+	seg := flag.String("seg", "", "write the segmentation tables to this file instead")
+	segTest := flag.String("segtest", "", "with -seg, also write the trimmed break tests (gzip) into this directory")
 	flag.Parse()
 	if *norm != "" {
 		writeNorm(*norm, *normTest)
+		return
+	}
+	if *seg != "" {
+		writeSeg(*seg, *segTest)
 		return
 	}
 

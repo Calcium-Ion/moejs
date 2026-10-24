@@ -109,7 +109,7 @@ func (f regexpFlags) String() string {
 type regexpUnsupportedError struct{ feature string }
 
 func (e *regexpUnsupportedError) Error() string {
-	return "regular expression feature " + e.feature + " is not supported yet (see TODO.md)"
+	return "regular expression feature " + e.feature + " is not supported yet"
 }
 
 // translatedRegExp is the output of translateRegExp.

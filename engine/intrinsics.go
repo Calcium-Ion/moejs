@@ -42,13 +42,13 @@ func installIntrinsics(r *Realm) {
 // behaviour an installer supplies later.
 func notAvailableCall(name string) NativeFunc {
 	return func(r *Realm, this Value, args []Value) (Value, error) {
-		return Undefined(), r.TypeError("%s is not available yet (see TODO.md)", name)
+		return Undefined(), r.TypeError("%s is not available yet", name)
 	}
 }
 
 func notAvailableConstruct(name string) NativeCtor {
 	return func(r *Realm, args []Value, newTarget *Object) (Value, error) {
-		return Undefined(), r.TypeError("%s is not available yet (see TODO.md)", name)
+		return Undefined(), r.TypeError("%s is not available yet", name)
 	}
 }
 

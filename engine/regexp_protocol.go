@@ -416,6 +416,14 @@ func regexpSymReplace(r *Realm, rx *Object, str, replaceValue Value) (Value, err
 	if d := r.pristineRegExp(rx, rxExec|rxFlags); d != nil {
 		return regexpReplace(r, rx, d, s, replaceValue)
 	}
+	return regexpSymReplaceGeneric(r, rx, s, replaceValue, functional, tmpl)
+}
+
+// regexpSymReplaceGeneric is regexpSymReplace through the receiver's exec
+// and flags. The exec results and the builder are held only in Go while
+// exec and the replacer run: a charge made there waits for the return.
+func regexpSymReplaceGeneric(r *Realm, rx *Object, s *String, replaceValue Value, functional bool, tmpl *String) (Value, error) {
+	defer r.holdingEnd(r.holdingBegin())
 	flags, err := r.regexpFlagsString(rx)
 	if err != nil {
 		return Undefined(), err

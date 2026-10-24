@@ -335,14 +335,16 @@ additions such as the `Set` methods, `Promise.try`, `Float16Array`,
 expressions support every flag and Unicode 17 properties, and `Date` takes
 its time zones from Go.
 
-On [test262](https://github.com/tc39/test262), 79,385 tests pass and 0
-fail. The other 14,058 tests use features moejs does not implement and are
+On [test262](https://github.com/tc39/test262), 79,845 tests pass and 0
+fail. The other 14,234 tests use features moejs does not implement and are
 skipped. Results by directory are in
 [bench/test262/RESULTS.md](bench/test262/RESULTS.md).
 
 Not implemented: import attributes and JSON modules, `using` declarations
-and `DisposableStack`, decorators, iterator helpers, `Intl`, `Temporal`,
-`ShadowRealm`, `FinalizationRegistry` and `JSON.rawJSON`. A bare `Runtime`
+and `DisposableStack`, decorators, iterator helpers, `Intl.Collator` and
+the other `Intl` constructors but `Intl.Locale`, `Intl.Segmenter`,
+`Intl.NumberFormat`, `Intl.DateTimeFormat` and `Intl.PluralRules` (whose
+number and date data cover eleven languages), `Temporal`, `ShadowRealm`, `FinalizationRegistry` and `JSON.rawJSON`. A bare `Runtime`
 has no timers; the `eventloop` package installs them. [TODO.md](TODO.md)
 lists all of these, the known wrong results and the limits.
 

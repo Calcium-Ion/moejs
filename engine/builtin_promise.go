@@ -50,6 +50,8 @@ var promiseStatics = []builtinDef{
 func installPromise(r *Realm) {
 	proto := r.newIntrinsic(ClassObject, r.ObjectPrototype, len(promiseProtoMethods)+2)
 	ctor := r.newConstructor(AtomPromise, 1, requireNew("Promise"), promiseConstruct, proto)
+	// The executor's resolving functions keep the promise it runs for.
+	ctor.internal.(*FunctionData).measurable = true
 	r.promise = &promiseIntrinsics{proto: proto, ctor: ctor}
 	r.installBuiltins(proto, promiseProtoMethods)
 	r.installToStringTag(proto, AtomPromise)

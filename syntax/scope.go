@@ -127,6 +127,60 @@ func (s *Scope) add(b *Binding) {
 
 // ---- Resolver ---------------------------------------------------------------
 
+// resolveDeep is the number of scopes resolve walks up from a reference
+// before it memoizes what it finds.
+const resolveDeep = 32
+
+// deepKey is a name resolved from a scope (resolver.deep).
+type deepKey struct {
+	s    *Scope
+	name string
+}
+
+// resolve is r.scope.Resolve(name) for an identifier reference. Past
+// resolveDeep scopes it remembers, for each scope it walks past, what the
+// name resolves to from there, so that the references of a nesting
+// thousands of scopes deep, each naming something far up, do not walk to
+// the top one by one, in time quadratic in the depth. That holds because
+// the scopes around a reference have all their bindings by the time it is
+// resolved, but for arguments and the hidden ones, which no identifier
+// reference names here.
+func (r *resolver) resolve(name string) *Binding {
+	s := r.scope
+	for i := 0; s != nil; i++ {
+		if b := s.Lookup(name); b != nil {
+			return b
+		}
+		s = s.Parent
+		if i == resolveDeep && s != nil {
+			return r.resolveDeep(s, name)
+		}
+	}
+	return nil
+}
+
+// resolveDeep is resolve from s on, through r.deep.
+func (r *resolver) resolveDeep(s *Scope, name string) *Binding {
+	if r.deep == nil {
+		r.deep = make(map[deepKey]*Binding)
+	}
+	from := s
+	var b *Binding
+	for ; s != nil; s = s.Parent {
+		if found, ok := r.deep[deepKey{s, name}]; ok {
+			b = found
+			break
+		}
+		if b = s.Lookup(name); b != nil {
+			break
+		}
+	}
+	for ; from != s; from = from.Parent {
+		r.deep[deepKey{from, name}] = b
+	}
+	return b
+}
+
 // fnFrame is one function on the resolver's stack. frames[0] is the module or
 // script itself (fn == nil).
 type fnFrame struct {
@@ -155,10 +209,13 @@ type hoistInfo struct {
 }
 
 type resolver struct {
-	file     *File
-	stop     func() error // Options.Stop
-	module   *Module
-	scope    *Scope
+	file   *File
+	stop   func() error // Options.Stop
+	module *Module
+	scope  *Scope
+	// deep remembers what a name resolves to from a scope past
+	// resolveDeep scopes up from a reference (resolve).
+	deep     map[deepKey]*Binding
 	frames   []*fnFrame
 	varsIn   map[Node][]string // var names declared inside each block-like node
 	tdzScope *Scope            // for-in/of head scope whose bindings are in TDZ while the RHS is evaluated
@@ -1333,7 +1390,8 @@ func (r *resolver) exportDefault(s *ExportDefault) {
 // ---- Expressions ------------------------------------------------------------
 
 func (r *resolver) exprs(list []Expr) {
-	for _, e := range list {
+	for i, e := range list {
+		pollItem(r.stop, i)
 		if e != nil {
 			r.expr(e)
 		}
@@ -1442,7 +1500,8 @@ func (r *resolver) objectLit(o *ObjectLit) {
 	if o.dupProto != 0 {
 		r.fail(o.dupProto, "Duplicate __proto__ fields are not allowed in object literals")
 	}
-	for _, prop := range o.Props {
+	for i, prop := range o.Props {
+		pollItem(r.stop, i)
 		if prop.Kind == PropCoverInit {
 			r.fail(prop.Pos, "Invalid shorthand property initializer")
 		}
@@ -1464,7 +1523,7 @@ func (r *resolver) ident(id *Ident) {
 		r.checkClassArguments(id)
 		b = r.argumentsBinding()
 	} else {
-		b = r.scope.Resolve(id.Name)
+		b = r.resolve(id.Name)
 	}
 	if r.withs > 0 {
 		r.throughWith(b)

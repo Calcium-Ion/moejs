@@ -73,11 +73,18 @@ type RealmOptions struct {
 	// affected.
 	DisableDynamicCode bool
 
-	// MemoryLimit is the number of bytes the realm may allocate for
-	// JavaScript between resets (ReleaseCallData, ResetAllocation) before
-	// it interrupts itself with a *MemoryLimitError (memlimit.go); 0 means
-	// no limit. It can be changed later with Realm.SetMemoryLimit.
+	// MemoryLimit is the number of bytes the realm's JavaScript may retain,
+	// as the last measurement of its heap found, plus allocate since that
+	// measurement or the last reset (ReleaseCallData, ResetAllocation),
+	// before it interrupts itself with a *MemoryLimitError (memlimit.go); 0
+	// means no limit. It can be changed later with Realm.SetMemoryLimit.
 	MemoryLimit int64
+
+	// Locale is the default locale of Intl and of the toLocaleString
+	// methods, a BCP 47 language tag; "" or a tag that is not well-formed
+	// means "en-US". It is canonicalized without its Unicode extension and
+	// can be changed later with Realm.SetLocale.
+	Locale string
 }
 
 // Intrinsics holds the intrinsic objects of a realm. A realm points at its
@@ -294,6 +301,7 @@ func NewRealmWith(opts RealmOptions) *Realm {
 	r.SetMaxDynamicSource(opts.MaxDynamicSource)
 	r.SetDynamicCodeDisabled(opts.DisableDynamicCode)
 	r.SetMemoryLimit(opts.MemoryLimit)
+	r.SetLocale(opts.Locale)
 	return r
 }
 
@@ -463,7 +471,23 @@ func (r *Realm) freezeIntrinsics() {
 		}
 		r.shareObject(o)
 	}
-	for _, o := range []*Object{
+	r.visitIntrinsicRoots(visit)
+	// The global object stays per realm; only its shape and slot values are
+	// shared, and every value must already be shared.
+	for _, k := range r.Global.OwnPropertyKeys() {
+		if c, _ := r.Global.getOwnCell(k); c.value.IsObject() && c.value.AsObject() != r.Global {
+			visit(c.value.AsObject())
+		}
+	}
+	r.Global.shape.prepareShared()
+}
+
+// visitIntrinsicRoots feeds every root of the intrinsics to visit, nil for
+// one a mutable realm has yet to define: to the freeze walk of the shared
+// template (freezeIntrinsics) and to the live measurement of a mutable
+// realm (memlive.go).
+func (r *Realm) visitIntrinsicRoots(visit func(*Object)) {
+	for _, o := range [...]*Object{
 		r.ObjectPrototype, r.FunctionPrototype, r.ArrayPrototype, r.StringPrototype, r.NumberPrototype,
 		r.BooleanPrototype, r.ErrorPrototype, r.RegExpPrototype, r.DatePrototype, r.BigIntPrototype, r.ArrayIteratorPrototype,
 		r.ObjectCtor, r.FunctionCtor, r.ArrayCtor, r.StringCtor, r.NumberCtor, r.BooleanCtor,
@@ -476,14 +500,6 @@ func (r *Realm) freezeIntrinsics() {
 		visit(r.errorCtors[k])
 	}
 	r.visitExtIntrinsics(visit)
-	// The global object stays per realm; only its shape and slot values are
-	// shared, and every value must already be shared.
-	for _, k := range r.Global.OwnPropertyKeys() {
-		if c, _ := r.Global.getOwnCell(k); c.value.IsObject() && c.value.AsObject() != r.Global {
-			visit(c.value.AsObject())
-		}
-	}
-	r.Global.shape.prepareShared()
 }
 
 // shareObject freezes o (Object.freeze semantics), detaches it from the

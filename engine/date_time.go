@@ -204,8 +204,14 @@ type realmHost struct {
 	now       func() time.Time
 	loc       *time.Location
 	imports   *ImportHooks
-	maxSource int  // MaxDynamicSource; zero: DefaultMaxDynamicSource (eval.go)
-	noDynamic bool // DisableDynamicCode (eval.go)
+	maxSource int32 // MaxDynamicSource; zero: DefaultMaxDynamicSource (eval.go)
+	noDynamic bool  // DisableDynamicCode (eval.go)
+	// intl is the default locale and the cached formatters of the
+	// toLocaleString methods (intl_data.go); nil until either is needed.
+	intl *realmIntl
+	// roots are the roots hosts add to the live measurements
+	// (AddLiveRoots, memlive.go).
+	roots *liveRoots
 }
 
 // SetNow sets the clock used by Date.now() and new Date(); nil restores

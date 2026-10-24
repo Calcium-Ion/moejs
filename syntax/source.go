@@ -19,18 +19,21 @@ type Options struct {
 	// this variant of an import-free module only when an import cycle can
 	// call into it before its body ran (engine.LinkOptions.EarlyExports).
 	EarlyExports bool
-	// TypeScript makes ParseModule read TypeScript, whose type syntax it
+	// TypeScript makes the parser read TypeScript, whose type syntax it
 	// erases: the tree is the one the type-erased JavaScript gives, with
 	// every position in the TypeScript text. Import specifiers used only as
 	// types are dropped, and TypeScript with run-time semantics (enums,
 	// namespaces with values, parameter properties, import = require,
-	// export =) is a syntax error. ParseScript rejects it: TypeScript code
-	// is a module here.
+	// export =) is a syntax error. ParseScript reads it as strict mode
+	// script code, as a function's parameters and body are compiled.
 	TypeScript bool
 	// Stop, when set, is called before every stopEvery-th statement of each
 	// statement list the parser and the resolver go through, the first
-	// included: an error it returns ends the parse, which returns that error
-	// rather than a *Error. The engine passes one that reports an interrupt,
+	// included, and after every stopEvery items of the other lists (array
+	// and object literals, arguments, parameters, chains of binary
+	// operators, union and intersection types, interface and object type
+	// members, tuple types): an error it returns ends the parse, which
+	// returns that error rather than a *Error. The engine passes one that reports an interrupt,
 	// so that one can stop a long compile of code from a string
 	// (engine.Compiler); a host compile has none and pays nothing for it.
 	Stop func() error
@@ -48,6 +51,17 @@ type stopped struct{ err error }
 // stopEvery statements, unwinding with its error.
 func poll(stop func() error, i int) {
 	if stop != nil && i&(stopEvery-1) == 0 {
+		stopNow(stop)
+	}
+}
+
+// pollItem calls stop after every stopEvery items of a list, an array or
+// object literal's elements, a call's arguments, a function's parameters,
+// the operators of a chain of binary ones, a union type's members or an
+// interface's, of which n were read: one long statement is polled too.
+// With no stop it costs a test of a register.
+func pollItem(stop func() error, n int) {
+	if stop != nil && n&(stopEvery-1) == stopEvery-1 {
 		stopNow(stop)
 	}
 }

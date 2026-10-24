@@ -928,13 +928,15 @@ func typedArrayJoin(r *Realm, this Value, args []Value) (Value, error) {
 }
 
 // typedArrayToLocaleString implements %TypedArray%.prototype.toLocaleString
-// as Array.prototype.toLocaleString does (arrayProtoToLocaleString).
+// (ECMA-402) as Array.prototype.toLocaleString does
+// (arrayProtoToLocaleString).
 func typedArrayToLocaleString(r *Realm, this Value, args []Value) (Value, error) {
 	ta, n, err := r.validateTypedArray(this, "%TypedArray%.prototype.toLocaleString")
 	if err != nil {
 		return Undefined(), err
 	}
 	var sb StringBuilder
+	var localeArgs []Value
 	for k := range n {
 		if k > 0 {
 			sb.WriteString(commaString)
@@ -944,7 +946,10 @@ func typedArrayToLocaleString(r *Realm, this Value, args []Value) (Value, error)
 			if err != nil {
 				return Undefined(), err
 			}
-			sv, err := r.Call(fn, v, nil)
+			if localeArgs == nil {
+				localeArgs = []Value{intlArg(args, 0), intlArg(args, 1)}
+			}
+			sv, err := r.Call(fn, v, localeArgs)
 			if err != nil {
 				return Undefined(), err
 			}

@@ -1,6 +1,9 @@
 package syntax
 
-import "strings"
+import (
+	"reflect"
+	"strings"
+)
 
 // TypeScript (Options.TypeScript). The parser reads TypeScript and drops
 // its type syntax as it goes, so the tree is the one the type-erased
@@ -18,7 +21,8 @@ import "strings"
 
 // tsShared is the parser's TypeScript state (parser.tsx): the context a
 // speculative parse restores (tsState), and memos of what failed ones
-// ruled out and what the scope pass needs, which it keeps.
+// ruled out, of what they read (reuse) and what the scope pass needs,
+// which it keeps.
 type tsShared struct {
 	tsState
 	// notArrow holds the start of each `(`, `<` or `async` where an arrow
@@ -29,9 +33,21 @@ type tsShared struct {
 	// that a chain of comparisons (`a < b < c ...`) is not re-scanned from
 	// every `<` (see tsTypeArgsInExpr).
 	badArgs map[int]bool
-	// parens lists the keys markParenthesized added, so that a failed
-	// speculative parse removes its own.
-	parens []Expr
+	// reuse holds the assignment expressions of at least tsReuseMin bytes
+	// that speculative parses read, by where they start and the context
+	// they were read in, so that the parse that reads the same text again
+	// once one failed (or a lookahead looked) takes them as they were
+	// rather than reading them again (tsReused): with the memos above, a
+	// speculative parse that fails only after it read nested ones, which
+	// fail too, would otherwise read the nesting again at every level,
+	// in time quadratic in the depth, or doubling at each level for a
+	// lookahead. The entries last for one item of the program.
+	reuse map[tsReuseKey]*tsReuse
+	// spec counts the speculative parses under way; specs counts them all,
+	// to call Options.Stop now and then (tsPoll).
+	spec, specs int32
+	// peak is the deepest the tracking regions of tsAssignRecorded went.
+	peak, tracking int32
 	// casts holds the expressions an erased as, satisfies, !, <T> or type
 	// arguments applied to (tsCast): no arrow function parameters
 	// (tsNoCasts), and with as, satisfies or <T> no assignment targets.
@@ -105,7 +121,7 @@ const (
 
 // tsUnsupported fails at pos for TypeScript with run-time semantics.
 func (p *parser) tsUnsupported(pos int, feature string) {
-	p.fail(pos, feature+" is not supported: only erasable TypeScript is (see TODO.md)")
+	p.fail(pos, feature+" is not supported: only erasable TypeScript is")
 }
 
 // tsRecord records a name declared with TypeScript syntax: for the module
@@ -142,12 +158,14 @@ func (p *parser) tsAtTop() bool { return p.tsx.top == p.start+1 }
 // of comparisons a < b < c ... longer than the bound fails for that
 // reason: tried as type arguments, it nests as deep as it is long.)
 func (p *parser) tsTry(f func()) (ok bool) {
+	p.tsPoll()
 	saved, st := *p, p.tsx.tsState
-	lines, parens := len(p.file.lineStarts), len(p.tsx.parens)
+	p.tsx.spec++
 	defer func() {
+		p.tsx.spec--
 		if !ok && !p.tsx.unwinding {
 			p.tsRecover(recover(), len(st.args))
-			p.tsRewind(&saved, &st, lines, parens)
+			p.tsRewind(&saved, &st)
 		}
 	}()
 	f()
@@ -158,18 +176,30 @@ func (p *parser) tsTry(f func()) (ok bool) {
 // (TypeScript's lookAhead), and rewinds the parser either way. A syntax
 // error in f counts as false.
 func (p *parser) tsLook(f func() bool) (yes bool) {
+	p.tsPoll()
 	saved, st := *p, p.tsx.tsState
-	lines, parens := len(p.file.lineStarts), len(p.tsx.parens)
+	p.tsx.spec++
 	defer func() {
+		p.tsx.spec--
 		if p.tsx.unwinding {
 			return
 		}
 		if !yes {
 			p.tsRecover(recover(), len(st.args))
 		}
-		p.tsRewind(&saved, &st, lines, parens)
+		p.tsRewind(&saved, &st)
 	}()
 	return f()
+}
+
+// tsPoll calls Options.Stop before every stopEvery-th speculative parse,
+// the first included: an expression nested deep enough to speculate at
+// every level may hold no statement for poll to stop at.
+func (p *parser) tsPoll() {
+	if p.stop != nil && p.tsx.specs&(stopEvery-1) == 0 {
+		stopNow(p.stop)
+	}
+	p.tsx.specs++
 }
 
 // tsRecover rethrows r unless it is a syntax error a speculative parse may
@@ -192,20 +222,133 @@ func (p *parser) tsRecover(r any, base int) {
 }
 
 // tsRewind restores the parser and the TypeScript context saved before a
-// speculative parse: the lexer, the parser's context, the error, the line
-// table and the parenthesised expressions. The regexp checker taken
-// meanwhile is kept for later literals, and the memos stay.
-func (p *parser) tsRewind(saved *parser, st *tsState, lines, parens int) {
+// speculative parse: the lexer, the parser's context and the error. The
+// regexp checker taken meanwhile is kept for later literals, and the
+// memos stay. So do the line starts the parse found, which are line
+// starts whatever reads them, and the expressions markParenthesized
+// marked, which only the parse's own expressions are: tsReused hands
+// those out again.
+func (p *parser) tsRewind(saved *parser, st *tsState) {
 	p.tsx.rewound += p.end - saved.start
-	for _, x := range p.tsx.parens[parens:] {
-		delete(p.parens, x)
-	}
-	p.tsx.parens = p.tsx.parens[:parens]
-	re, set := p.re, p.parens
+	re, set, limit := p.re, p.parens, p.limit
 	*p = *saved
 	p.re, p.parens = re, set
+	p.limit = limit // how deep the regions around went (peak), the parse's own levels included
 	p.tsx.tsState = *st
-	p.file.lineStarts = p.file.lineStarts[:lines]
+}
+
+// tsReuseMin is the length in bytes of the shortest assignment expression
+// tsShared.reuse keeps: reading a shorter one again costs little. (A
+// variable, so that tests can reuse every expression or none.)
+var tsReuseMin = 64
+
+// tsReuseKey is where an assignment expression starts and what of the
+// parser's context its parse depends on: the same text read in the same
+// context parses the same.
+type tsReuseKey struct {
+	pos, end, prevEnd int
+	tok               Token
+	nl, noIn, strict  bool
+	awaitKw, yieldKw  bool
+	// item is set when the expression is an item of tsParen's list
+	// (tsOptionalMark), blockRet when it is a conditional's true branch.
+	item, blockRet, noCond, bodiless bool
+	ambient                          int
+	funcDepth, nonArrowDepth         int32
+	inLoop, inSwitch                 int32
+	labels, labelBase, pendingLabels int
+}
+
+// tsReuse is an assignment expression a speculative parse read, and the
+// parser's state after it.
+type tsReuse struct {
+	x Expr
+	// deep is how many levels deeper than where it started its parse went,
+	// the speculative parses within it included: a parse of it that
+	// starts deeper than MaxNestingDepth less deep fails.
+	deep  int32
+	paren bool  // x was marked (markParenthesized) when its parse returned
+	cast  uint8 // and tsx.casts held this for it
+
+	end                           lexer
+	prevEnd, asyncNL, spreadComma int
+}
+
+// tsReuseKeyFor returns the key of an assignment expression starting at
+// the current token.
+func (p *parser) tsReuseKeyFor(noIn bool) tsReuseKey {
+	return tsReuseKey{
+		pos: p.start, end: p.end, prevEnd: p.prevEnd, tok: p.tok,
+		nl: p.nlBefore, noIn: noIn, strict: p.strict, awaitKw: p.awaitKw, yieldKw: p.yieldKw,
+		item: p.tsx.coverItem == p.start+1, blockRet: p.tsx.blockRet, noCond: p.tsx.noCond, bodiless: p.tsx.bodiless,
+		ambient: p.tsx.ambient, funcDepth: p.funcDepth, nonArrowDepth: p.nonArrowDepth,
+		inLoop: p.inLoop, inSwitch: p.inSwitch,
+		labels: len(p.labels), labelBase: p.labelBase, pendingLabels: p.pendingLabels,
+	}
+}
+
+// tsAssignRecorded is tsAssign within a speculative parse, which records
+// what it read in tsShared.reuse.
+func (p *parser) tsAssignRecorded(noIn bool) Expr {
+	key, depth := p.tsReuseKeyFor(noIn), p.depth
+	// Track how deep the parse goes (deeper), within the regions around.
+	ts := p.tsx
+	outer := ts.peak
+	ts.tracking++
+	ts.peak, p.limit = depth, depth
+	defer func() {
+		ts.peak = max(outer, ts.peak)
+		ts.tracking--
+		if ts.tracking == 0 {
+			p.limit = MaxNestingDepth
+		} else {
+			p.limit = ts.peak
+		}
+	}()
+	x := p.tsAssign(noIn)
+	if p.prevEnd-key.pos >= tsReuseMin {
+		if p.tsx.reuse == nil {
+			p.tsx.reuse = make(map[tsReuseKey]*tsReuse)
+		}
+		p.tsx.reuse[key] = &tsReuse{x: x, deep: p.tsx.peak - depth, paren: p.marked(x), cast: p.tsx.casts[x],
+			end: p.lexer, prevEnd: p.prevEnd, asyncNL: p.asyncNL, spreadComma: p.spreadComma}
+	}
+	return x
+}
+
+// tsReused returns a copy of the assignment expression a speculative parse
+// read where the current token starts, in the same context, and moves the
+// parser past it; nil when there is none, or when reading it here would
+// pass MaxNestingDepth, as the parse that reads it then fails. The copy is
+// of the expression's own node, which what parsed it may have marked (as
+// tsParen marks an item it puts in parentheses, or tsCast an operand): it
+// gets the marks the node had when its parse returned, and the nodes below
+// it are shared, as they were when that parse returned.
+func (p *parser) tsReused(noIn bool) Expr {
+	e := p.tsx.reuse[p.tsReuseKeyFor(noIn)]
+	if e == nil || p.depth+e.deep > MaxNestingDepth {
+		return nil
+	}
+	if ts := p.tsx; ts.tracking > 0 && p.depth+e.deep > ts.peak {
+		ts.peak, p.limit = p.depth+e.deep, p.depth+e.deep
+	}
+	x := copyExpr(e.x)
+	p.setMarked(x, e.paren)
+	if e.cast != 0 {
+		p.tsCast(x, e.cast)
+	}
+	p.lexer = e.end
+	p.prevEnd, p.asyncNL, p.spreadComma = e.prevEnd, e.asyncNL, e.spreadComma
+	p.tsx.blockRet = false
+	return x
+}
+
+// copyExpr returns a shallow copy of the node x.
+func copyExpr(x Expr) Expr {
+	v := reflect.ValueOf(x).Elem()
+	c := reflect.New(v.Type())
+	c.Elem().Set(v)
+	return c.Interface().(Expr)
 }
 
 // ---- Tokens -----------------------------------------------------------------
@@ -415,7 +558,11 @@ func (p *parser) tsParamStart() bool {
 		return true
 	}
 	if p.tok == LBrack || p.tok == LBrace {
+		// As tsSignature reads it, so that the expressions in it read as
+		// they will (tsReused).
+		p.tsx.ambient++
 		p.parseBindingTarget()
+		p.tsx.ambient--
 		return true
 	}
 	return false
@@ -453,7 +600,8 @@ func (p *parser) tsSignature(ret Token) {
 func (p *parser) tsUnionType() {
 	p.eat(BitOr)
 	p.tsIntersectionType()
-	for p.eat(BitOr) {
+	for n := 1; p.eat(BitOr); n++ {
+		pollItem(p.stop, n)
 		p.tsIntersectionType()
 	}
 }
@@ -461,7 +609,8 @@ func (p *parser) tsUnionType() {
 func (p *parser) tsIntersectionType() {
 	p.eat(BitAnd)
 	p.tsTypeOperator()
-	for p.eat(BitAnd) {
+	for n := 1; p.eat(BitAnd); n++ {
+		pollItem(p.stop, n)
 		p.tsTypeOperator()
 	}
 }
@@ -799,7 +948,8 @@ func (p *parser) tsTypeLiteral() {
 
 // tsTypeMembers skips the members of an object type, up to its `}`.
 func (p *parser) tsTypeMembers() {
-	for p.tok != RBrace {
+	for n := 0; p.tok != RBrace; n++ {
+		pollItem(p.stop, n)
 		if p.tok == EOF {
 			p.unexpected()
 		}
@@ -975,7 +1125,8 @@ func (p *parser) tsMappedType() {
 // or rest elements.
 func (p *parser) tsTupleType() {
 	p.expect(LBrack)
-	for p.tok != RBrack {
+	for n := 0; p.tok != RBrack; n++ {
+		pollItem(p.stop, n)
 		if p.tsLook(p.tsTupleNameAhead) {
 			p.eat(Ellipsis)
 			p.tsIdentName()

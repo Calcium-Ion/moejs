@@ -132,7 +132,7 @@ func TestHostJSONDepth(t *testing.T) {
 	self := map[string]any{}
 	self["self"] = self
 	got, _ := hostJSON(t, r, self, false, true)
-	require.Contains(t, got, "Maximum call stack size exceeded")
+	require.Contains(t, got, "JSON nesting is too deep (more than 10000 levels)")
 }
 
 // TestHostJSONToJSON checks the walk against toJSON methods it must not

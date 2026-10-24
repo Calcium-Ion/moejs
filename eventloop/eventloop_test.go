@@ -422,6 +422,44 @@ setTimeout(() => log("after"), 20);
 	assert.Equal(t, []string{"pending"}, e.log())
 }
 
+// TestPost checks the errors of Post's tasks: an exception of the jobs a
+// task runs and a task's own error go to OnError, or stop the loop without
+// it, and the tasks after it run in the next Run.
+func TestPost(t *testing.T) {
+	errTask := errors.New("task failed")
+	post := func(e *env) {
+		require.True(t, eventloop.Post(e.loop, func(rt *moejs.Runtime) error {
+			_, err := rt.RunScript(mustScript(t, `queueMicrotask(() => { throw new TypeError("job"); }); log("first")`))
+			return err
+		}))
+		require.True(t, eventloop.Post(e.loop, func(*moejs.Runtime) error { return errTask }))
+		require.True(t, eventloop.Post(e.loop, func(rt *moejs.Runtime) error {
+			_, err := rt.RunScript(mustScript(t, `log("last")`))
+			return err
+		}))
+	}
+
+	var errs []string
+	e := newEnv(t, eventloop.Options{OnError: func(err error) { errs = append(errs, err.Error()) }})
+	post(e)
+	require.NoError(t, e.loop.Run(nil))
+	assert.Equal(t, []string{"first", "last"}, e.log())
+	assert.Equal(t, []string{"TypeError: job", errTask.Error()}, errs)
+
+	e = newEnv(t, eventloop.Options{})
+	post(e)
+	var exc *moejs.Exception
+	require.ErrorAs(t, e.loop.Run(nil), &exc)
+	assert.Equal(t, "TypeError: job", exc.Error())
+	assert.Equal(t, errTask, e.loop.Run(nil))
+	require.NoError(t, e.loop.Run(nil))
+	assert.Equal(t, []string{"first", "last"}, e.log())
+
+	// After Terminate, Post drops the task.
+	e.loop.Terminate()
+	assert.False(t, eventloop.Post(e.loop, func(*moejs.Runtime) error { t.Error("ran"); return nil }))
+}
+
 // TestPanicInCallback checks that a Go panic in a host function a timer
 // callback calls is an *InternalError the loop reports.
 func TestPanicInCallback(t *testing.T) {
@@ -830,10 +868,9 @@ func TestDelayTruncation(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, e.run(t, `setTimeout(() => log("a"), 1.9); setTimeout(() => log("b"), 1);`))
 }
 
-// TestMemoryLimit: the runtime's memory limit bounds each macrotask, which
-// the loop gives a new budget: callbacks that each allocate less than the
-// limit run, more than the runtime would allow one request, and a callback
-// that passes it stops the loop without running its finally.
+// TestMemoryLimit: callbacks that each allocate less than the runtime's
+// memory limit and keep nothing run, more in all than the limit, and a
+// callback that passes it stops the loop without running its finally.
 func TestMemoryLimit(t *testing.T) {
 	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: 4 << 20})
 	loop, err := eventloop.New(rt, eventloop.Options{})

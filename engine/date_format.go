@@ -7,18 +7,13 @@ package engine
 //	toTimeString        10:05:07 GMT-0500 (EST)
 //	toUTCString         Tue, 02 Jan 2024 15:05:07 GMT
 //	toISOString         2024-01-02T15:05:07.009Z (+275760-09-13T00:00:00.000Z)
-//	toLocaleString      1/2/2024, 10:05:07 AM
-//	toLocaleDateString  1/2/2024
-//	toLocaleTimeString  10:05:07 AM
 //
 // Years outside 0..9999 print with as many digits as needed and a leading
 // '-' when negative ("-0001", "-271821"), as V8's "%04d"/"%05d" do. The
 // parenthesized zone name is the abbreviation from Go's tz database ("EST",
 // "+1030", "LMT"); V8 prints ICU's long name ("Eastern Standard Time"),
-// which needs CLDR data moejs does not carry. The toLocale* forms are V8's
-// en-US output without Intl: the locales and options arguments are ignored
-// and the year is the era year (1 - year for years before 1), as ICU's
-// Gregorian calendar prints it.
+// which needs CLDR data moejs does not carry. The toLocale* forms are
+// Intl.DateTimeFormat's (intl_tolocale.go).
 
 var (
 	dateDayNames   = [7]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
@@ -153,49 +148,4 @@ func formatISO(tv float64) string {
 	b = appendPadded(b, int64(f.ms), 3)
 	b = append(b, 'Z')
 	return string(b)
-}
-
-func appendLocaleDate(b []byte, f dateFields) []byte {
-	b = appendPadded(b, int64(f.month)+1, 1)
-	b = append(b, '/')
-	b = appendPadded(b, int64(f.day), 1)
-	b = append(b, '/')
-	y := f.year
-	if y <= 0 {
-		y = 1 - y
-	}
-	return appendPadded(b, y, 1)
-}
-
-func appendLocaleTime(b []byte, f dateFields) []byte {
-	h := f.hour % 12
-	if h == 0 {
-		h = 12
-	}
-	b = appendPadded(b, int64(h), 1)
-	b = append(b, ':')
-	b = appendPadded(b, int64(f.minute), 2)
-	b = append(b, ':')
-	b = appendPadded(b, int64(f.second), 2)
-	if f.hour < 12 {
-		return append(b, " AM"...)
-	}
-	return append(b, " PM"...)
-}
-
-// dateToLocaleString formats a finite time value in the en-US forms; date
-// and clock select the parts.
-func (r *Realm) dateToLocaleString(tv float64, date, clock bool) *String {
-	f, _, _ := r.localDate(tv)
-	b := make([]byte, 0, 24)
-	if date {
-		b = appendLocaleDate(b, f)
-	}
-	if date && clock {
-		b = append(b, ", "...)
-	}
-	if clock {
-		b = appendLocaleTime(b, f)
-	}
-	return asciiString(string(b))
 }

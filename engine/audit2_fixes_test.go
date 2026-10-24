@@ -359,13 +359,13 @@ export function holes(depth) {
 		require.NoError(t, err)
 		require.Equal(t, text, s.GoString())
 		_, err = r.JSONParse(FromGoString(unit + text))
-		require.Equal(t, "RangeError: Maximum call stack size exceeded", errMessage(t, err))
+		require.Equal(t, "RangeError: JSON nesting is too deep (more than 10000 levels)", errMessage(t, err))
 	}
 	deep, _ := f.env.GetBindingValue("deep")
 	v, err := r.Call(deep, Undefined(), []Value{IntValue(jsonMaxDepth + 1)})
 	require.NoError(t, err)
 	_, err = r.JSONStringify(v)
-	require.Equal(t, "RangeError: Maximum call stack size exceeded", errMessage(t, err))
+	require.Equal(t, "RangeError: JSON nesting is too deep (more than 10000 levels)", errMessage(t, err))
 	require.Zero(t, r.CallDepth())
 
 	call := func(name string, n int) string {

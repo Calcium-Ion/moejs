@@ -1024,7 +1024,7 @@ func TestAuditA_SpecTable(t *testing.T) {
 		{`new Number(5).valueOf()`, `5`},
 		{`typeof new Number(5)`, `"object"`},
 		{`(1).toLocaleString()`, `"1"`},
-		{`(1234.5).toLocaleString()`, `"1234.5"`},
+		{`(1234.5).toLocaleString()`, `"1,234.5"`},
 		{`new Number("0x10").valueOf()`, `16`},
 		{`Number("12", "junk")`, `12`},
 		{`Number("1e21")`, `1e+21`},

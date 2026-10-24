@@ -87,10 +87,13 @@ that is running, but does not wake a loop that sleeps until its next timer.
 
 ### Memory limit
 
-`Options.MemoryLimit` caps the bytes one request's JavaScript may allocate
-between resets. `ReleaseCallData` resets the count, and so does
-`ResetAllocation`, for a host without a pool. A call that passes the limit
-stops as an interrupt does: it returns an `*InterruptedError` whose value is
+`Options.MemoryLimit` caps what the runtime's JavaScript keeps plus what it
+allocates. The runtime counts what it allocates since the last reset, and
+`ReleaseCallData` resets the count, and so does `ResetAllocation`, for a host
+without a pool. When the count passes the limit, the runtime first measures
+what the program keeps (below) and counts from that measurement: a program
+that makes garbage and keeps little runs on, however much it allocates. A
+call that still passes the limit stops as an interrupt does: it returns an `*InterruptedError` whose value is
 a `*MemoryLimitError` carrying the limit, the bytes counted and the
 JavaScript stack at the allocation, and `errors.Is(err, moejs.ErrMemoryLimit)`
 holds.
@@ -118,8 +121,8 @@ a script can catch that: `repeat`, `padStart` and `padEnd`, `new
 ArrayBuffer`, typed array constructors, `btoa`, `escape`, `toBase64` and
 `toHex`.
 
-The count is of allocation, not of live memory: garbage counts until the
-next reset, and nothing a request frees is taken off. It covers objects,
+Between measurements the count is of allocation: nothing a request frees is
+taken off until the runtime measures. It covers objects,
 the storage their properties and elements grow into, strings, `Map` and
 `Set` tables, buffers, `BigInt` results, closures' environments and code
 compiled by `eval` and `Function`, each by about what it asks the Go
@@ -139,9 +142,10 @@ the count and the hit's error in `Stats` for the host to read. Called from
 a host function, `SetGlobal` does not reset, which would give the running
 script a new budget. A host that sets a global for each request sets it
 before the request's first `Call`: between two hooks of one request, the
-reset would let the request allocate the limit again. The limit bounds what
-one request allocates, not what the module keeps from request to request; a
-runtime that grows across requests is better discarded.
+reset would let the request allocate the limit again. A reset keeps the last
+measurement, so what the module keeps from request to request still counts;
+a host that keeps a runtime across requests can rebase it instead of
+resetting it (below).
 
 After a hit the runtime is reusable: `ClearInterrupt` and `ReleaseCallData`
 leave it as a pooled runtime after any request. A host that would rather not
@@ -153,14 +157,177 @@ The hit is the runtime's single pending interrupt, so a host's own
 `Interrupt` (a timeout) from another goroutine can replace it, and the call
 then returns the host's error. `Stats().MemoryLimitHits` counts the hit
 either way, and `Stats().LastMemoryLimitError` keeps its error until the
-next reset.
+next reset or rebase.
 
 With no limit the runtime keeps no count, and each place that would charge
 an allocation costs two loads and two branches.
 
-Under `eventloop`, the loop gives each timer or immediate callback and each
-task a new budget, so the limit applies to a macrotask and the promise jobs
-it queues.
+A reset bounds what one request allocates. A program that lives through
+many tasks, such as an agent that awaits tool results or a chain of timers,
+can keep growing while each task stays small. `RebaseAllocation` bounds what
+such a program keeps. Called between tasks where a host would reset, it
+measures what the runtime's JavaScript retains and makes that the start of
+the budget: the limit then counts what the program keeps plus what it
+allocated since the measurement. `Stats().LiveBytes` is the last
+measurement.
+
+```go
+// Between two tasks of the host's own loop.
+err := rt.RebaseAllocation(func(add func(moejs.Value)) {
+	for _, p := range pending { // promises only Go code holds
+		add(p)
+	}
+})
+if err != nil {
+	return err // the program keeps more than the limit
+}
+```
+
+The measurement walks what the runtime's global object, global bindings,
+module and queued promise jobs reach, and counts it as the limit counts
+allocation. A string that shares the bytes of a longer one of 64
+characters or more, a `slice`, a `split` piece or a regular expression's
+match, counts the longer one once, since it keeps it alive; so does a value
+`JSON.parse` or `ParseJSONString` reads out of a long text while the limit
+is set. A property name longer
+than 64 bytes that only data supplies (a computed key, a `JSON.parse` key)
+stays in the runtime's own shapes, which the measurement counts with the
+shapes the runtime keeps for its objects, and dies with the runtime;
+shorter ones may go to the shapes every runtime of the process shares,
+which are bounded and not counted. String constants of compiled code,
+which every runtime running it shares, are not counted either.
+
+It does not see values that only Go code holds: what a `NativeFunc`
+closure captured, or a promise of `NewPromise`, which only its settle
+functions keep, along with the async functions awaiting it. The host
+passes those through the function it gives `RebaseAllocation`, which is
+called only when a measurement is made, or registers a function that adds
+them to every measurement:
+
+```go
+// pending holds the promises of NewPromise this host settles later.
+remove := rt.AddLiveRoots(func(add func(moejs.Value)) {
+	mu.Lock() // a lock only the host's own goroutines hold
+	defer mu.Unlock()
+	for _, p := range pending {
+		add(p)
+	}
+})
+defer remove()
+```
+
+`AddLiveRoots` costs nothing without a limit: nothing measures then but
+`Realm().MeasureLive`. The function runs on the goroutine using the runtime,
+possibly in the middle of JavaScript (below), so it only calls `add`: it
+runs no JavaScript, creates no values and does not wait for a lock held
+while the runtime runs JavaScript.
+
+A host function that calls back into JavaScript keeps no JavaScript value
+only in Go across that call, or registers it, since a measurement may run
+in the JavaScript it calls back. A host function, or a getter that is one,
+that builds a large value from Go returns it past the limit: no measurement
+sees it while it is being built, and the next measurement, at the latest
+the next rebase, finds the program past the limit.
+
+A registered function counts what it adds until it is removed, whether
+JavaScript still reaches it or not, so it suits what Go alone holds:
+requests in flight, promises only the host will settle. What the Go state of
+an object the host creates keeps, such as a stream's queue, a body's bytes
+or header values kept as Go strings, reports through the object instead:
+when its payload (`Object.SetInternal`) implements `moejs.LiveReporter`, a
+measurement that reaches the object calls it once, adds the values it
+reports as the object's own and counts the bytes of Go memory it reports.
+That state counts while the object is reachable and stops counting at the
+next measurement once JavaScript drops it, without waiting for Go's
+collector.
+
+```go
+type queueState struct {
+	chunks []moejs.Value // JavaScript values the stream keeps
+	buf    []byte        // Go bytes it keeps
+}
+
+func (q *queueState) ReportLive(add func(moejs.Value), addBytes func(n int)) {
+	for _, c := range q.chunks {
+		add(c)
+	}
+	addBytes(cap(q.buf))
+}
+
+o := rt.Realm().NewObject()
+o.SetInternal(&queueState{})
+```
+
+`ReportLive` follows the rules of the functions `AddLiveRoots` registers: it
+only calls `add` and `addBytes`.
+
+A measurement walks the heap, so it is paced. `RebaseAllocation` measures
+only once the allocation since the last measurement has reached the larger
+of half of what the limit leaves above it, `(MemoryLimit - LiveBytes) / 2`,
+and half of the last measurement, and otherwise returns at once without
+allocating. A program that keeps little is measured once every half limit
+it allocates; one that nears the limit is measured more often, but not more
+than once every half of what it keeps. An allocation that passes the limit
+before the next measurement, with or without a measurement before, measures
+first, with the module's bindings and the registered roots, and stops only
+when the program still keeps too much. It does so once between two calls of
+`RebaseAllocation` or `ResetAllocation`, and again each time the allocation
+since the last measurement reaches what paces `RebaseAllocation`, so that one
+call that makes much garbage runs on as it would across rebases.
+
+The measurement runs where nothing can hold what it made out of the walk's
+sight: in plain JavaScript, and in the callbacks of `forEach`, `some`,
+`every`, the `find` methods, `map`, `filter`, `flatMap`, `reduce`, `sort`,
+`replace` and `replaceAll`, `Array.from`, a `JSON.parse` reviver, a
+generator's `next` and a host function, which keep what they build where
+the walk finds it. While any other builtin runs, the measurement waits: such
+code may hold what it made in Go variables, such as the tree `JSON.parse`
+builds or the text `JSON.stringify` writes. Its allocation may then go
+past the limit by up to half of what the limit leaves above the last
+measurement, plus the one allocation that crosses that (an array's storage
+as it grows), and the runtime measures once the builtin returns or at the
+next call, or between two promise jobs; a builtin that goes past that
+margin stops, so `JSON.parse` of a text too large for the limit stops
+within it. A loop of builtin calls is measured at each iteration once one
+passed the limit.
+`ParseJSON`, `ParseJSONString` and `FromGo` wait in the same way. An
+allocation of the host's own Go code outside any call, and its
+`ChargeMemory` where no script runs (a loop's task, or a host function
+called from Go), measure at once, as `RebaseAllocation` does: what the host
+holds between calls, it registers with `AddLiveRoots`. A walk's working
+storage goes back to the process for the next measurement of any runtime: a
+runtime keeps none of it. Near the limit a program then pays a walk of what it
+keeps for every few megabytes it allocates: a callback that allocates 64 KiB
+of garbage costs about 1.3 times as much at 75 % of a 64 MiB limit kept in
+small objects, 2.5 times at 95 % and 3.7 times at 98 %. When a measurement
+passes the limit, `RebaseAllocation` returns the `*MemoryLimitError`, with
+`Live` the measurement and `Allocated` 0, and counts a hit; it does not
+interrupt the runtime, whose next allocation passes the limit anyway. An
+`Interrupt` made while it measures ends the walk, which then changes
+nothing, and while an interrupt is pending it does not measure.
+
+`ResetAllocation`, `ReleaseCallData`, `Load` and `SetGlobal` keep the
+measurement: what the program keeps still counts after them. A host that
+resets per request and keeps the runtime calls `RebaseAllocation` where
+each request starts too, and the allocation of all the requests since the
+last measurement paces the next one.
+
+Under `eventloop` the loop does this itself. The budget spans the whole
+`Run`, or `Start` until `Stop`, and the loop rebases it before each timer
+or immediate callback and each task; it registers its pending timers,
+immediates and promises of `NewPromise` with `AddLiveRoots`, and `Terminate`
+removes them, so that a runtime that gets a new loop does not keep the old
+one. A program that
+keeps what it allocates stops near the limit however many callbacks or runs
+that takes, and one that keeps little runs on however much it allocates in
+all. The loop measures without holding its mutex, so goroutines posting
+tasks or settling promises do not wait for the walk, and without a limit it
+does no work for it. The hit stops the loop as an interrupt does: `Run`
+returns an `*InterruptedError`, and `errors.Is(err, moejs.ErrMemoryLimit)`
+holds. With `eventloop.Options.ResetMemoryPerTask`, the loop gives each
+callback and task a new budget instead, as earlier versions did: the limit
+then bounds a macrotask and the promise jobs it queues, not what the program
+keeps.
 
 ### Counters
 
@@ -169,9 +336,11 @@ host reads them on the goroutine that uses the runtime, between requests or
 from a host function during one:
 
 - `AllocatedBytes`, `Objects`, `Strings`, `Shapes`: what was counted since
-  the limit was set, and `RequestAllocatedBytes` since the last reset.
-  They count only while a limit is set; a limit of `math.MaxInt64` counts
-  without limiting.
+  the limit was set, and `RequestAllocatedBytes` since the last reset or
+  rebase. They count only while a limit is set; a limit of `math.MaxInt64`
+  counts without limiting.
+- `LiveBytes`: the last measurement of `RebaseAllocation`, which resets
+  keep, 0 while none was made.
 - `MemoryLimitHits` and `LastMemoryLimitError`, above.
 - `Interrupts`: the calls of `Interrupt`, hits included.
 - `ICEntries`: the inline cache entries of the functions that ran.
@@ -338,13 +507,28 @@ Errors and stack traces refer to the TypeScript text, so no source map is
 needed. `Function.prototype.toString` returns the function's TypeScript
 source, types included; Node returns it with the types blanked out.
 
-A host that compiles TypeScript it does not trust should cap the length of
-the source. Telling an arrow function from a parenthesised expression can
-take time quadratic in the nesting: conditionals nested in the true
-branches of each other as `a ? (b): T => a ? (b): T => …` take about
-1.5 s at 2,000 levels and a few seconds just below the nesting limit, and
-the cost adds up over every such expression of a source. `Runtime.Interrupt`
-does not stop `CompileTS` or `Compile`, which the host calls itself.
+Compiling takes time linear in the length of the source, however deep the
+nesting, and nesting deeper than 10,000 levels is a `*SyntaxError`
+("Nesting too deep (the parser allows 10000 levels)"). A host that
+compiles source it does not trust should still cap its length, and can
+bound the compile in time: `CompileWith`, `CompileScriptWith` and the
+`Context` of `FunctionOptions` take a `context.Context`, and once it is
+done the compile stops and returns its error. The parser, the scope pass and
+the compiler look at it every 1,024 statements of a statement list and
+every 1,024 items of the other lists (elements of array and object
+literals, arguments, parameters, operators of a chain of binary ones,
+members of unions, intersections, interfaces, object and tuple types), so
+one long statement stops as soon.
+`Runtime.Interrupt` does not stop a compile the host calls itself.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+defer cancel()
+mod, err := moejs.CompileWith("plugin.ts", src, moejs.CompileOptions{TypeScript: true, Context: ctx})
+if errors.Is(err, context.DeadlineExceeded) {
+	// the compile took too long
+}
+```
 
 A `Resolver` or an `Importer` picks the compiler per module, for example by
 file extension. Modules from `CompileTS` and from `Compile` link with each
@@ -378,6 +562,34 @@ with an existing global binding throws before any code runs.
 `SetGlobal` writes to the global object. After a script declares `let x`,
 the global lexical binding `x` shadows a value set with `SetGlobal("x", …)`
 (ECMA-262 9.1.1.4.1).
+
+### Functions from source
+
+`CompileFunction(name, params, body, opts)` compiles a function from the
+source of its parameter list and its body, as the `Function` constructor
+does, and `CompileFunctionTS` does the same for TypeScript:
+
+```go
+s, err := moejs.CompileFunctionTS("rule.ts", "input: Input, limit?: number",
+	"type N = number;\nreturn input.messages.slice(0, (limit ?? 10) as N);",
+	moejs.FunctionOptions{})
+fn, err := rt.RunScript(s) // the function
+res, err := rt.CallFunction(fn, moejs.Undefined(), arg)
+```
+
+`params` is the list without its parentheses, and the source is the text
+`function anonymous(params\n) {\nbody\n}`, so a `*SyntaxError` in the body
+is on line 3 or later. Neither part may end the other early. The script
+declares nothing: `RunScript` creates the function in the global
+environment and returns it, and each runtime that runs the script gets a
+function of its own. `FunctionOptions` asks for an async function, a
+generator function, or both.
+
+`CompileFunction`'s function is sloppy unless its body starts with
+`"use strict"`, as the `Function` constructor's is. `CompileFunctionTS`
+follows `CompileTS`: types are erased, TypeScript with run-time semantics
+is a `*SyntaxError`, `toString` returns the TypeScript, and the function is
+strict mode code, as module code is.
 
 ### Eval
 
@@ -528,6 +740,41 @@ buffer that grows as it is written, and is appended to the slice at the end.
 
 The output is limited to 2^30−24 bytes.
 
+### Strict JSON out
+
+`AppendJSON` follows `JSON.stringify`, which drops some values without a
+word: an object leaves out a member whose value is `undefined`, a function
+or a symbol, an array writes such an element as `null`, and NaN and
+±Infinity become `null`. A host that would rather fail than send changed
+data asks for the strict mode:
+
+```go
+out, err := rt.AppendJSONWith(buf[:0], v, moejs.JSONOptions{Strict: true})
+var lossy *moejs.LossyJSONError
+if errors.As(err, &lossy) {
+	// lossy.Path is "$.messages[3].content", lossy.Value "undefined"
+}
+```
+
+Strict fails on each of those values, on the value itself when it has no
+JSON text (`AppendJSON` writes `null` for it), and on what a `toJSON`
+returns, so a `toJSON` that returns `undefined` fails too. It also fails on
+an object whose data JSON does not see, which `JSON.stringify` writes as
+`{}` or with its own enumerable properties only: a `Map`, `Set`, `WeakMap`,
+`WeakSet`, `WeakRef`, `Promise`, `RegExp`, an `Error` of any kind (classes
+that extend it included), an `ArrayBuffer`, `SharedArrayBuffer` or
+`DataView`. Its `Value` is "a Map", "an Error" and so on, `Object` is true,
+and the message reads `moejs: $.cache is a Map, whose contents JSON does
+not write`. Such an object with a `toJSON` method of its own is written as
+that method returns, and typed arrays, whose elements JSON writes, pass. The error's
+`Path` starts at `$` and adds `.name` or `["name"]` for a property and
+`[i]` for an element; its message reads
+`moejs: $.messages[3].content is undefined, which JSON leaves out`. On an
+error the slice comes back as it was. -0 is written as `0`, which equals
+it, as without Strict. Strict costs `AppendJSON` nothing; with it, a Go
+map or slice that `FromGo` converted is written through the values
+JavaScript sees rather than straight from Go.
+
 ### Into the host's types
 
 `Unmarshal(v, target)` stores a value into a Go value with the same result
@@ -608,7 +855,10 @@ strings the host keeps.
 ### Nesting
 
 `ParseJSON`, `ParseJSONString`, `ToGo` and `AppendJSON` return a
-`RangeError` when arrays and objects nest deeper than 10,000 levels.
+`RangeError` when arrays and objects nest deeper than 10,000 levels, and
+`JSON.parse` and `JSON.stringify` throw one. Its message says what
+happened ("JSON nesting is too deep (more than 10000 levels)"), and
+`errors.Is(err, moejs.ErrTooDeep)` reports it.
 
 ## Promises and errors
 
@@ -687,8 +937,8 @@ Each iteration has three phases, like Node's timers, poll and check phases:
 
 1. The timers due when the phase starts, in order of expiry, then of
    scheduling.
-2. The tasks posted before the phase starts: `RunOnLoop`, the `done`
-   function of `Hold` and the settle function of `NewPromise`.
+2. The tasks posted before the phase starts: `RunOnLoop`, `Post`, the
+   `done` function of `Hold` and the settle function of `NewPromise`.
 3. The immediates set before the phase starts.
 
 Work that a phase adds waits for a later iteration. A delay is at least
@@ -735,7 +985,10 @@ While the loop runs, only its goroutine uses the runtime. Other goroutines
 hand it work in three ways:
 
 - `RunOnLoop(fn)` posts `fn`. It returns false once the loop is
-  terminated.
+  terminated. `eventloop.Post(loop, task)` does the same for a task that
+  returns an error. The loop handles that error as a callback's (`OnError`,
+  or the loop stops), so a task that settles promises itself returns what
+  their jobs throw instead of losing it.
 - `Hold()` keeps the loop alive until its `done(fn)` is called, which posts
   `fn`.
 - `NewPromise()`, which a host function calls on the loop, returns a
@@ -782,8 +1035,8 @@ the loop; `Runtime.Interrupt` alone leaves a sleeping loop asleep until its
 next timer. The interrupt stays pending, so the host calls `ClearInterrupt`
 before it runs the loop again.
 
-A panic in a host task (the functions of `RunOnLoop`, `done` and `settle`,
-or `OnError`) is not recovered. It unwinds through `Run`, and ends the
+A panic in a host task (the functions of `RunOnLoop`, `Post`, `done` and
+`settle`, or `OnError`) is not recovered. It unwinds through `Run`, and ends the
 program for a loop started with `Start`. The tasks and immediates of the
 phase that had not run stay queued for the next `Run`. The task that
 panicked is gone, and a promise whose settle function panicked stays
@@ -841,8 +1094,143 @@ costs about 25 times as much.
 
 ### Time zone per runtime
 
-`Options.TimeZone` sets the local time zone of `Date`. nil means
-`time.Local`.
+`Options.TimeZone` sets the local time zone of `Date`, which is also the
+default time zone of `Intl.DateTimeFormat`. nil means `time.Local`.
+`Options.Locale` sets the default locale of `Intl` ("Default locale"
+below).
+
+## Intl
+
+### What is there
+
+`Intl.getCanonicalLocales`, `Intl.supportedValuesOf`, `Intl.Locale` with its
+locale information methods (`getWeekInfo` and the like), `Intl.Segmenter`,
+`Intl.NumberFormat`, `Intl.DateTimeFormat` and `Intl.PluralRules`, and the
+`toLocaleString` methods of numbers, BigInts, dates and arrays, which format
+with them. `Intl.Collator`, `Intl.RelativeTimeFormat`, `Intl.ListFormat`,
+`Intl.DisplayNames` and `Intl.DurationFormat` are not there yet;
+[TODO.md](../TODO.md) lists them. `String.prototype.localeCompare` uses the
+CLDR root collation order whatever the locale.
+
+### Locales
+
+The default locale is `en-US` on every host, whatever the environment of
+the process, unless the host sets another one with `Options.Locale`, so a
+program gives the same results wherever it runs. Language tags are
+canonicalized as ECMA-402 requires, with the alias data of CLDR 48, and
+`Intl.Locale`'s `maximize()` and `minimize()` use CLDR 48's likely subtags.
+The available locales are CLDR's, with the language-region form of each
+language-script-region locale (`zh-TW` along with `zh-Hant-TW`). The
+`"best fit"` locale matcher matches as `"lookup"` does.
+
+`Intl.NumberFormat` and `Intl.DateTimeFormat` carry the CLDR 48 data of
+eleven locales, `en`, `zh-Hans`, `zh-Hant`, `ja`, `ko`, `de`, `fr`, `es`,
+`pt`, `ru` and `it`, and of the regional locales of these languages, each
+inheriting by CLDR's parent locales as in ICU: `en-GB` and `en-AU` from
+`en-001`, `es-MX` from `es-419`, `pt-AO` from `pt-PT`. Their available
+locales are the CLDR locales of these languages; `resolvedOptions().locale`
+is the locale matched, as in Node.js, and it formats with its own data:
+`en-GB` writes 11 October 2026 as `11/10/2026`, `en-IN` groups
+`12,34,567`, `de-CH` writes `1'234.5`. `zh-HK` is `zh-Hant-HK` and `zh-SG`
+`zh-Hans-SG`, as in ICU. A locale of another language falls back to the
+default locale: `sv-SE` formats as `en-US`. `Intl.PluralRules` has the
+rules of every CLDR language.
+
+Digits follow the numbering system (`-u-nu-arab`, the `numberingSystem`
+option) when it has a simple digit mapping, as the systems of
+`Intl.supportedValuesOf("numberingSystem")` do; any other is ignored, as
+ECMA-402 allows. `Intl.DateTimeFormat` has the Gregorian calendar only:
+another calendar (`-u-ca-japanese`, the `calendar` option) is ignored and
+`resolvedOptions().calendar` is `"gregory"`.
+
+Where Node.js differs, moejs follows ECMA-402 and UTS #35:
+
+- A keyword whose value is `true` loses the value:
+  `new Intl.Locale("en-u-ca").calendar` and the `collation` of
+  `en-u-co-true` are `""`, where Node.js gives `"true"`.
+- An option value is canonicalized with the aliases of its keyword only:
+  `{calendar: "yes"}` stays `"yes"` (`en-u-ca-yes`), where Node.js makes it
+  `true`.
+- `maximize()` replaces the unknown script and region codes: `zh-Zzzz-ZZ`
+  becomes `zh-Hans-CN`, which Node.js leaves as it is.
+- `Intl.Locale` has the `variants` option and getter, which Node.js 24
+  lacks.
+- `resolvedOptions().timeZone` is the identifier given, in the database's
+  case: `Asia/Kolkata` stays itself, which Node.js reports as
+  `Asia/Calcutta`. `Intl.supportedValuesOf("timeZone")` lists the primary
+  identifiers, `UTC` and the `Etc/GMT±n` zones included.
+- `hour12: true` in Japanese is the 0-11 cycle (`h11`) in every region;
+  Node.js uses it for `ja-JP` only.
+- `Intl.PluralRules` takes BigInts, which Node.js rejects, and
+  `selectRange` of two values that format alike gives the start's
+  category.
+- `getCalendars()` is `["gregory"]` (the calendars `Intl.DateTimeFormat`
+  has), and `getNumberingSystems()` is `["latn"]` for a locale without
+  number data, where Node.js gives `arab` for `ar-EG`.
+
+As in Node.js, `format` writes a plain space where `formatToParts` has
+U+202F, the narrow no-break space before `AM` and `PM` in English.
+
+### Default locale
+
+`Options.Locale` sets the default locale of a runtime: the locale of the
+`Intl` constructors and of the `toLocaleString` methods when the script
+names none. It is a BCP 47 language tag such as `"zh-CN"`, canonicalized
+when the runtime is created, without its Unicode extension (`-u-` keywords,
+which ECMA-402's default locale never has). An empty string or a tag that
+is not well-formed means `"en-US"`. `Realm.SetLocale` changes it later.
+
+```go
+rt := moejs.NewRuntime(moejs.Options{Locale: "zh-CN", TimeZone: shanghai})
+// (1234.5).toLocaleString() is "1,234.5"; new Date(0).toLocaleString() is
+// "1970/1/1 08:00:00".
+```
+
+### Time zones
+
+The default time zone of `Intl.DateTimeFormat` and of `Date`'s
+`toLocaleString` methods is the runtime's `Options.TimeZone`. For `nil`,
+`time.Local`, its name comes from `TZ`, `/etc/localtime` or
+`/etc/timezone`, and is `UTC` when none tells.
+
+The `timeZone` option takes the IANA names in any case (`asia/tokyo`), the
+offsets (`+05:30`) and `UTC`. moejs loads named zones with Go's
+`time.LoadLocation` and does not embed the time zone database: Go finds the
+host's (`/usr/share/zoneinfo`, `$ZONEINFO`). A host on a minimal image
+without one (scratch, distroless static) adds Go's copy to its binary with
+`import _ "time/tzdata"` (about 450 KB). Without a database, `UTC`, the
+`Etc/GMT±n` zones and the offsets keep working, and a named zone throws a
+`RangeError` that says the host has none and how to add one.
+`Intl.supportedValuesOf("timeZone")` lists the zones that load on the host.
+It and `Intl.DateTimeFormat` try a zone that failed to load again after 10
+seconds, so a database installed while the program runs is picked up.
+
+### Segmenter
+
+`Intl.Segmenter` splits text into grapheme clusters, words and sentences by
+the rules of Unicode Standard Annex #29 for Unicode 17, without locale
+tailoring. Grapheme clusters are what users see as one character: an emoji
+ZWJ sequence, a flag, a letter with combining marks, an Indic conjunct.
+
+Word segmentation uses no dictionaries. Text written without spaces between
+words (Chinese, Japanese, Thai, Lao, Khmer, Myanmar) gets the default rules
+of the annex: each ideograph is a word of its own, and a run of Thai letters
+splits per character. Browsers and Node.js segment such text into
+dictionary words. `isWordLike` is true for a segment of letters, digits,
+kana or ideographs, as in Node.js.
+
+### Cost
+
+A runtime is created without `Intl`. The first runtime of the process that
+names it builds it, and its data (CLDR aliases, likely subtags and locales,
+the Unicode break properties, each locale's number and date formats, the
+time zone names) is decoded on first use, once per process; a locale's
+tables are decoded when it is first used. `toLocaleString()` without
+arguments reuses one formatter per runtime, so it costs only its result.
+The number, date and time zone data take about 460 KB of a program's
+binary (85 KB of it the regional locales'), and a program that links
+moejs grows by about 1 MB with the code of `Intl.NumberFormat`,
+`Intl.DateTimeFormat` and `Intl.PluralRules`.
 
 ## Implementation
 

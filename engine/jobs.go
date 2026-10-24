@@ -50,6 +50,10 @@ type jobState struct {
 	queue    []job
 	head     int // queue[head:] is still to run
 	draining bool
+	// result is what the call whose return drains the queue returned,
+	// which only its Go frame holds: under a memory limit, a root of the
+	// measurements made between the jobs (endJob, betweenJobs).
+	result Value
 	// tracker receives the HostPromiseRejectionTracker operations.
 	tracker func(p *Object, op PromiseRejectionOperation)
 }
@@ -79,10 +83,12 @@ func (r *Realm) enqueue(jb job) {
 // endJob runs at the return of the outermost call when r.jobsPending
 // (CallObject, Construct, ReleaseJobs): unless a drain is already running
 // further up, it ends the job for WeakRef and drains the queue. err is the
-// call's error, and endJob returns the call's error (see the file comment).
-// It leaves no job queued and no object kept, and so clears r.jobsPending
-// (a Go panic out of the call before it runs leaves the call's jobs queued,
-// and one out of a job the jobs after it, for DropJobs).
+// call's error, and endJob returns the call's error (see the file comment);
+// the caller stored the call's result in jobState.result, a root of the
+// measurements made between the jobs, which endJob clears. It leaves no job
+// queued and no object kept, and so clears r.jobsPending (a Go panic out of
+// the call before it runs leaves the call's jobs queued, and one out of a
+// job the jobs after it, for DropJobs).
 //
 //go:noinline
 func (r *Realm) endJob(err error) error {
@@ -93,14 +99,17 @@ func (r *Realm) endJob(err error) error {
 	r.jobsPending = false
 	j.clearKept()
 	if len(j.queue) == 0 {
+		j.result = Undefined()
 		return err
 	}
 	if _, ok := err.(*InterruptedError); ok {
+		j.result = Undefined()
 		r.dropJobs(nil, err)
 		return err
 	}
 	j.draining = true
-	defer func() { j.draining, r.jobsPending = false, j.pending() }()
+	defer func() { j.draining, r.jobsPending, j.result = false, j.pending(), Undefined() }()
+	m := r.mem()
 	for j.head < len(j.queue) {
 		if ierr := r.CheckInterrupt(); ierr != nil {
 			r.dropJobs(nil, ierr)
@@ -118,6 +127,9 @@ func (r *Realm) endJob(err error) error {
 		}
 		jerr := r.runJob(&jb)
 		j.clearKept()
+		if m != nil && m.allocated > m.room {
+			r.betweenJobs(m)
+		}
 		if jerr == nil {
 			continue
 		}

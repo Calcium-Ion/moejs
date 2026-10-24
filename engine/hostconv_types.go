@@ -164,11 +164,12 @@ func fromGoBase(t reflect.Type) reflect.Type {
 
 // parseQuiet is JSONParseGoString observing no interrupt: FromGo never
 // returns one, and a materialization, which parses a json.RawMessage, has
-// nowhere to return one to.
+// nowhere to return one to. Its allocation waits as JSONParseGoString's
+// does.
 func (r *Realm) parseQuiet(text string) (Value, error) {
 	p := jsonParser{r: r, quiet: true}
 	if isASCII(text) || utf8.ValidString(text) {
-		return p.parseText(text)
+		return p.parseText(text, nil)
 	}
 	return p.parse(FromGoString(text))
 }

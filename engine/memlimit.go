@@ -21,14 +21,35 @@ import (
 // build. The count is approximate: a producer charges what it asks the Go
 // allocator for, not the size class it gets, and the places that grow a
 // slice without one of the charge points below are not counted, nor are
-// the register stack and frame table, which the call depth limit bounds. Nothing is ever credited back: the account counts
-// allocation since the last reset (ReleaseCallData, ResetAllocation), and
-// live memory is at most that.
+// the register stack and frame table, which the call depth limit bounds.
+// Nothing is credited back as it is freed: the account counts allocation
+// since the last reset (ReleaseCallData, ResetAllocation) or measurement.
 //
-// When lastLive plus the bytes allocated since the last reset pass the
-// limit, the realm interrupts itself with a *MemoryLimitError. Allocation
-// cannot fail (initObject and initArray return no error), and an
-// interrupt unwinds without running any catch or finally and drops the
+// A measurement of what the realm's heap retains (memlive.go), lastLive,
+// replaces the allocation counted until then, so that the limit bounds
+// what the program keeps plus what it allocated since the measurement. A
+// host that keeps a program alive across requests or callbacks (an event
+// loop) measures between them (RebaseAllocation); a reset zeroes the
+// allocation and keeps the measurement, so what the program keeps across
+// requests still counts.
+//
+// When lastLive plus the bytes allocated since the last reset or
+// measurement pass the limit, the realm measures its heap (remeasure): the
+// first time between two resets or rebases, with or without a measurement
+// before, and again as RebaseAllocation's pacing allows. It does so only
+// where no builtin may hold what it made where the walk cannot reach it:
+// in interpreted code, and in the callbacks of the builtins that keep what
+// they build on the register stack or report it (memlive.go, remeasure).
+// While another builtin runs, or the host's ParseJSONString or FromGo, the
+// charges stand within a slack past the limit (half of what it leaves,
+// plus the one allocation that crosses that), and the interpreter measures
+// once the native returns or at its next frame entry, as the drain does
+// between promise jobs. The host's Go code outside any call, and its ChargeMemory
+// where no script runs, measure at once, as RebaseAllocation does.
+// The realm interrupts itself with a *MemoryLimitError when the
+// measurement passes the limit too, or when no measurement may be made.
+// Allocation cannot fail (initObject and initArray return no error), and
+// an interrupt unwinds without running any catch or finally and drops the
 // queued jobs, so a script cannot catch the hit and keep allocating. The
 // producers that know a result's size before they allocate it, and throw
 // a RangeError for a size past the engine's limits (String.prototype.repeat,
@@ -45,15 +66,19 @@ import (
 var ErrMemoryLimit = errors.New("memory limit exceeded")
 
 // MemoryLimitError is the value a realm interrupts itself with when what
-// it allocated since the last reset passes its memory limit.
+// it allocated since the last reset, plus what the last measurement found
+// it retains (RebaseAllocation), passes its memory limit, and the error of
+// a RebaseAllocation whose measurement passes it.
 type MemoryLimitError struct {
 	// Limit is the limit that was passed, in bytes.
 	Limit int64
-	// Allocated is what was charged since the last reset, the allocation
-	// that passed the limit included.
+	// Allocated is what was charged since the last reset or rebase, the
+	// allocation that passed the limit included; 0 for the error of a
+	// RebaseAllocation.
 	Allocated int64
 	// Live is the retained size the last measurement of the realm's heap
-	// found, which the limit counts with Allocated; 0 while none was made.
+	// found (RebaseAllocation, or a charge past the limit), which the limit
+	// counts with Allocated; 0 while none was made.
 	Live int64
 	// Stack is the JavaScript stack at the allocation, the "    at ..."
 	// lines of an Error's stack; "" when no JavaScript ran.
@@ -62,7 +87,13 @@ type MemoryLimitError struct {
 
 // Error implements error.
 func (e *MemoryLimitError) Error() string {
-	return "memory limit exceeded: " + strconv.FormatInt(e.Live+e.Allocated, 10) + " bytes allocated, limit " + strconv.FormatInt(e.Limit, 10)
+	s := "memory limit exceeded: " + strconv.FormatInt(e.Live+e.Allocated, 10) + " bytes"
+	if e.Live != 0 {
+		s += " (" + strconv.FormatInt(e.Live, 10) + " retained, " + strconv.FormatInt(e.Allocated, 10) + " allocated since)"
+	} else {
+		s += " allocated"
+	}
+	return s + ", limit " + strconv.FormatInt(e.Limit, 10)
 }
 
 // Unwrap returns ErrMemoryLimit.
@@ -77,19 +108,25 @@ type Stats struct {
 	// AllocatedBytes is what was charged since the limit was set.
 	AllocatedBytes int64
 	// RequestAllocatedBytes is what was charged since the last reset
-	// (ReleaseCallData, ResetAllocation), which the limit bounds.
+	// (ReleaseCallData, ResetAllocation) or measurement, which the limit
+	// bounds with LiveBytes.
 	RequestAllocatedBytes int64
+	// LiveBytes is the last measurement of what the realm retains
+	// (RebaseAllocation, or a charge past the limit), which resets keep; 0
+	// while none was made.
+	LiveBytes int64
 	// Objects, Strings and Shapes count the objects, strings and shapes
 	// charged since the limit was set.
 	Objects int64
 	Strings int64
 	Shapes  int64
-	// MemoryLimitHits counts the times the limit stopped the realm.
+	// MemoryLimitHits counts the times the limit stopped the realm, and
+	// the measurements of RebaseAllocation that passed it.
 	MemoryLimitHits int64
 	// LastMemoryLimitError is the error of the last hit since the last
-	// reset, or nil. The interrupt a hit raises is the realm's single
-	// pending interrupt, which a concurrent Interrupt can replace (a host's
-	// timeout): the hit is still counted, and its error kept, here.
+	// reset or rebase, or nil. The interrupt a hit raises is the realm's
+	// single pending interrupt, which a concurrent Interrupt can replace (a
+	// host's timeout): the hit is still counted, and its error kept, here.
 	LastMemoryLimitError *MemoryLimitError
 	// Interrupts counts the calls of Interrupt, memory limit hits included.
 	Interrupts int64
@@ -117,16 +154,42 @@ const (
 // Only the goroutine running the realm uses it, but flat.
 type memAccount struct {
 	limit     int64
-	allocated int64 // charged since the last reset
-	// lastLive is the retained size the last idle measurement of the heap
-	// found. Nothing measures it yet; the limit counts it with allocated so
-	// that one can.
+	allocated int64 // charged since the last reset or measurement
+	// lastLive is the retained size the last measurement of the heap found
+	// (RebaseAllocation, remeasure), 0 while none was made; the limit counts
+	// it with allocated. A reset keeps it.
 	lastLive int64
+	// mark is total at the last measurement: total - mark is what was
+	// charged since, resets included, which paces the next one (due).
+	mark int64
+	// room and dueAt follow from limit, lastLive and mark (pace), so that
+	// a charge and the check of RebaseAllocation compare once: room is
+	// what may be allocated before the limit, limit - lastLive, and dueAt
+	// the total at which the next measurement is due.
+	room, dueAt int64
+	// remeasured tells that a charge past the limit measured since the
+	// last RebaseAllocation or reset (remeasure), and measuring that a
+	// measurement runs.
+	remeasured, measuring bool
+	// holding counts the builtins running that keep JavaScript values only
+	// in Go while they call back into JavaScript (holdingBegin): while it is
+	// not zero, a charge past the limit does not measure. held is the bytes
+	// of Go memory the builtins running keep while they call back
+	// (holdBytes), which a measurement adds to what it walks.
+	holding int32
+	held    int64
+	// jsonText is the share root of the strings a parse in progress reads
+	// out of its text (shareText); nil between parses.
+	jsonText *String
 	total    int64 // charged since the limit was set
 	counts   [memKinds]int64
 	hits     int64
-	last     *MemoryLimitError // the last hit's, since the last reset
+	last     *MemoryLimitError // the last hit's, since the last reset or rebase
 	hitting  bool              // memoryLimitHit runs: its own charges do not hit again
+	// hostCharge tells that the charge being made is the host's
+	// (ChargeMemory), which with no frame running measures at once
+	// (builtinRuns).
+	hostCharge bool
 	// flat is what flattening this realm's ropes allocated since the last
 	// charge: a rope flattens wherever it is first read, which may be on
 	// another goroutine than the realm's (a value the host kept), so the
@@ -167,9 +230,12 @@ func (r *Realm) growValues(s []Value, n int) []Value {
 	return s
 }
 
-// SetMemoryLimit sets the number of bytes the realm may allocate for
-// JavaScript between resets (ReleaseCallData, ResetAllocation) before it
-// interrupts itself with a *MemoryLimitError; n <= 0 removes the limit and
+// SetMemoryLimit sets the number of bytes the realm's JavaScript may
+// retain, as the last measurement of its heap found, plus allocate since
+// that measurement or the last reset (ReleaseCallData, ResetAllocation),
+// before it interrupts itself with a *MemoryLimitError. A charge past the
+// limit measures first (see the file comment), so a program that keeps
+// little runs on however much it allocates. n <= 0 removes the limit and
 // its counters. Changing a limit keeps what was counted.
 func (r *Realm) SetMemoryLimit(n int64) {
 	if n <= 0 {
@@ -183,6 +249,13 @@ func (r *Realm) SetMemoryLimit(n int64) {
 		lz.mem = &memAccount{}
 	}
 	lz.mem.limit = n
+	lz.mem.pace()
+}
+
+// pace computes room and dueAt after limit, lastLive or mark changed.
+func (m *memAccount) pace() {
+	m.room = m.limit - m.lastLive
+	m.dueAt = m.mark + max((m.limit-m.lastLive)/2, m.lastLive/2)
 }
 
 // MemoryLimit returns the realm's memory limit, 0 for none.
@@ -194,11 +267,13 @@ func (r *Realm) MemoryLimit() int64 {
 }
 
 // ResetAllocation starts a new budget: the bytes charged since the last
-// reset go back to zero, and the last hit's error is forgotten. A pending
-// interrupt, the hit's included, stays pending (ClearInterrupt).
-// ReleaseCallData resets too; a host that does not pool calls this where a
-// request starts. It may be called from a host function, which gives the
-// running script a new budget.
+// reset go back to zero and the last hit's error is forgotten. The last
+// measurement of what the realm retains (RebaseAllocation) stays: the
+// limit goes on counting what the program keeps. A pending interrupt, the
+// hit's included, stays pending (ClearInterrupt). ReleaseCallData resets
+// too; a host that does not pool calls this where a request starts. It may
+// be called from a host function, which gives the running script a new
+// budget.
 func (r *Realm) ResetAllocation() {
 	m := r.mem()
 	if m == nil {
@@ -209,6 +284,7 @@ func (r *Realm) ResetAllocation() {
 	}
 	m.allocated = 0
 	m.last = nil
+	m.remeasured = false
 }
 
 // Stats returns the realm's counters. Like every method but Interrupt and
@@ -233,6 +309,7 @@ func (r *Realm) Stats() Stats {
 		f := m.flat.Load()
 		s.AllocatedBytes = m.total + f
 		s.RequestAllocatedBytes = m.allocated + f
+		s.LiveBytes = m.lastLive
 		s.Objects = m.counts[memObject]
 		s.Strings = m.counts[memString]
 		s.Shapes = m.counts[memShape]
@@ -275,6 +352,20 @@ func (r *Realm) chargeString(n int) {
 	}
 }
 
+// chargeGoString charges a string made from Go text, such as the message
+// of an error the engine throws or an error's stack, which can hold a
+// script's string: a byte per character of an ASCII string, two per UTF-16
+// unit otherwise, and the header.
+func (r *Realm) chargeGoString(s *String) {
+	if lz := r.lazy; lz != nil && lz.mem != nil {
+		n := s.Len()
+		if s.kind != strASCII {
+			n *= 2
+		}
+		r.chargeSlow(stringHeaderSize+n, memString)
+	}
+}
+
 // reserve charges n bytes its caller is about to allocate and returns the
 // interrupt's error when the charge passed the limit, or a host
 // interrupted, so that the caller stops before it allocates them.
@@ -307,7 +398,17 @@ func (r *Realm) overBudget(n int) bool {
 //go:noinline
 func (r *Realm) overBudgetSlow(n int) bool {
 	m := r.lazy.mem
-	return m.lastLive+m.allocated+m.flat.Load()+int64(n) > m.limit
+	if m.allocated+m.flat.Load()+int64(n) <= m.room {
+		return false
+	}
+	switch r.remeasure(m) {
+	case measuredNow:
+		return m.allocated+int64(n) > m.room
+	case measureWaits:
+		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		return m.allocated+m.flat.Load()+int64(n) > m.room+m.slack()
+	}
+	return true
 }
 
 // chargeSlow adds n bytes of kind to the account and interrupts the realm
@@ -323,9 +424,31 @@ func (r *Realm) chargeSlow(size int, kind memKind) {
 	m.allocated += n
 	m.total += n
 	m.counts[kind]++
-	if m.lastLive+m.allocated > m.limit {
+	if m.allocated > m.room && !r.overLimit(m, n) {
 		r.memoryLimitHit(m)
 	}
+}
+
+// overLimit handles a charge of n bytes that took the account past the
+// limit and reports whether it stands: the measurement it made left room
+// for it, or a builtin runs and the account is within the slack the
+// measurement waits in (remeasure).
+//
+//go:noinline
+func (r *Realm) overLimit(m *memAccount, n int64) bool {
+	switch r.remeasure(m) {
+	case measuredNow:
+		// The charge is of what its caller is about to allocate.
+		m.allocated, m.mark = n, m.total-n
+		m.pace()
+		return n <= m.room
+	case measureWaits:
+		// The interpreter measures at its next check of the flag, once the
+		// builtin returned (pendingInterrupt).
+		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		return m.allocated <= m.room+m.slack()
+	}
+	return false
 }
 
 // chargeMany is chargeSlow for count objects or strings of size bytes in
@@ -341,7 +464,7 @@ func (r *Realm) chargeMany(size int, kind memKind, count int) {
 // the host clears it, the next charge past the limit hits again until a
 // reset.
 func (r *Realm) memoryLimitHit(m *memAccount) {
-	if m.hitting || r.interruptFlag.Load() != 0 {
+	if m.hitting || r.interrupted() {
 		return
 	}
 	m.hitting = true
@@ -356,6 +479,25 @@ func (r *Realm) memoryLimitHit(m *memAccount) {
 	m.hits++
 	m.last = e
 	r.Interrupt(e)
+}
+
+// shareText sets the share root of the strings a parse reads out of src
+// (jsonParser.plain): text, whose units src is, or a String of its own for
+// the host's text, a working copy or a text FromGo carved (shareRoot),
+// which keeps its bytes for the live measurement to count; its kind is
+// strASCII whatever the bytes, and it is never a value.
+func (m *memAccount) shareText(src string, text *String) {
+	switch {
+	case len(src) < shareMin:
+		text = nil // values count their own units (shareRoot)
+	case text == nil:
+		text = &String{s: src, kind: strASCII}
+	case text.kind != strRope:
+		if text = text.shareRoot(); text == nil {
+			text = &String{s: src, kind: strASCII}
+		}
+	}
+	m.jsonText = text
 }
 
 // substring is s.Substring charging the String it makes: a substring of
@@ -432,10 +574,25 @@ func (s *String) chargeFlatten(n int) {
 // such as a buffer it hands to NewArrayBuffer, to the realm's memory limit
 // (none: a no-op). It returns the *InterruptedError of a pending interrupt,
 // which the charge raises when it passes the limit, so that the host
-// function can return it before it allocates.
+// function can return it before it allocates. Past the limit with no
+// script running, from the host's own code (outside any call, or in one it
+// holds with HoldJobs, as an event loop's task) or from a host function
+// called from Go, the charge measures at once, as RebaseAllocation does:
+// what the host holds there it registers (AddLiveRoots), and a host
+// function keeps what it built where the walk finds it, as across its
+// callbacks.
 func (r *Realm) ChargeMemory(n int) error {
 	if n <= 0 {
 		return nil
 	}
-	return r.reserve(n)
+	if m := r.mem(); m != nil {
+		m.hostCharge = true
+		defer m.endHostCharge()
+		r.chargeSlow(n, memBytes)
+		return r.CheckInterrupt()
+	}
+	return nil
 }
+
+// endHostCharge ends ChargeMemory's charge, also one a root's panic ended.
+func (m *memAccount) endHostCharge() { m.hostCharge = false }

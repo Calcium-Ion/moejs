@@ -577,7 +577,7 @@ func holdsFunction(c propCell, fn *Object) bool {
 // the name inference gives up.
 func (r *Realm) stackStep(steps *int) bool {
 	*steps++
-	return *steps%interruptStride == 0 && r.interruptFlag.Load() != 0
+	return *steps%interruptStride == 0 && r.interrupted()
 }
 
 // isIdentifierName is V8's String::IsIdentifier.

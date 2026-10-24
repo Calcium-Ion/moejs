@@ -110,7 +110,7 @@ func TestMemoryLimitPreChecks(t *testing.T) {
 		{`new ArrayBuffer(1 << 22).byteLength`, "RangeError: Array buffer allocation failed"},
 		{`new Uint8Array(1 << 22).length`, "RangeError: Invalid typed array length: 4194304"},
 		{`new Float64Array(1 << 20).length`, "RangeError: Invalid typed array length: 1048576"},
-		{`btoa("x".repeat(1 << 20))`, "RangeError: Invalid string length"},
+		{`btoa("x".repeat(3 << 19))`, "RangeError: Invalid string length"},
 	}
 	for _, c := range cases {
 		r := NewRealmWith(RealmOptions{MemoryLimit: 2 << 20})
@@ -161,7 +161,7 @@ func TestMemoryLimitCoverage(t *testing.T) {
 			// A sized producer (repeat, a typed array) refused what was
 			// left of the budget with its RangeError.
 			assert.Equal(t, "RangeError", errorDisplayString(ex.Value)[:10], src)
-			assert.Greater(t, r.Stats().RequestAllocatedBytes, int64(1<<20-1<<14), src)
+			assert.Greater(t, r.Stats().LiveBytes+r.Stats().RequestAllocatedBytes, int64(1<<20-1<<14), src)
 			continue
 		}
 		assert.ErrorIs(t, err, ErrMemoryLimit, src)
@@ -212,4 +212,115 @@ func TestMemoryLimitRopeConcurrentFlatten(t *testing.T) {
 		assert.LessOrEqual(t, charged, int64(readers*4001))
 		assert.Zero(t, charged%4001, "whole copies only")
 	}
+}
+
+// TestMemoryLimitErrorMessages: the message of an error the engine throws
+// holds the script's string it names (a property key, an option's value),
+// and is charged to the memory limit, so 300 kept errors with 1 MB messages
+// do not fit 32 MB.
+func TestMemoryLimitErrorMessages(t *testing.T) {
+	for _, throw := range []string{
+		`null[big]`,
+		`undefined[big]()`,
+		`new Intl.DateTimeFormat("en", {timeZone: big})`,
+		`new Intl.NumberFormat("en", {style: big})`,
+		`new Intl.NumberFormat("en", {style: "currency", currency: big})`,
+		`new Intl.NumberFormat("en", {style: "unit", unit: big})`,
+		`new Intl.DateTimeFormat("en", {calendar: big})`,
+		`new Intl.NumberFormat("en", {numberingSystem: big})`,
+	} {
+		t.Run(throw, func(t *testing.T) {
+			r := NewRealmWith(RealmOptions{MemoryLimit: 32 << 20})
+			_, err := runScriptValue(t, r, `const big = "A".repeat(1 << 20); const keep = [];
+for (let i = 0; i < 300; i++) { try { `+throw+` } catch (e) { if (e instanceof RangeError || e instanceof TypeError) keep.push(e); else throw e } }
+keep.length`)
+			assert.True(t, errors.Is(err, ErrMemoryLimit), "300 errors with 1 MB messages fit a 32 MB limit: %v", err)
+		})
+	}
+}
+
+// memChargeOf runs src in r and returns what it charged.
+func memChargeOf(t *testing.T, r *Realm, src string) int64 {
+	t.Helper()
+	before := r.Stats().AllocatedBytes
+	_, err := runScriptValue(t, r, src)
+	require.NoError(t, err)
+	return r.Stats().AllocatedBytes - before
+}
+
+// TestMemoryLimitErrorMessageOnce: an engine-made error with a 1 MB
+// message is charged about 1 MB once (not twice: under 1.25 MB with the
+// Intl objects a first use makes), whether NewError or a host function's
+// Go error makes it, and an error whose message is the script's own
+// string costs no copy.
+func TestMemoryLimitErrorMessageOnce(t *testing.T) {
+	r := NewRealmWith(RealmOptions{MemoryLimit: 1 << 40})
+	big := strings.Repeat("A", 1<<20)
+	require.NoError(t, r.Global.SetProp(r, r.KeyFromGoString("hostFail"), ObjectValue(r.NewNativeFunction(AtomEmpty, 0,
+		func(r *Realm, this Value, args []Value) (Value, error) { return Undefined(), errors.New(big) }))))
+	_, err := runScriptValue(t, r, `var big = "A".repeat(1 << 20), keep = []`)
+	require.NoError(t, err)
+	for _, c := range []struct {
+		throw    string
+		min, max int64
+	}{
+		{`null[big]`, 1 << 20, 1<<20 + 1<<18},
+		{`new Intl.NumberFormat("en", {style: big})`, 1 << 20, 1<<20 + 1<<18},
+		{`new Intl.DateTimeFormat("en", {timeZone: big})`, 1 << 20, 1<<20 + 1<<18},
+		{`new Intl.NumberFormat("en", {style: "currency", currency: big})`, 1 << 20, 1<<20 + 1<<18},
+		{`hostFail()`, 1 << 20, 1<<20 + 1<<18},
+		{`throw new RangeError(big)`, 0, 1 << 14},
+	} {
+		n := memChargeOf(t, r, `try { `+c.throw+` } catch (e) { keep.push(e) }`)
+		t.Logf("%s: charged %d", c.throw, n)
+		assert.GreaterOrEqual(t, n, c.min, "%s: charged %d", c.throw, n)
+		assert.Less(t, n, c.max, "%s: charged %d (twice?)", c.throw, n)
+	}
+}
+
+// TestMemoryLimitErrorStacks: reading an error's stack makes a new string
+// holding its message (1 MB here) and the frames, which is charged, so 300
+// kept stacks of one 1 MB message do not fit a 32 MB limit.
+func TestMemoryLimitErrorStacks(t *testing.T) {
+	r := NewRealmWith(RealmOptions{MemoryLimit: 32 << 20})
+	_, err := runScriptValue(t, r, `const big = "A".repeat(1 << 20); const keep = [];
+for (let i = 0; i < 300; i++) { try { throw new RangeError(big) } catch (e) { keep.push(e.stack) } }
+keep.length`)
+	assert.True(t, errors.Is(err, ErrMemoryLimit), "300 stacks of 1 MB fit a 32 MB limit: %v", err)
+}
+
+// TestMemoryLimitErrorsPastLimit: errors made once the limit is
+// exceeded, from the script and from Go (NewError, a host function's Go
+// error), neither recurse nor panic; the run stops with the
+// MemoryLimitError, and after the host clears the interrupt the next
+// charge hits again.
+func TestMemoryLimitErrorsPastLimit(t *testing.T) {
+	r := NewRealmWith(RealmOptions{MemoryLimit: 4 << 20})
+	big := strings.Repeat("B", 1<<20)
+	require.NoError(t, r.Global.SetProp(r, r.KeyFromGoString("hostFail"), ObjectValue(r.NewNativeFunction(AtomEmpty, 0,
+		func(r *Realm, this Value, args []Value) (Value, error) { return Undefined(), errors.New(big) }))))
+	_, err := runScriptValue(t, r, `const big = "A".repeat(1 << 20); const keep = [];
+for (let i = 0; i < 100; i++) { for (const f of [() => null[big], () => hostFail(), () => new Intl.NumberFormat("en", {style: big})]) try { f() } catch (e) { keep.push(e) } }`)
+	require.True(t, errors.Is(err, ErrMemoryLimit), "%v", err)
+	hits := r.Stats().MemoryLimitHits
+	for range 10 {
+		o := r.NewError(KindTypeError, "%s", big)
+		require.NotNil(t, o)
+		require.True(t, r.hostErrorValue(errors.New(big)).IsObject())
+	}
+	assert.Equal(t, hits, r.Stats().MemoryLimitHits, "an interrupt is pending: no new hit")
+	r.ClearInterrupt()
+	r.NewError(KindTypeError, "%s", big)
+	assert.Equal(t, hits+1, r.Stats().MemoryLimitHits, "past the limit with no interrupt pending: a new hit")
+	r.ClearInterrupt()
+	r.ResetAllocation()
+	// A reset keeps the last measurement, and the script still keeps more
+	// than the limit: the next allocation hits again, and a higher limit
+	// lets it run.
+	_, err = runScriptValue(t, r, `1`)
+	require.ErrorIs(t, err, ErrMemoryLimit)
+	r.ClearInterrupt()
+	r.SetMemoryLimit(64 << 20)
+	_, err = runScriptValue(t, r, `1`)
+	require.NoError(t, err)
 }

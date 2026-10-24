@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"math"
 	"math/big"
+	"math/rand/v2"
 	"reflect"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -500,13 +503,31 @@ func TestInternDoesNotPublishCallerString(t *testing.T) {
 // container referenced twice exports as one Go value (with the inline seen
 // list and after it spills into the map), and a getter that mutates the
 // holder during export falls back to [[Get]].
+func TestToGoStateSpills(t *testing.T) {
+	var st toGoState
+	objs := make([]*Object, toGoSmall+3)
+	r := NewRealm()
+	for i := range objs {
+		objs[i] = r.NewObject()
+		st.add(objs[i], i)
+		assert.Equal(t, i < toGoSmall, st.seen == nil, "object %d", i)
+	}
+	for i, o := range objs {
+		out, ok := st.lookup(o)
+		require.True(t, ok)
+		assert.Equal(t, i, out)
+	}
+	_, ok := st.lookup(r.NewObject())
+	assert.False(t, ok)
+}
+
 func TestToGoSharedReferencesAndWideGraphs(t *testing.T) {
 	r := NewRealm()
 	shared := r.NewObject()
 	shared.DefineOwnDataFast(r, key(r, "x"), IntValue(1), attrDefault)
 	root := r.NewObject()
 	var items []Value
-	for i := range 12 {
+	for i := range 2 * toGoSmall {
 		o := r.NewObject()
 		o.DefineOwnDataFast(r, key(r, "i"), IntValue(i), attrDefault)
 		o.DefineOwnDataFast(r, key(r, "s"), ObjectValue(shared), attrDefault)
@@ -520,7 +541,7 @@ func TestToGoSharedReferencesAndWideGraphs(t *testing.T) {
 	require.NoError(t, err)
 	m := out.(map[string]any)
 	list := m["list"].([]any)
-	require.Len(t, list, 12)
+	require.Len(t, list, 2*toGoSmall)
 	sharedOut := m["shared"].(map[string]any)
 	assert.Equal(t, int64(1), sharedOut["x"])
 	for i, item := range list {
@@ -760,7 +781,7 @@ export function wide(n) { const o = {}; for (let i = 0; i < n; i++) o["k" + i] =
 	_, err := f.r.ToGoStrict(deep)
 	var exc *Exception
 	require.ErrorAs(t, err, &exc)
-	assert.Equal(t, "RangeError: Maximum export depth exceeded (10000 nested containers)", errMessage(t, err))
+	assert.Equal(t, "RangeError: Nesting is too deep to export to Go (more than 10000 levels)", errMessage(t, err))
 	assert.Equal(t, limit, exportDepth(f.r.ToGo(deep)), "the lenient export cuts the deeper containers to nil")
 
 	out, err := f.r.ToGoStrict(value("wide", limit+5))
@@ -813,5 +834,48 @@ export function check(v, o) { return [is(v), is(o.n), is(o.list[0]), is(o.deep.m
 		got, ok := f.r.ToGo(v).(float64)
 		require.True(t, ok)
 		assert.True(t, math.IsNaN(got))
+	}
+}
+
+// TestOrderPairs: named keys sorted, then the canonical indices, for maps
+// short enough for the insertion sort and past it.
+func TestOrderPairs(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for n := range 3 * smallPairSort {
+		for range 20 {
+			seen := map[string]bool{}
+			var seg []hostPair[int]
+			for len(seg) < n {
+				var k string
+				switch rng.IntN(3) {
+				case 0:
+					k = strconv.Itoa(rng.IntN(50))
+				case 1:
+					k = "k" + strconv.Itoa(rng.IntN(100))
+				default:
+					k = string(rune('a'+rng.IntN(26))) + string(rune('A'+rng.IntN(26)))
+				}
+				if !seen[k] {
+					seen[k] = true
+					seg = append(seg, hostPair[int]{k, len(seg)})
+				}
+			}
+			orderPairs(seg)
+			named, index := []string{}, []string{}
+			for k := range seen {
+				if _, ok := parseArrayIndex(k); ok {
+					index = append(index, k)
+				} else {
+					named = append(named, k)
+				}
+			}
+			slices.Sort(named)
+			got := make([]string, len(seg))
+			for i, p := range seg {
+				got[i] = p.k
+			}
+			require.Equal(t, named, got[:len(named)], "n=%d", n)
+			assert.ElementsMatch(t, index, got[len(named):], "n=%d", n)
+		}
 	}
 }

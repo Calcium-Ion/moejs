@@ -81,7 +81,7 @@ func TestRunner(t *testing.T) {
 		{"async-throws.js", "/*---\nflags: [async]\n---*/\nqueueMicrotask(() => { throw new Test262Error(\"job\"); });\n$DONE();", both(Fail, "Test262Error: job")},
 		{"feature.js", "/*---\nfeatures: [let, Temporal]\n---*/\n", both(Skip, "feature: Temporal")},
 		{"implied.js", "/*---\nincludes: [temporalHelper.js]\n---*/\n", both(Skip, "feature: Temporal")},
-		{"nongoal.js", "/*---\nfeatures: [Intl.Locale]\n---*/\n", both(Skip, "non-goal: Intl.Locale")},
+		{"nongoal.js", "/*---\nfeatures: [FinalizationRegistry]\n---*/\n", both(Skip, "non-goal: FinalizationRegistry")},
 		{"neg-runtime.js", "/*---\nnegative:\n  phase: runtime\n  type: TypeError\n---*/\nnull.x;", both(Pass, "")},
 		{"neg-runtime-wrong.js", "/*---\nnegative:\n  phase: runtime\n  type: TypeError\n---*/\nundefinedName;", both(Fail, "expected a TypeError, got ReferenceError: ")},
 		{"neg-thrown.js", "/*---\nnegative:\n  phase: runtime\n  type: Test262Error\n---*/\nthrow new Test262Error('x');", both(Pass, "")},

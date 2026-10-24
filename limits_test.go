@@ -269,3 +269,51 @@ func ExampleRuntime_ToGoIntoWith() {
 	// true true
 	// moejs: decoded value too large: more than 1048576 bytes of JSON
 }
+
+// TestNestingTooDeep: JSON and exports nested past 10,000 arrays and
+// objects fail with a RangeError that says so and wraps ErrTooDeep, from
+// the host APIs and in JavaScript.
+func TestNestingTooDeep(t *testing.T) {
+	mod, err := moejs.Compile("deep.js", `
+export function deep(n) { let v = []; for (let i = 1; i < n; i++) v = [v]; return v; }
+function caught(f) { try { f(); return "ok"; } catch (e) { return e.name + ": " + e.message; } }
+export function parse(s) { return caught(() => JSON.parse(s)); }
+export function revive(s) { return caught(() => JSON.parse(s, (k, v) => v)); }
+export function stringify(n) { const v = deep(n); return caught(() => JSON.stringify(v)); }
+`)
+	require.NoError(t, err)
+	rt := moejs.NewRuntime(moejs.Options{})
+	require.NoError(t, rt.Load(mod))
+	const msg = "RangeError: JSON nesting is too deep (more than 10000 levels)"
+	text := strings.Repeat("[", 10001) + strings.Repeat("]", 10001)
+	call := func(name string, arg moejs.Value) moejs.Value {
+		t.Helper()
+		v, err := rt.Call(mustHook(t, mod, name), arg)
+		require.NoError(t, err)
+		return v
+	}
+
+	_, err = rt.ParseJSON([]byte(text))
+	assert.ErrorIs(t, err, moejs.ErrTooDeep)
+	assert.ErrorContains(t, err, msg)
+	_, err = rt.ParseJSONString(text)
+	assert.ErrorIs(t, err, moejs.ErrTooDeep)
+	assert.ErrorContains(t, err, msg)
+	limit, err := rt.ParseJSONString(text[1 : len(text)-1])
+	require.NoError(t, err, "10,000 levels parse")
+	_, err = rt.AppendJSON(nil, limit)
+	require.NoError(t, err, "and serialize")
+
+	deep := call("deep", moejs.Int(10001))
+	_, err = rt.AppendJSON(nil, deep)
+	assert.ErrorIs(t, err, moejs.ErrTooDeep)
+	assert.ErrorContains(t, err, msg)
+	_, err = rt.ToGo(deep)
+	assert.ErrorIs(t, err, moejs.ErrTooDeep)
+	assert.ErrorContains(t, err, "RangeError: Nesting is too deep to export to Go (more than 10000 levels)")
+
+	assert.Equal(t, msg, call("parse", moejs.String(text)).String())
+	assert.Equal(t, msg, call("revive", moejs.String(text)).String())
+	assert.Equal(t, msg, call("stringify", moejs.Int(10001)).String())
+	assert.Equal(t, "ok", call("stringify", moejs.Int(10000)).String())
+}

@@ -36,9 +36,16 @@ Environment:
 
 ## Rules
 
-- Scope: `test/language`, `test/built-ins`, `test/annexB` and
-  `test/harness`. `intl402` and `staging` do not run. RESULTS.md reports
-  `language` + `built-ins` and `annexB` on separate lines.
+- Scope: `test/language`, `test/built-ins`, `test/annexB`, `test/harness`
+  and the directories of `test/intl402` whose Intl members moejs has
+  (`Intl`, `Locale`, `Segmenter`, `NumberFormat`, `PluralRules`,
+  `DateTimeFormat`, and the `toLocaleString` methods of `Number`, `BigInt`,
+  `Date`, `Array` and `TypedArray`). Tests that need what moejs's Intl
+  leaves out on purpose (other calendars, `Intl.Collator`, regional locale
+  data) are skipped by name, with the reason (`outOfScope` in features.go).
+  `staging` does not run. RESULTS.md
+  reports `language` + `built-ins`, `annexB` and `intl402` on separate
+  lines.
 - Every test runs in a fresh `SharedIntrinsics: false` realm whose Date time
   zone is UTC, with a 10 s interrupt, on a pool of workers. A Go panic is a failure that records the
   panic text and the panicking function (RESULTS.md lists them).
@@ -61,9 +68,10 @@ Environment:
   the rest of a `Test262:AsyncTestFailure:` line, or when it printed neither.
 - `features.go` lists the feature tags moejs implements. A test that needs any
   other feature (listed, or implied by an include through
-  `harness/features.yml`) is skipped with the feature named. Intl, the
-  `Atomics.wait` family (`CanBlockIsTrue`, `$262.agent`) and
-  `FinalizationRegistry` are skipped as non-goals. Implementing a feature
+  `harness/features.yml`) is skipped with the feature named. The
+  `Atomics.wait` family (`CanBlockIsTrue`, `$262.agent`),
+  `FinalizationRegistry` and the normative-optional parts of ECMA-402
+  (`intl-normative-optional`) are skipped as non-goals. Implementing a feature
   adds it to the table and regenerates the baseline.
 - Negative tests: a `parse` or `resolution` error must be raised by the parser
   or the compiler, before anything runs, and its name must match. A module

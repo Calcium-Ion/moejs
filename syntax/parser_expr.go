@@ -24,6 +24,14 @@ func (p *parser) parseAssign(noIn bool) Expr {
 	p.enter()
 	defer p.leave()
 	if p.ts {
+		if len(p.tsx.reuse) > 0 {
+			if x := p.tsReused(noIn); x != nil {
+				return x
+			}
+		}
+		if p.tsx.spec > 0 {
+			return p.tsAssignRecorded(noIn)
+		}
 		return p.tsAssign(noIn)
 	}
 	start := p.start
@@ -272,7 +280,7 @@ func (p *parser) parseOperand(minPrec int, noIn bool) Expr {
 }
 
 func (p *parser) parseBinaryRest(left Expr, start, minPrec int, noIn bool) Expr {
-	for {
+	for n := 0; ; n++ {
 		op := p.tok
 		prec := binaryPrec(op)
 		if prec == 0 || prec <= minPrec || op == KwIn && noIn {
@@ -290,6 +298,7 @@ func (p *parser) parseBinaryRest(left Expr, start, minPrec int, noIn bool) Expr 
 			}
 		}
 		p.next()
+		pollItem(p.stop, n) // a chain of operators is a list too
 		rstart := p.start
 		nextMin := prec
 		if op == Exp {
@@ -506,6 +515,7 @@ func (p *parser) parseArguments() []Expr {
 	p.expect(LParen)
 	var args []Expr
 	for p.tok != RParen {
+		pollItem(p.stop, len(args))
 		if p.tok == Ellipsis {
 			start := p.start
 			p.next()
@@ -660,6 +670,7 @@ func (p *parser) parseArrayLit() Expr {
 	p.next()
 	arr := &ArrayLit{}
 	for p.tok != RBrack {
+		pollItem(p.stop, len(arr.Elems))
 		if p.eat(Comma) {
 			arr.Elems = append(arr.Elems, nil)
 			continue
@@ -716,6 +727,7 @@ func (p *parser) parseObjectLit() Expr {
 	obj := &ObjectLit{}
 	sawProto := false
 	for p.tok != RBrace {
+		pollItem(p.stop, len(obj.Props))
 		prop := &Property{Span: Span{p.start, 0}}
 		if p.eat(Ellipsis) {
 			prop.Kind = PropSpread
@@ -893,9 +905,6 @@ func (p *parser) markParenthesized(x Expr) {
 			p.parens = make(map[Expr]struct{})
 		}
 		p.parens[x] = struct{}{}
-		if p.ts {
-			p.tsx.parens = append(p.tsx.parens, x)
-		}
 	}
 }
 
@@ -903,6 +912,36 @@ func (p *parser) markParenthesized(x Expr) {
 func (p *parser) isParenthesized(x Expr) bool {
 	_, ok := p.parens[x]
 	return ok
+}
+
+// marked reports whether markParenthesized marked x, of any kind.
+func (p *parser) marked(x Expr) bool {
+	switch x := x.(type) {
+	case *ObjectLit:
+		return x.parenthesized
+	case *ArrayLit:
+		return x.parenthesized
+	case *LogicalExpr:
+		return x.parenthesized
+	}
+	return p.isParenthesized(x)
+}
+
+// setMarked sets whether x, which no one else has marked yet, is marked:
+// a copy of an expression whose own flag says what its original's says.
+func (p *parser) setMarked(x Expr, on bool) {
+	switch x := x.(type) {
+	case *ObjectLit:
+		x.parenthesized = on
+	case *ArrayLit:
+		x.parenthesized = on
+	case *LogicalExpr:
+		x.parenthesized = on
+	default:
+		if on {
+			p.markParenthesized(x)
+		}
+	}
 }
 
 // ---- Assignment targets and cover grammar -----------------------------------
@@ -1265,6 +1304,7 @@ func (p *parser) parseParams(fn *Function) {
 		p.tsThisParam()
 	}
 	for p.tok != RParen {
+		pollItem(p.stop, len(fn.Params))
 		if p.eat(Ellipsis) {
 			fn.Rest = p.parseBindingTarget()
 			if p.ts {

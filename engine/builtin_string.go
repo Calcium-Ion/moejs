@@ -1180,6 +1180,10 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 		}
 		items := make([]Value, count)
 		pieces := make([]String, count) // one allocation for every piece
+		root := s                       // the string the pieces share (shareRoot)
+		if s.kind != strRope {
+			root = s.shareRoot()
+		}
 		start := 0
 		for i := range count {
 			if err := interruptEvery(r, int64(i)); err != nil {
@@ -1196,7 +1200,7 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 			if end == start {
 				items[i] = StringValue(emptyString)
 			} else {
-				pieces[i] = String{s: str[start:end], n: int32(end - start), kind: strASCII}
+				pieces[i] = String{s: str[start:end], n: int32(end - start), kind: strASCII, right: root}
 				items[i] = StringValue(&pieces[i])
 			}
 			start = end + len(sp)
@@ -1291,15 +1295,25 @@ func stringReplace(r *Realm, this Value, args []Value, all bool) (Value, error) 
 	sb.Grow(n + 16)
 	next := 0
 	pos := first
+	held := int64(-1)
+	if functional {
+		// The measurements made in the callbacks count the builder, until
+		// a return reports nothing again (no defer: the function has too
+		// many returns for an open-coded one, and every call would pay).
+		held = r.heldBase()
+	}
 	for pos >= 0 {
 		writeSlice(&sb, s, next, pos)
 		if functional {
+			r.holdBytes(held, sb.heldBytes())
 			rv, err := r.Call(replaceValue, Undefined(), []Value{StringValue(search), IntValue(pos), StringValue(s)})
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			rs, err := r.ToString(rv)
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			sb.WriteString(rs)
@@ -1307,6 +1321,7 @@ func stringReplace(r *Realm, this Value, args []Value, all bool) (Value, error) 
 			return Undefined(), err
 		}
 		if err := sb.checkLength(r); err != nil {
+			r.holdBytes(held, 0)
 			return Undefined(), err
 		}
 		next = pos + m
@@ -1319,6 +1334,7 @@ func stringReplace(r *Realm, this Value, args []Value, all bool) (Value, error) 
 		}
 		pos = s.IndexOf(search, from)
 	}
+	r.holdBytes(held, 0)
 	writeSlice(&sb, s, next, n)
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err

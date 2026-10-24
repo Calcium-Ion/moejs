@@ -71,11 +71,19 @@ type (
 	// InterruptedError is returned when Interrupt stopped running code.
 	InterruptedError = engine.InterruptedError
 	// MemoryLimitError is the value of the *InterruptedError a runtime
-	// stops with when it allocates more than Options.MemoryLimit between
-	// resets; it unwraps to ErrMemoryLimit.
+	// stops with when what it keeps and allocates passes
+	// Options.MemoryLimit; it unwraps to ErrMemoryLimit.
 	MemoryLimitError = engine.MemoryLimitError
 	// Stats are a runtime's counters (Runtime.Stats).
 	Stats = engine.Stats
+	// LiveReporter is implemented by the Go state a host attaches to an
+	// object it creates (Object.SetInternal), or to a data function, that
+	// keeps JavaScript values or Go memory for it: the measurements of the
+	// memory limit call ReportLive when they reach the object, and count
+	// what it reports while the object is reachable (engine.LiveReporter).
+	// State reachable from no object, which Go alone holds, goes to
+	// Runtime.AddLiveRoots instead.
+	LiveReporter = engine.LiveReporter
 )
 
 // Arg returns args[i], or undefined when there are fewer arguments.
@@ -113,6 +121,14 @@ var (
 	// ErrMemoryLimit is what errors.Is finds in the error of a call that
 	// passed Options.MemoryLimit (a *MemoryLimitError).
 	ErrMemoryLimit = engine.ErrMemoryLimit
+	// ErrTooDeep is what errors.Is finds in the RangeError of a value
+	// nested deeper than 10,000 arrays and objects (engine.MaxToGoDepth):
+	// the text ParseJSON, ParseJSONString or JSON.parse reads (a reviver's
+	// walk included), the value AppendJSON or JSON.stringify writes, and
+	// the value ToGo exports. Its message says what happened, as in "JSON
+	// nesting is too deep (more than 10000 levels)". (Unmarshal's limits
+	// wrap ErrTooLarge instead.)
+	ErrTooDeep = engine.ErrTooDeep
 )
 
 // SyntaxError is a parse or early error in module source.

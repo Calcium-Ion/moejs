@@ -276,10 +276,11 @@ moejs 运行 ES 模块和经典脚本，包括非严格模式和 Annex B 的网�
 `Float16Array`、`Array.fromAsync`、`Math.sumPrecise`、`Error.isError` 这些新近加入标准的 API。正则表达式支持所有标志和
 Unicode 17 属性，`Date` 的时区数据来自 Go。
 
-[test262](https://github.com/tc39/test262) 上 79,385 个测试通过，0 个失败。另外 14,058 个测试用到 moejs 没有实现的特性，
+[test262](https://github.com/tc39/test262) 上 79,845 个测试通过，0 个失败。另外 14,234 个测试用到 moejs 没有实现的特性，
 测试时跳过。按目录统计的结果见 [bench/test262/RESULTS.md](bench/test262/RESULTS.md)。
 
-未实现的特性有：导入属性和 JSON 模块、`using` 声明和 `DisposableStack`、装饰器、迭代器辅助方法、`Intl`、`Temporal`、
+未实现的特性有：导入属性和 JSON 模块、`using` 声明和 `DisposableStack`、装饰器、迭代器辅助方法、`Intl.Collator` 等 `Intl` 构造函数（已有 `Intl.Locale`、`Intl.Segmenter`、`Intl.NumberFormat`、`Intl.DateTimeFormat` 和 `Intl.PluralRules`，
+数字和日期数据覆盖 11 种语言）、`Temporal`、
 `ShadowRealm`、`FinalizationRegistry` 和 `JSON.rawJSON`。单独的 `Runtime` 没有定时器，`eventloop` 包会安装它们。
 完整列表、已知的错误结果和各项限制见 [TODO.md](TODO.md)。
 
