@@ -126,6 +126,35 @@ moejs 对比 Sobek，每次操作 100 次内循环：
 | 单张 8 MiB 图 | 384 | 1,152 | 1,101 | — | 1,110 | 1,110 | 1,138 | 1,140 |
 | 8 张 1 MiB 图 | 366 | 1,134 | 1,104 | — | 1,110 | 1,110 | 1,138 | 1,141 |
 
+## Intl
+
+![moejs 的 Intl 对比 Node.js](assets/intl-bench.zh.png)
+
+对比 Node.js 24.22（V8，ICU 78.3），2026-10-24 测量，Go 1.26.6，机器和插件场景相同，绑定同样的 8 个 vCPU。两个引擎跑 `bench/testdata` 里的同一批模块，TZ=UTC，en-US 区域：moejs 用 BenchmarkIntlFormat 和 BenchmarkIntlSegmenter，Node.js 用 `bench/scripts/intl_format_node.mjs` 和 `intl_node.mjs`。每个数字是 7 轮的中位数。每轮轮流跑 moejs 和 Node.js，先后顺序每轮交替，前后各跑一次金丝雀基准，排除宿主机上其他虚拟机的负载。
+
+moejs 格式化的速度是 Node.js 的 1.2 到 3.4 倍，创建格式化器是 4 到 16 倍。Intl.Segmenter 按每段算比 Node.js 慢：字素 0.64x，词 0.95x，句 0.77x。
+
+每次调用的耗时，7 轮中位数。速度是 Node.js 的耗时除以 moejs 的耗时：
+
+| 场景 | moejs | Node.js | 速度 |
+|---|--:|--:|--:|
+| NumberFormat ja-JP 日元，format | 400 ns | 553 ns | 1.4x |
+| NumberFormat ja-JP 日元，formatToParts | 1.34 µs | 2.34 µs | 1.8x |
+| NumberFormat de-DE 小数，format | 391 ns | 547 ns | 1.4x |
+| DateTimeFormat Asia/Tokyo，format | 406 ns | 1.26 µs | 3.1x |
+| DateTimeFormat Asia/Tokyo，formatToParts | 1.74 µs | 3.08 µs | 1.8x |
+| `(n).toLocaleString()` | 380 ns | 466 ns | 1.2x |
+| `date.toLocaleString()` | 451 ns | 1.54 µs | 3.4x |
+| `new Intl.NumberFormat` | 4.78 µs | 20.3 µs | 4.2x |
+| `new Intl.DateTimeFormat` | 5.53 µs | 86.3 µs | 16x |
+| `new Intl.Segmenter` | 1.17 µs | 13.8 µs | 12x |
+| Segmenter，每个字素 | 180 ns | 114 ns | 0.64x |
+| Segmenter，每个词 | 230 ns | 218 ns | 0.95x |
+| Segmenter，每个句子 | 401 ns | 308 ns | 0.77x |
+| 新进程里第一次 `toLocaleString` | 229 µs | 17.2 ms | 75x |
+
+README 里的 Web API 图出自同样的几轮，用的是 `bench/cmd/webapibench`。`bench/scripts/intl_webapi_bench.sh` 编译基准并测新的几轮，`uv run --with matplotlib bench/scripts/intl_webapi_chart.py` 从 `docs/assets/intl-webapi-bench.jsonl` 重画两张图（`--table` 打印数字）。
+
 ## 另一台机器
 
 下面是 hanxi 为 [#1](https://github.com/Calcium-Ion/moejs/pull/1)（把 modernc.org/quickjs 加进基准测试）测的数字：Intel Xeon E5-2650 v3（2 × 10 核，超线程到 40 个逻辑 CPU），

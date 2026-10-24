@@ -64,6 +64,12 @@ Sobek 和 modernc.org/quickjs（翻译成 Go 的 QuickJS）和 moejs 一样是�
 
 `webapi` 包在带事件循环的运行时上安装 `fetch`、`Headers`、`Request`、`Response`、Streams、`AbortController`、`URL` 和 `performance`，供基于 fetch 的 SDK 使用。fetch 能访问哪些网络由宿主的 `http.Client` 和放行钩子决定：不提供客户端就没有网络，不提供钩子则客户端能访问的地址都放行，所以不受信任的脚本应当给主机列表。响应体是流式的：JavaScript 要一块，Go 才读一块，每个字节都计入运行时的内存上限。取消和中止会传到 Go 的请求上。详见[指南](docs/guide.zh_CN.md#web-api)。
 
+<p align="center">
+  <img src="docs/assets/webapi-bench.zh.png" alt="moejs 的 Web API 对比 Node.js 24：1 并发和 8 并发的小 JSON 请求 fetch、流式读 256 MiB 响应体和 SSE 事件">
+</p>
+
+这张图在 moejs 和 Node.js 24 里跑同一个 fetch 脚本，服务端在本机回环地址上，2026-10-24 在 Intel Xeon E5-2667 v4 的 8 个 vCPU 上测量。小请求和流式读响应体是 moejs 更快，SSE 是 moejs 更慢的一行。
+
 ### 超时和错误
 
 任意 goroutine 都可以中断正在运行的插件，死循环也能停下。JavaScript 异常、语法错误、中断和宿主函数里的 panic 各自以不同的 Go 错误类型返回，抛出的 `Error` 能取到 V8 格式的调用栈。宿主函数 panic 之后，运行时还能继续使用。

@@ -106,6 +106,15 @@ chunk only when JavaScript asks for one, each byte is charged to the
 runtime's memory limit, and cancel and abort reach the Go request. See
 the [guide](docs/guide.md#web-apis).
 
+<p align="center">
+  <img src="docs/assets/webapi-bench.en.png" alt="moejs Web APIs against Node.js 24: fetch of small JSON requests at 1 and 8 concurrent, a 256 MiB streamed body and server-sent events">
+</p>
+
+The chart runs the same fetch script in moejs and in Node.js 24 against a
+local loopback server, measured on 2026-10-24 on 8 vCPUs of an Intel Xeon
+E5-2667 v4. moejs is faster on small requests and on a streamed body, and
+server-sent events are the row where it is slower.
+
 ### Timeouts and errors
 
 Any goroutine can interrupt a running plugin, even one stuck in an endless
