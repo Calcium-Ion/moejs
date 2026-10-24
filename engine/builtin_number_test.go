@@ -357,8 +357,8 @@ func TestNumberToStringRadixMethod(t *testing.T) {
 		err := jsCallErr(t, r, IntValue(1), "toString", bad)
 		assert.EqualError(t, err, "RangeError: toString() radix must be between 2 and 36", bad.String())
 	}
-	assert.Equal(t, "1234.5", jsString(t, jsCall(t, r, NumberValue(1234.5), "toLocaleString")))
-	assert.Equal(t, "1234.5", jsString(t, jsCall(t, r, NumberValue(1234.5), "toLocaleString", str("de-DE"))))
+	assert.Equal(t, "1,234.5", jsString(t, jsCall(t, r, NumberValue(1234.5), "toLocaleString")))
+	assert.Equal(t, "1.234,5", jsString(t, jsCall(t, r, NumberValue(1234.5), "toLocaleString", str("de-DE"))))
 	w, _ := r.Construct(ObjectValue(r.NumberCtor), []Value{IntValue(10)}, nil)
 	assert.Equal(t, "1010", jsString(t, jsCall(t, r, w, "toString", IntValue(2))))
 	s, err := r.ToString(w)

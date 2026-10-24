@@ -382,6 +382,9 @@ func (r *Realm) runModuleBody(m *moduleInstance) (Value, error) {
 		res, err = Undefined(), r.noBodyPromise()
 	}
 	if r.callDepth == 0 && r.jobsPending {
+		if j := r.lazy.jobs; !j.draining {
+			j.result = res
+		}
 		err = r.endJob(err)
 	}
 	return res, err
@@ -399,7 +402,9 @@ func (r *Realm) noBodyPromise() error {
 // Module.BodyPC in the environment the prologue filled.
 func (r *Realm) enterModuleFrame(fn *Object) (Value, error) {
 	if r.interruptFlag.Load() != 0 {
-		return Undefined(), r.interruptError()
+		if err := r.pendingInterrupt(); err != nil {
+			return Undefined(), err
+		}
 	}
 	fd := fn.internal.(*FunctionData)
 	code := fd.code

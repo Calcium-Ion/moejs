@@ -110,7 +110,7 @@ func TestArrayToLocaleString(t *testing.T) {
 		{`var n = 0; var o = {toLocaleString: function () { n++; return "o"; }};
 		  return [[undefined, o, null, o].toLocaleString(), n];`, `[",o,,o",2]`},
 		{`var got; var o = {toLocaleString: function (...rest) { got = rest.length; return ""; }};
-		  [o].toLocaleString("en", {}); return got;`, `0`},
+		  [o].toLocaleString("en", {}); return got;`, `2`},
 		{`return Array.prototype.toLocaleString.call({length: 2, 0: "a", 1: "b"});`, `"a,b"`},
 		{`try { [{toLocaleString: 1}].toLocaleString(); } catch (e) { return e.name; }`, `"TypeError"`},
 		{`return [{toLocaleString: function () { return {toString: function () { return "t"; }}; }}].toLocaleString();`, `"t"`},

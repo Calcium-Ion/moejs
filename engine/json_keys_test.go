@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -454,4 +455,44 @@ func TestJSONParseSharedChildConcurrent(t *testing.T) {
 			assert.True(t, o.Shape().IsShared(), name(w, i))
 		}
 	}
+}
+
+// TestSharedTransitionLookup: past the slice, a shared shape's publish and
+// child find an ASCII attrDefault child through the names index and every
+// other child (other attributes, a non-ASCII name) through the map, and
+// the snapshot stays 64 bytes.
+func TestSharedTransitionLookup(t *testing.T) {
+	r := newShared()
+	run := strconv.Itoa(int(jsonKeyRuns.Add(1)))
+	root := &Shape{proto: r.ObjectPrototype, key: rootKey, shared: true}
+	type entry struct {
+		key   PropertyKey
+		attrs uint8
+	}
+	children := map[entry]*Shape{}
+	add := func(k PropertyKey, attrs uint8) {
+		c := root.publish(k, attrs)
+		require.NotNil(t, c)
+		children[entry{k, attrs}] = c
+	}
+	for i := range sharedSmallTransitions + 6 {
+		add(key(r, "tl_"+strconv.Itoa(i)+"_"+run), attrDefault)
+	}
+	add(key(r, "tl_0_"+run), attrHidden)
+	add(key(r, "tlé_"+run), attrDefault)
+	add(key(r, ""), attrDefault)
+	add(key(r, "tl_2_"+run), 0)
+	snap := root.sharedTrans.Load()
+	require.NotNil(t, snap.m, "past the slice")
+	require.NotNil(t, snap.names)
+	for e, c := range children {
+		assert.Same(t, c, snap.lookup(e.key, e.attrs))
+		assert.Same(t, c, root.child(e.key, e.attrs))
+		assert.Same(t, c, root.publish(e.key, e.attrs), "publish finds the child")
+	}
+	assert.Nil(t, snap.lookup(key(r, "tl_absent_"+run), attrDefault))
+	assert.Nil(t, snap.lookup(key(r, "tl_1_"+run), attrHidden))
+	assert.Nil(t, root.child(key(r, "tl_absent_"+run), attrDefault))
+	assert.Nil(t, root.child(key(r, "tl_1_"+run), attrHidden))
+	assert.Equal(t, uintptr(64), unsafe.Sizeof(sharedTransitions{}))
 }

@@ -71,14 +71,23 @@ type extIntrinsics struct {
 	// binary holds the ArrayBuffer, SharedArrayBuffer and DataView
 	// intrinsics, nil until the realm defines one of them (binaryIntr).
 	binary *binaryIntrinsics
+
+	// intl holds the Intl intrinsics, nil until the realm defines Intl
+	// (builtin_intl.go).
+	intl *intlIntrinsics
 }
 
-// visitExtIntrinsics feeds every extIntrinsics root to the freeze walk of
-// the shared template (freezeIntrinsics).
+// visitExtIntrinsics feeds every extIntrinsics root to visit: to the
+// freeze walk of the shared template (freezeIntrinsics) and to the live
+// measurement of a mutable realm (visitIntrinsicRoots).
 func (r *Realm) visitExtIntrinsics(visit func(*Object)) {
 	x := r.extIntrinsics
-	visit(x.errorStackAccessor.Get)
-	visit(x.errorStackAccessor.Set)
+	// A mutable realm defines the stack accessor and the generator
+	// intrinsics on first use; the template has every one.
+	if a := x.errorStackAccessor; a != nil {
+		visit(a.Get)
+		visit(a.Set)
+	}
 	for _, o := range [...]*Object{
 		x.SymbolPrototype, x.SymbolCtor, x.funcProtoHasInstance,
 		x.IteratorPrototype, x.StringIteratorPrototype,
@@ -90,12 +99,18 @@ func (r *Realm) visitExtIntrinsics(visit func(*Object)) {
 		x.WeakRefPrototype, x.WeakRefCtor, x.weakMapSetFn, x.weakSetAddFn,
 		x.AggregateErrorPrototype, x.AggregateErrorCtor,
 		x.RegExpStringIteratorPrototype, x.regexpStringIterNextFn,
-		x.async.GeneratorFunction, x.async.GeneratorFunctionPrototype, x.async.GeneratorPrototype,
-		x.async.AsyncFunction, x.async.AsyncFunctionPrototype,
-		x.async.AsyncGeneratorFunction, x.async.AsyncGeneratorFunctionPrototype, x.async.AsyncGeneratorPrototype,
-		x.async.AsyncIteratorPrototype, x.async.AsyncFromSyncIteratorPrototype, x.async.asyncFromSyncNext,
 	} {
 		visit(o)
+	}
+	if g := x.async; g != nil {
+		for _, o := range [...]*Object{
+			g.GeneratorFunction, g.GeneratorFunctionPrototype, g.GeneratorPrototype,
+			g.AsyncFunction, g.AsyncFunctionPrototype,
+			g.AsyncGeneratorFunction, g.AsyncGeneratorFunctionPrototype, g.AsyncGeneratorPrototype,
+			g.AsyncIteratorPrototype, g.AsyncFromSyncIteratorPrototype, g.asyncFromSyncNext,
+		} {
+			visit(o)
+		}
 	}
 	if x.evalFn != nil {
 		visit(x.evalFn)
@@ -106,6 +121,9 @@ func (r *Realm) visitExtIntrinsics(visit func(*Object)) {
 	}
 	if x.binary != nil {
 		x.binary.visit(visit)
+	}
+	if x.intl != nil {
+		x.intl.visit(visit)
 	}
 }
 

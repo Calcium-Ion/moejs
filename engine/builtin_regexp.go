@@ -1497,6 +1497,7 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 	var sb StringBuilder
 	sb.growFor(s, s.Len()+16)
 	next := 0
+	held := int64(-1)
 	var captures []Value
 	if functional || ngroups > 0 || c.tr.hasNames {
 		captures = make([]Value, ngroups+1)
@@ -1527,12 +1528,22 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 			if !namedCaptures.IsUndefined() {
 				args = append(args, namedCaptures)
 			}
+			if held < 0 {
+				// The measurements made in the callbacks count the builder,
+				// until a return reports nothing again (no defer: the
+				// function has too many returns for an open-coded one, and
+				// every call would pay).
+				held = r.heldBase()
+			}
+			r.holdBytes(held, sb.heldBytes())
 			rv, err := r.Call(replaceValue, Undefined(), args)
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			rs, err := r.ToString(rv)
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			if position >= next {
@@ -1550,12 +1561,14 @@ func regexpReplace(r *Realm, rx *Object, d *RegExpData, s *String, replaceValue 
 			}
 		}
 		if err := sb.checkLength(r); err != nil {
+			r.holdBytes(held, 0)
 			return Undefined(), err
 		}
 		if position >= next {
 			next = m[1]
 		}
 	}
+	r.holdBytes(held, 0)
 	writeSlice(&sb, s, next, s.Len())
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err
@@ -1590,15 +1603,25 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 	var sb StringBuilder
 	sb.growFor(s, s.Len()+16)
 	next := 0
+	held := int64(-1)
+	if tmpl == nil {
+		// The measurements made in the callbacks count the builder, until
+		// a return reports nothing again (no defer, which every return
+		// would test).
+		held = r.heldBase()
+	}
 	for n := 0; ; n++ {
 		writeSlice(&sb, s, next, start)
 		if tmpl == nil {
+			r.holdBytes(held, sb.heldBytes())
 			rv, err := r.Call(replaceValue, Undefined(), []Value{StringValue(s.Substring(start, end)), IntValue(start), StringValue(s)})
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			rs, err := r.ToString(rv)
 			if err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 			sb.WriteString(rs)
@@ -1606,6 +1629,7 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 			return Undefined(), err
 		}
 		if err := sb.checkLength(r); err != nil {
+			r.holdBytes(held, 0)
 			return Undefined(), err
 		}
 		next = end
@@ -1617,10 +1641,12 @@ func (r *Realm) simpleReplace(rx *Object, d *RegExpData, s *String, replaceValue
 		}
 		if n&1023 == 1023 {
 			if err := r.CheckInterrupt(); err != nil {
+				r.holdBytes(held, 0)
 				return Undefined(), err
 			}
 		}
 	}
+	r.holdBytes(held, 0)
 	writeSlice(&sb, s, next, s.Len())
 	if err := sb.checkLength(r); err != nil {
 		return Undefined(), err

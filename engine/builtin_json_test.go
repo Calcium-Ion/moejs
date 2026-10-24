@@ -130,7 +130,7 @@ func TestJSONParseErrors(t *testing.T) {
 	jsonParseGo(t, r, deep)
 	for _, text := range []string{strings.Repeat("[", jsonMaxDepth+1), strings.Repeat(`{"a":`, jsonMaxDepth+1)} {
 		_, err := callMethodErr(r, ObjectValue(r.JSON), "parse", str(text))
-		assertErrorKind(t, err, KindRangeError, "Maximum call stack size exceeded")
+		assertErrorKind(t, err, KindRangeError, "JSON nesting is too deep (more than 10000 levels)")
 	}
 	// Interrupts are honoured.
 	r.Interrupt("stop")
@@ -218,8 +218,8 @@ func TestJSONParseReviver(t *testing.T) {
 // Go stack, while the deepest structure the parse accepts is still revived.
 func TestJSONParseReviverGrowing(t *testing.T) {
 	runProtoCases(t, []protoCase{
-		{"growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: Maximum call stack size exceeded"},
-		{"growing object", `return JSON.parse('{"a":1,"b":{}}', function (k, v) { if (k === 'a') this.b = {a: 1, b: {}}; return v })`, "!RangeError: Maximum call stack size exceeded"},
+		{"growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: JSON nesting is too deep (more than 10000 levels)"},
+		{"growing object", `return JSON.parse('{"a":1,"b":{}}', function (k, v) { if (k === 'a') this.b = {a: 1, b: {}}; return v })`, "!RangeError: JSON nesting is too deep (more than 10000 levels)"},
 		{"deepest", `const s = '['.repeat(10000) + ']'.repeat(10000); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "10000RangeError"},
 	})
 }

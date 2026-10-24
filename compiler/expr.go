@@ -1300,13 +1300,15 @@ func (f *funcState) args(list []syntax.Expr, base int) bool {
 		}
 		f.allocN(len(list))
 		for i, a := range list {
+			f.c.pollItem(i)
 			f.expr(a, base+2+i)
 		}
 		return false
 	}
 	arr := f.alloc()
 	f.emitABx(bytecode.NewArray, arr, f.checkBx(len(list)))
-	for _, a := range list {
+	for i, a := range list {
+		f.c.pollItem(i)
 		mark := f.nregs
 		if s, ok := a.(*syntax.SpreadElem); ok {
 			t := f.exprReg(s.X)
@@ -1436,7 +1438,8 @@ func (f *funcState) template(e *syntax.TemplateLit, dst int) {
 
 func (f *funcState) arrayLit(e *syntax.ArrayLit, dst int) {
 	f.emitABx(bytecode.NewArray, dst, f.checkBx(len(e.Elems)))
-	for _, el := range e.Elems {
+	for i, el := range e.Elems {
+		f.c.pollItem(i)
 		mark := f.nregs
 		switch el := el.(type) {
 		case nil:
@@ -1489,7 +1492,8 @@ func (f *funcState) defineNamed(obj int, name string, val int) {
 
 func (f *funcState) objectLit(e *syntax.ObjectLit, dst int) {
 	f.emitABx(bytecode.NewObject, dst, f.checkBx(len(e.Props)))
-	for _, p := range e.Props {
+	for i, p := range e.Props {
+		f.c.pollItem(i)
 		mark := f.nregs
 		f.setPos(p.Pos)
 		switch p.Kind {

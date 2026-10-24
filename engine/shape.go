@@ -66,6 +66,12 @@ const (
 	// dictionaries cannot crowd the shapes of object literals out of the
 	// shared tree.
 	maxSharedDataTransitions = 32
+	// maxSharedDataKey bounds the length in bytes of a key not bounded by
+	// code that a shared shape publishes: a longer one continues in the
+	// realm's own tree, where it dies with the realm and the live
+	// measurement counts it, rather than in the process-wide tree, which
+	// keeps it alive and which the measurement skips.
+	maxSharedDataKey = 64
 	// maxCodeKeys bounds the process-wide set of code-bound names.
 	maxCodeKeys = 1 << 16
 	// sharedSmallTransitions is the snapshot size scanned linearly before
@@ -97,6 +103,14 @@ func addCodeKeys(keys []PropertyKey) {
 }
 
 func isStaticAtom(s *String) bool { return s.atom != 0 && s.atom <= staticAtomCount }
+
+// keyBytes is the size in bytes of the units of the key s, an atom.
+func keyBytes(s *String) int {
+	if s.kind == strUTF16 {
+		return 2 * int(s.n)
+	}
+	return int(s.n)
+}
 
 // codeKey reports whether key is bounded by code (sharedTransMu held): the
 // well-known symbols are process-wide and fixed; other symbols and private
@@ -151,8 +165,8 @@ type Shape struct {
 	// (sharedTransitions.weak), written by the realm's goroutine only.
 	sharedTrans atomic.Pointer[sharedTransitions]
 
-	table map[PropertyKey]uint32 // key -> slot; built lazily when count > shapeTableThreshold
-	props []shapeProp            // ordered properties; built lazily, eagerly for shared shapes
+	table *shapeIndex // key -> slot; built lazily when count > shapeTableThreshold
+	props []shapeProp // ordered properties; built lazily, eagerly for shared shapes
 }
 
 type transitionKey struct {
@@ -179,7 +193,7 @@ type transition struct {
 type sharedTransitions struct {
 	small []transition
 	m     map[transitionKey]*Shape
-	table map[PropertyKey]uint32
+	table *shapeIndex
 	names *nameTable
 	weak  map[transitionKey]weak.Pointer[Shape]
 	// data and sweep are int32 so the snapshot stays 64 bytes: publish
@@ -219,6 +233,28 @@ func newNameTable(m map[transitionKey]*Shape) *nameTable {
 	return t
 }
 
+// child returns the indexed child for key/attrs, or nil. The map holds
+// every child, so nil sends the caller to it: a key whose atom has no hash
+// or other attributes are never indexed, and a child published since the
+// snapshot was loaded may not be yet.
+func (t *nameTable) child(key PropertyKey, attrs uint8) *Shape {
+	if t == nil || attrs != attrDefault || !key.IsString() {
+		return nil
+	}
+	a := key.String()
+	if a.kind != strASCII || a.hash == 0 {
+		return nil
+	}
+	slots := t.slots
+	mask := uint32(len(slots) - 1)
+	for i := a.hash & mask; ; i = (i + 1) & mask {
+		c := slots[i].Load()
+		if c == nil || c.key == key {
+			return c
+		}
+	}
+}
+
 // put adds the child c (sharedTransMu held, room left) unless its key has
 // no ASCII name or its attributes are not attrDefault.
 func (t *nameTable) put(c *Shape) {
@@ -236,6 +272,17 @@ func (t *nameTable) put(c *Shape) {
 	}
 	t.slots[i].Store(c)
 	t.n++
+}
+
+// wideChild is lookup for a snapshot whose children are in the map: an
+// ASCII name with attrDefault is probed in the names index first.
+func (t *sharedTransitions) wideChild(key PropertyKey, attrs uint8) *Shape {
+	if t.names != nil && attrs == attrDefault {
+		if c := t.names.child(key, attrs); c != nil {
+			return c
+		}
+	}
+	return t.m[transitionKey{key, attrs}]
 }
 
 func (t *sharedTransitions) lookup(key PropertyKey, attrs uint8) *Shape {
@@ -283,11 +330,11 @@ func (s *Shape) Lookup(key PropertyKey) (slot uint32, attrs uint8, ok bool) {
 		if table == nil {
 			table = s.lookupTable()
 		}
-		slot, ok = table[key]
-		if !ok {
+		e := table.find(s.props, key)
+		if e == 0 {
 			return 0, 0, false
 		}
-		return slot, s.props[slot].attrs, true
+		return e - 1, s.props[e-1].attrs, true
 	}
 	for n := s; n.count != 0; n = n.parent {
 		if n.key == key {
@@ -299,12 +346,11 @@ func (s *Shape) Lookup(key PropertyKey) (slot uint32, attrs uint8, ok bool) {
 
 // has reports whether key is in the chain without building the lookup table
 // (used to probe the intermediate shapes of an object literal, which are
-// never looked up again once the literal is complete).
+// never looked up again once the literal is complete). It walks the chain
+// even past a table: a chain is at most maxShapeProps long, and the walk
+// keeps has inlined where an add probes a shape, most often one without a
+// table.
 func (s *Shape) has(key PropertyKey) bool {
-	if s.table != nil {
-		_, ok := s.table[key]
-		return ok
-	}
 	for n := s; n.count != 0; n = n.parent {
 		if n.key == key {
 			return true
@@ -328,19 +374,55 @@ func (s *Shape) Props() []shapeProp {
 
 func (s *Shape) buildTable() { s.table = newShapeTable(s.Props()) }
 
-func newShapeTable(props []shapeProp) map[PropertyKey]uint32 {
-	table := make(map[PropertyKey]uint32, len(props))
-	for i, p := range props {
-		table[p.key] = uint32(i)
+// shapeIndex is the lookup table of a shape with more than
+// shapeTableThreshold properties: open addressing over its props, at most
+// half full, each entry a slot plus one (0 is empty), probed from the key's
+// hash (keyHash). A shared shape's is immutable once in its snapshot.
+type shapeIndex struct {
+	slots []uint32
+}
+
+// keyHash hashes a property key by its bits: keys are equal when their
+// Values are (a string key is its atom), and the collector never moves
+// what the pointer names.
+func keyHash(key PropertyKey) uint32 {
+	return uint32(((uint64(uintptr(key.v.ptr)) ^ key.v.bits) * 0x9e3779b97f4a7c15) >> 32)
+}
+
+func newShapeTable(props []shapeProp) *shapeIndex {
+	size := 16
+	for size < 2*len(props) {
+		size *= 2
 	}
-	return table
+	t := &shapeIndex{slots: make([]uint32, size)}
+	mask := uint32(size - 1)
+	for i := range props {
+		j := keyHash(props[i].key) & mask
+		for t.slots[j] != 0 {
+			j = (j + 1) & mask
+		}
+		t.slots[j] = uint32(i) + 1
+	}
+	return t
+}
+
+// find returns the slot of key among props, the properties the index was
+// built over, plus one, or 0 when key is not among them.
+func (t *shapeIndex) find(props []shapeProp, key PropertyKey) uint32 {
+	slots := t.slots
+	mask := uint32(len(slots) - 1)
+	for i := keyHash(key) & mask; ; i = (i + 1) & mask {
+		if e := slots[i]; e == 0 || props[e-1].key == key {
+			return e
+		}
+	}
 }
 
 // lookupTable returns the hash table of s, building it on first use. A
 // shared shape is never written, so its table joins its transition snapshot:
 // most shapes of the shared tree are the intermediate shapes of literals and
 // are never looked up.
-func (s *Shape) lookupTable() map[PropertyKey]uint32 {
+func (s *Shape) lookupTable() *shapeIndex {
 	if !s.shared {
 		s.buildTable()
 		return s.table
@@ -383,6 +465,9 @@ func (s *Shape) transition(key PropertyKey, attrs uint8) *Shape {
 func (s *Shape) child(key PropertyKey, attrs uint8) *Shape {
 	if s.shared {
 		if t := s.sharedTrans.Load(); t != nil {
+			if t.m != nil {
+				return t.wideChild(key, attrs)
+			}
 			return t.lookup(key, attrs)
 		}
 		return nil
@@ -540,28 +625,38 @@ func (r *Realm) allocTransition() []transition {
 // the process-wide cache, building it (props materialized, marked immutable)
 // and publishing it under the lock on first use. It returns nil for a
 // realm-local key (codeKey), and past maxSharedTransitions, maxSharedShapes
-// or, for a string not bounded by code, maxSharedDataTransitions.
+// or, for a string not bounded by code, maxSharedDataTransitions and
+// maxSharedDataKey.
 func (s *Shape) publish(key PropertyKey, attrs uint8) *Shape {
 	if t := s.sharedTrans.Load(); t != nil {
-		if child := t.lookup(key, attrs); child != nil {
+		if t.m != nil {
+			if child := t.wideChild(key, attrs); child != nil {
+				return child
+			}
+		} else if child := t.lookup(key, attrs); child != nil {
 			return child
 		}
 	}
 	sharedTransMu.Lock()
 	defer sharedTransMu.Unlock()
 	old := s.sharedTrans.Load()
-	var next sharedTransitions
+	n, data := 0, int32(0)
 	if old != nil {
 		if child := old.lookup(key, attrs); child != nil {
 			return child
 		}
-		next = *old
+		n, data = len(old.small)+len(old.m), old.data
 	}
-	n := len(next.small) + len(next.m)
 	code := codeKey(key)
 	if n >= maxSharedTransitions || sharedShapeCount >= maxSharedShapes ||
-		!code && (!key.IsString() || next.data >= maxSharedDataTransitions) {
+		!code && (!key.IsString() || data >= maxSharedDataTransitions || keyBytes(key.String()) > maxSharedDataKey) {
 		return nil
+	}
+	// The snapshot escapes (Store): declared past the refusals, which then
+	// allocate nothing.
+	var next sharedTransitions
+	if old != nil {
+		next = *old
 	}
 	if !code {
 		next.data++

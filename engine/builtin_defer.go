@@ -64,7 +64,7 @@ var coldGlobalKeys = [...]PropertyKey{
 	StringKey(AtomUint32Array), StringKey(AtomFloat16Array), StringKey(AtomFloat32Array),
 	StringKey(AtomFloat64Array), StringKey(AtomBigInt64Array), StringKey(AtomBigUint64Array),
 	StringKey(AtomAtomics), StringKey(AtomTextEncoder), StringKey(AtomTextDecoder),
-	StringKey(AtomEval),
+	StringKey(AtomEval), StringKey(AtomIntl),
 }
 
 // coldGlobalSlot maps the atom id of each coldGlobalKeys key, a static

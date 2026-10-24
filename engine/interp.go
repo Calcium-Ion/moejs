@@ -147,9 +147,26 @@ func (r *Realm) fillMeta(m *funcMeta, code *bytecode.Function, root *funcMeta, n
 			} else {
 				s = FromUTF16(k.Units)
 			}
+			// A short ASCII constant of shared code is an atom marked as a
+			// constant (constASCIIAtom) where it can be: a computed key it
+			// names (o[k] over ["url", "weight"]) then needs no interning.
+			var a *String
+			if k.IsASCII && m.dyn == 0 {
+				a = constASCIIAtom(k.Str)
+			}
 			if k.Key {
-				s = r.Intern(s)
+				if a != nil {
+					s = a
+				} else {
+					s = r.Intern(s)
+				}
 				m.keys[i] = StringKey(s)
+			} else if a != nil {
+				s = a
+			} else if m.dyn == 0 && s != emptyString {
+				// Every realm running the template shares it, and none
+				// charged it: the live measurement skips it (memlive.go).
+				s.flags |= strConst
 			}
 			prepareSharedString(s)
 			m.names[i] = s
@@ -444,7 +461,9 @@ func (r *Realm) enterFrame(fn *Object, fd *FunctionData, this Value, args []Valu
 // stack than the next ones.
 func (r *Realm) enterFrameSlow(fn *Object, fd *FunctionData, this Value, args []Value) (res Value, done bool, err error) {
 	if r.interruptFlag.Load() != 0 {
-		return Undefined(), true, r.interruptError()
+		if err := r.pendingInterrupt(); err != nil {
+			return Undefined(), true, err
+		}
 	}
 	if fd.icBase == icUnbound {
 		if fd.meta.dyn != 0 {

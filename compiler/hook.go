@@ -20,7 +20,7 @@ func (Hook) CompileScript(name, src string, stop func() error) (*bytecode.Functi
 	if err != nil {
 		return nil, err
 	}
-	return compileScriptStop(s, stop)
+	return CompileScriptStop(s, stop)
 }
 
 // CompileEval parses and compiles eval code for the direct eval call site
@@ -74,7 +74,21 @@ func (l evalLevel) Binding(i int) (string, syntax.BindKind, bool) {
 // The template it returns is a script that declares nothing and returns
 // the function, created in the global environment: the name anonymous is
 // not bound.
-func (Hook) CompileFunction(name, params, body string, generator, async bool, stop func() error) (fn *bytecode.Function, err error) {
+func (Hook) CompileFunction(name, params, body string, generator, async bool, stop func() error) (*bytecode.Function, error) {
+	return compileFunction(name, params, body, generator, async, false, stop)
+}
+
+// CompileFunction compiles a function from its parameter list and body as
+// Hook.CompileFunction does, for a host, which runs the template it returns
+// to create the function: with typeScript the source text is TypeScript,
+// whose type syntax the parser erases, and the function is strict mode
+// code, as a TypeScript module is. It calls stop, when not nil, as
+// CompileModuleStop does.
+func CompileFunction(name, params, body string, generator, async, typeScript bool, stop func() error) (*bytecode.Function, error) {
+	return compileFunction(name, params, body, generator, async, typeScript, stop)
+}
+
+func compileFunction(name, params, body string, generator, async, typeScript bool, stop func() error) (fn *bytecode.Function, err error) {
 	prefix := "function"
 	switch {
 	case generator && async:
@@ -86,7 +100,7 @@ func (Hook) CompileFunction(name, params, body string, generator, async bool, st
 	}
 	head := prefix + " anonymous(" + params + "\n) "
 	src := head + "{\n" + body + "\n}"
-	s, err := syntax.ParseScript(name, src, syntax.Options{Stop: stop})
+	s, err := syntax.ParseScript(name, src, syntax.Options{Stop: stop, TypeScript: typeScript})
 	if err != nil {
 		return nil, err
 	}

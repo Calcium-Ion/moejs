@@ -60,6 +60,16 @@ Sobek 和 modernc.org/quickjs（翻译成 Go 的 QuickJS）和 moejs 一样是�
 
 单独的运行时没有定时器。`eventloop` 包提供 `setTimeout`、`setInterval` 和 `setImmediate`，以及一个事件循环，宿主函数可以在别的 goroutine 里干活，再回到循环上兑现 promise。
 
+### Web API
+
+`webapi` 包在带事件循环的运行时上安装 `fetch`、`Headers`、`Request`、`Response`、Streams、`AbortController`、`URL` 和 `performance`，供基于 fetch 的 SDK 使用。fetch 能访问哪些网络由宿主的 `http.Client` 和放行钩子决定：不提供客户端就没有网络，不提供钩子则客户端能访问的地址都放行，所以不受信任的脚本应当给主机列表。响应体是流式的：JavaScript 要一块，Go 才读一块，每个字节都计入运行时的内存上限。取消和中止会传到 Go 的请求上。详见[指南](docs/guide.zh_CN.md#web-api)。
+
+<p align="center">
+  <img src="docs/assets/webapi-bench.zh.png" alt="moejs 的 Web API 对比 Node.js 24：1 并发和 8 并发的小 JSON 请求 fetch、流式读 256 MiB 响应体和 SSE 事件">
+</p>
+
+这张图在 moejs 和 Node.js 24 里跑同一个 fetch 脚本，服务端在本机回环地址上，2026-10-24 在 Intel Xeon E5-2667 v4 的 8 个 vCPU 上测量。小请求和流式读响应体是 moejs 更快，SSE 是 moejs 更慢的一行。
+
 ### 超时和错误
 
 任意 goroutine 都可以中断正在运行的插件，死循环也能停下。JavaScript 异常、语法错误、中断和宿主函数里的 panic 各自以不同的 Go 错误类型返回，抛出的 `Error` 能取到 V8 格式的调用栈。宿主函数 panic 之后，运行时还能继续使用。
@@ -276,10 +286,11 @@ moejs 运行 ES 模块和经典脚本，包括非严格模式和 Annex B 的网�
 `Float16Array`、`Array.fromAsync`、`Math.sumPrecise`、`Error.isError` 这些新近加入标准的 API。正则表达式支持所有标志和
 Unicode 17 属性，`Date` 的时区数据来自 Go。
 
-[test262](https://github.com/tc39/test262) 上 79,385 个测试通过，0 个失败。另外 14,058 个测试用到 moejs 没有实现的特性，
+[test262](https://github.com/tc39/test262) 上 80,971 个测试通过，0 个失败。另外 14,268 个测试用到 moejs 没有实现的特性，
 测试时跳过。按目录统计的结果见 [bench/test262/RESULTS.md](bench/test262/RESULTS.md)。
 
-未实现的特性有：导入属性和 JSON 模块、`using` 声明和 `DisposableStack`、装饰器、迭代器辅助方法、`Intl`、`Temporal`、
+未实现的特性有：导入属性和 JSON 模块、`using` 声明和 `DisposableStack`、装饰器、迭代器辅助方法、`Intl.Collator`、
+`Intl.RelativeTimeFormat`、`Intl.ListFormat`、`Intl.DisplayNames`、`Intl.DurationFormat`、`Temporal`、
 `ShadowRealm`、`FinalizationRegistry` 和 `JSON.rawJSON`。单独的 `Runtime` 没有定时器，`eventloop` 包会安装它们。
 完整列表、已知的错误结果和各项限制见 [TODO.md](TODO.md)。
 
@@ -306,7 +317,9 @@ cd bench && go test -timeout 30m ./...
 
 ## 致谢
 
-moejs 的设计参考了下面这些项目，代码是独立编写的。
+moejs 的设计参考了下面这些项目，代码是独立编写的，[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) 列出的部分除外：Intl 的日期、时区和数字格式化移植自
+[ICU](https://icu.unicode.org/)，`Date.parse` 的解析器、调用栈的格式和 "is not a function" 报错里的被调用者文本移植自 V8。
+Intl 的区域数据来自 [Unicode CLDR](https://cldr.unicode.org/)。
 
 - [goja](https://github.com/dop251/goja) 和 [Sobek](https://github.com/grafana/sobek)：Go 互操作的约定和
   `Export` 规则。Sobek 也是差分测试的参照。
@@ -326,7 +339,9 @@ moejs 的设计参考了下面这些项目，代码是独立编写的。
 
 ## 许可证
 
-moejs 采用 [Apache License 2.0](LICENSE) 许可。
+moejs 采用 [Apache License 2.0](LICENSE) 许可。其中的 Unicode CLDR 和 Unicode 字符数据库数据，
+以及从 ICU 和 V8 移植的代码，各自适用其许可证。[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)
+列出了它们和许可证全文。嵌入 moejs 的程序也需要附带这些声明。
 
 基准测试用到的 new-api 任务插件采用 AGPL-3.0 许可，需要用
 [`bench/testdata/plugins/fetch.sh`](bench/testdata/plugins/README.md) 单独下载。

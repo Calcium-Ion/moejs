@@ -146,6 +146,35 @@ Memory in use at 32 workers, MiB (modernc has no in-use figure):
 | One 8 MiB image | 384 | 1,152 | 1,101 | — | 1,110 | 1,110 | 1,138 | 1,140 |
 | Eight 1 MiB images | 366 | 1,134 | 1,104 | — | 1,110 | 1,110 | 1,138 | 1,141 |
 
+## Intl
+
+![moejs Intl against Node.js](assets/intl-bench.en.png)
+
+Intl against Node.js 24.22 (V8, ICU 78.3), measured on 2026-10-24 with Go 1.26.6 on the machine of the plugin scenarios, pinned to the same 8 vCPUs. Both engines run the same modules of `bench/testdata` with TZ=UTC and the en-US locale: BenchmarkIntlFormat and BenchmarkIntlSegmenter for moejs, `bench/scripts/intl_format_node.mjs` and `intl_node.mjs` for Node.js. Every figure is the median of 7 rounds. A round runs moejs and Node.js in turn, the first engine alternating, between canary runs that catch load from other guests on the host.
+
+moejs formats 1.2 to 3.4 times as fast as Node.js and creates a formatter 4 to 16 times as fast. Intl.Segmenter is slower than Node.js per segment, at 0.64x on graphemes, 0.95x on words and 0.77x on sentences.
+
+Time per call, median of 7 rounds. Speed is Node.js's time over moejs's:
+
+| Case | moejs | Node.js | Speed |
+|---|--:|--:|--:|
+| NumberFormat ja-JP yen, format | 400 ns | 553 ns | 1.4x |
+| NumberFormat ja-JP yen, formatToParts | 1.34 µs | 2.34 µs | 1.8x |
+| NumberFormat de-DE decimal, format | 391 ns | 547 ns | 1.4x |
+| DateTimeFormat Asia/Tokyo, format | 406 ns | 1.26 µs | 3.1x |
+| DateTimeFormat Asia/Tokyo, formatToParts | 1.74 µs | 3.08 µs | 1.8x |
+| `(n).toLocaleString()` | 380 ns | 466 ns | 1.2x |
+| `date.toLocaleString()` | 451 ns | 1.54 µs | 3.4x |
+| `new Intl.NumberFormat` | 4.78 µs | 20.3 µs | 4.2x |
+| `new Intl.DateTimeFormat` | 5.53 µs | 86.3 µs | 16x |
+| `new Intl.Segmenter` | 1.17 µs | 13.8 µs | 12x |
+| Segmenter, per grapheme | 180 ns | 114 ns | 0.64x |
+| Segmenter, per word | 230 ns | 218 ns | 0.95x |
+| Segmenter, per sentence | 401 ns | 308 ns | 0.77x |
+| First `toLocaleString` in a fresh process | 229 µs | 17.2 ms | 75x |
+
+The same rounds measured the Web API chart in the README, with `bench/cmd/webapibench`. `bench/scripts/intl_webapi_bench.sh` builds the benchmarks and runs new rounds, and `uv run --with matplotlib bench/scripts/intl_webapi_chart.py` redraws both charts from `docs/assets/intl-webapi-bench.jsonl` (`--table` prints the numbers).
+
 ## Another machine
 
 hanxi measured these numbers for [#1](https://github.com/Calcium-Ion/moejs/pull/1), which added modernc.org/quickjs to

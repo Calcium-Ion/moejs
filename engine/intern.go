@@ -183,6 +183,9 @@ func (r *Realm) internASCII(key string) *String {
 		return a
 	}
 	a := globalASCIIAtom(key)
+	if len(key) > maxSharedDataKey {
+		return a // not kept by the cache (internCacheMax)
+	}
 	if r.internCacheASCII == nil {
 		if !r.cacheInterning() {
 			return a
@@ -216,6 +219,36 @@ func globalASCIIAtom(key string) *String {
 }
 
 // globalUTF16Atom interns UTF-16 content in the process-wide table.
+// constASCIIAtom returns the atom for the ASCII string constant str of shared
+// compiled code, publishing it marked strConst, or nil where the constant
+// keeps its own String: past maxSharedDataKey bytes, or when the content's
+// atom exists without the mark (a static atom, or one interned from a
+// realm's data), which the live measurement counts where a realm reaches
+// it while it skips constants. A marked atom is skipped as the constant
+// is, in every realm that reaches it: the template holds it, as it held
+// the constant.
+func constASCIIAtom(str string) *String {
+	if len(str) > maxSharedDataKey {
+		return nil
+	}
+	if _, ok := staticAtoms[str]; ok {
+		return nil
+	}
+	a := globalInternASCII.lookup(str)
+	if a == nil {
+		key := strings.Clone(str)
+		s := asciiString(key)
+		s.hash = hashASCII(key)
+		s.numeric = canonicalNumericName(key)
+		s.flags |= strConst
+		a = globalInternASCII.intern(key, s)
+	}
+	if a.flags&strConst == 0 {
+		return nil
+	}
+	return a
+}
+
 func globalUTF16Atom(key string, s *String) *String {
 	a := globalInternUTF16.lookup(key)
 	if a == nil {
@@ -262,7 +295,10 @@ const internCacheAfter = 8
 // reaches it is emptied and refills with the names in use: a pooled runtime
 // that interns the ids and user values of every request (host map keys,
 // obj[key], JSON.parse) holds at most this many, and the names it no longer
-// uses can be collected. The bound is checked on the miss path only.
+// uses can be collected. The bound is checked on the miss path only. A
+// name longer than maxSharedDataKey bytes is not cached: the caches would
+// keep up to this many of them alive, and the live measurement (memlive.go)
+// does not count what they keep.
 const internCacheMax = 4096
 
 // cacheInterning reports whether the realm, which has no cache for the kind
@@ -281,6 +317,9 @@ func (r *Realm) internUTF16(s *String) *String {
 		return a
 	}
 	a := globalUTF16Atom(key, s)
+	if len(key) > maxSharedDataKey {
+		return a // not kept by the cache (internCacheMax)
+	}
 	if r.internCacheUTF16 == nil {
 		if !r.cacheInterning() {
 			return a

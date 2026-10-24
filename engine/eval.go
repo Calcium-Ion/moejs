@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"sync/atomic"
 
@@ -87,14 +88,15 @@ func (r *Realm) compileError(err error) error {
 // limit.
 func (r *Realm) MaxDynamicSource() int {
 	if r.host != nil && r.host.maxSource != 0 {
-		return r.host.maxSource
+		return int(r.host.maxSource)
 	}
 	return DefaultMaxDynamicSource
 }
 
 // SetMaxDynamicSource sets the length of the longest source text the realm
 // compiles at run time: zero restores DefaultMaxDynamicSource, a negative n
-// removes the limit (see RealmOptions.MaxDynamicSource).
+// removes the limit (see RealmOptions.MaxDynamicSource). A limit above
+// math.MaxInt32 is math.MaxInt32.
 func (r *Realm) SetMaxDynamicSource(n int) {
 	if r.host == nil {
 		if n == 0 {
@@ -102,7 +104,13 @@ func (r *Realm) SetMaxDynamicSource(n int) {
 		}
 		r.host = &realmHost{}
 	}
-	r.host.maxSource = n
+	switch {
+	case n > math.MaxInt32:
+		n = math.MaxInt32
+	case n < math.MinInt32:
+		n = -1
+	}
+	r.host.maxSource = int32(n)
 }
 
 // DynamicCodeDisabled reports whether the realm refuses to compile code at

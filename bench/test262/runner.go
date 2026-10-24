@@ -23,9 +23,13 @@ import (
 	"github.com/Calcium-Ion/moejs/syntax"
 )
 
-// Dirs are the directories under test/ that the suite runs. intl402 and
-// staging are out of scope.
-var Dirs = []string{"language", "built-ins", "annexB", "harness"}
+// Dirs are the directories under test/ that the suite runs: of intl402,
+// those of the Intl members moejs has. staging is out of scope.
+var Dirs = []string{
+	"language", "built-ins", "annexB", "harness",
+	"intl402/Intl", "intl402/Locale", "intl402/Segmenter", "intl402/NumberFormat", "intl402/PluralRules",
+	"intl402/DateTimeFormat", "intl402/Number", "intl402/BigInt", "intl402/Date", "intl402/Array", "intl402/TypedArray",
+}
 
 // Timeout is the interrupt deadline of one test (a variable for the
 // runner's own tests).
@@ -184,6 +188,9 @@ func (s *Suite) RunFile(path string) []Result {
 	}
 	features := s.features(path, meta)
 	skip, blockers := s.skip(meta, src, features)
+	if reason, ok := outOfScope[path]; ok && skip == "" {
+		skip = "out of scope: " + reason
+	}
 	ms := modes(meta)
 	results := make([]Result, len(ms))
 	for i, md := range ms {

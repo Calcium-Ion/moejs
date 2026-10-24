@@ -1,6 +1,7 @@
 package moejs
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strconv"
@@ -59,12 +60,53 @@ func CompileTS(name, source string) (*Module, error) {
 	return compile(name, source, syntax.Options{TypeScript: true})
 }
 
+// CompileOptions are the options of CompileWith and CompileScriptWith.
+type CompileOptions struct {
+	// TypeScript compiles TypeScript, as CompileTS does. A script of
+	// TypeScript is strict mode code, as a module is.
+	TypeScript bool
+	// Context, when not nil, bounds the compile: once it is done, the
+	// compile stops and returns its error (context.Canceled or
+	// context.DeadlineExceeded) rather than a *SyntaxError. It is checked
+	// before every 1,024th statement of each statement list the parser,
+	// the scope pass and the compiler go through, after every 1,024
+	// items of the other lists they go through (the elements of array and
+	// object literals, arguments, parameters, the operators of a chain of
+	// binary ones, the members of union and intersection types,
+	// interfaces, object and tuple types), so that one long statement stops
+	// too, and every 1,024th time the TypeScript parser tries a reading
+	// ahead (an arrow function or type arguments).
+	Context context.Context
+}
+
+// CompileWith is Compile, or CompileTS, with the options of opts: a host
+// that compiles source it does not trust bounds the compile with
+// opts.Context, as Runtime.Interrupt does not stop a compile the host
+// calls itself.
+func CompileWith(name, source string, opts CompileOptions) (*Module, error) {
+	return compile(name, source, syntax.Options{TypeScript: opts.TypeScript, Stop: stopFunc(opts.Context)})
+}
+
+// stopFunc returns the stop function of a compile that ctx bounds, nil for
+// none.
+func stopFunc(ctx context.Context) func() error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err
+}
+
 func compile(name, source string, opts syntax.Options) (*Module, error) {
+	if opts.Stop != nil {
+		if err := opts.Stop(); err != nil {
+			return nil, err
+		}
+	}
 	mod, err := syntax.ParseModule(name, source, opts)
 	if err != nil {
 		return nil, syntaxError(err)
 	}
-	code, err := compiler.CompileModule(mod)
+	code, err := compiler.CompileModuleStop(mod, opts.Stop)
 	if err != nil {
 		return nil, syntaxError(err)
 	}

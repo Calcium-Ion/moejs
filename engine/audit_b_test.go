@@ -365,11 +365,11 @@ func TestAuditB_RepeatAndPadLimits(t *testing.T) {
 
 func TestAuditB_JSONDepthLimits(t *testing.T) {
 	got := auditBStmt(t, `const s = "[".repeat(10001) + "]".repeat(10001); JSON.parse(s); return "ok";`)
-	assert.Equal(t, "throws RangeError: Maximum call stack size exceeded", got)
+	assert.Equal(t, "throws RangeError: JSON nesting is too deep (more than 10000 levels)", got)
 	got = auditBStmt(t, `const s = "[".repeat(10000) + "]".repeat(10000); return String(Array.isArray(JSON.parse(s)));`)
 	assert.Equal(t, "true", got)
 	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 10000; i++) { const n = []; cur.push(n); cur = n; } JSON.stringify(v); return "ok";`)
-	assert.Equal(t, "throws RangeError: Maximum call stack size exceeded", got)
+	assert.Equal(t, "throws RangeError: JSON nesting is too deep (more than 10000 levels)", got)
 	got = auditBStmt(t, `let v = []; let cur = v; for (let i = 0; i < 9999; i++) { const n = []; cur.push(n); cur = n; } return String(JSON.stringify(v).length);`)
 	assert.Equal(t, "20000", got)
 }
@@ -1012,7 +1012,9 @@ func TestAuditB_FailLoudly(t *testing.T) {
 		{`Date.parse("2024-01-01")`, "1704067200000"},
 		{`typeof Symbol.iterator`, `"symbol"`},
 		{`typeof Symbol`, `"function"`},
-		{`Intl`, "throws ReferenceError: Intl is not defined"},
+		{`typeof Intl.Segmenter`, `"function"`},
+		{`typeof Intl.NumberFormat`, `"function"`},
+		{`typeof Intl.Collator`, `"undefined"`},
 		{`BigInt(1)`, "1n"},
 		{`1n + 1n`, "2n"},
 		{`1n * 2n`, "2n"},

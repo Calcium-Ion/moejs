@@ -54,8 +54,9 @@ JavaScript，但不会唤醒正在睡眠、等待下一个定时器的循环。
 
 ### 内存上限
 
-`Options.MemoryLimit` 限制一次请求的 JavaScript 在两次重置之间最多分配多少字节。`ReleaseCallData` 会重置计数，没有运行时池的宿主可以调用
-`ResetAllocation`。超过上限的调用像被中断一样停下：返回 `*InterruptedError`，其值是 `*MemoryLimitError`，带有上限、已计的字节数和分配处的
+`Options.MemoryLimit` 限制运行时的 JavaScript 保留的内存加上它分配的内存。运行时计的是上次重置以来的分配量，`ReleaseCallData` 会重置计数，
+没有运行时池的宿主可以调用 `ResetAllocation`。计数超过上限时，运行时先测量程序保留了多少（见下文），再从这次测量结果开始计：产生垃圾而保留得少的程序，
+分配再多也能继续运行。仍然超过上限的调用像被中断一样停下：返回 `*InterruptedError`，其值是 `*MemoryLimitError`，带有上限、已计的字节数和分配处的
 JavaScript 调用栈，并且 `errors.Is(err, moejs.ErrMemoryLimit)` 成立。
 
 ```go
@@ -75,7 +76,7 @@ pool.Put(rt)
 promise 任务，否则脚本捕获之后可以继续分配。分配前就知道结果大小的内建函数，在大小超过剩余额度时改为抛出它们在超过引擎限制时抛出的
 `RangeError`，脚本可以捕获：`repeat`、`padStart` 和 `padEnd`、`new ArrayBuffer`、类型化数组构造函数、`btoa`、`escape`、`toBase64` 和 `toHex`。
 
-计的是分配量，不是存活内存：垃圾在下次重置前一直计入，请求释放的内存也不会扣除。计入的有对象、对象属性和元素增长出来的存储、字符串、
+两次测量之间计的是分配量：在运行时测量之前，请求释放的内存不会扣除。计入的有对象、对象属性和元素增长出来的存储、字符串、
 `Map` 和 `Set` 的表、缓冲区、`BigInt` 结果、闭包的环境，以及 `eval` 和 `Function` 编译出的代码，各按向 Go 分配器申请的大小大致计算。
 rope（两个长字符串拼接的结果）先计它的节点，读取并展平时再计它的内容。`FromGo` 计入它为宿主的 map 和切片建立的包装，但不计宿主的 Go
 值本身，因为它直接引用而不复制；`ParseJSON` 计入它复制的文本。几个大小有界的内部缓存不计入，解释器的寄存器栈也不计入：调用深度限制约束它的大小，`ReleaseCallData` 会收缩它。计数与请求实际分配的量相差在一个不大的倍数内，
@@ -84,24 +85,124 @@ rope（两个长字符串拼接的结果）先计它的节点，读取并展平�
 准备工作不计入第一次请求：`Load` 和 `SetGlobal` 属于准备工作，成功时都会在结束前重置计数（`Load` 返回 `ErrModulePending` 时也会）。
 失败的 `Load` 保留计数和 `Stats` 里的超限错误，供宿主读取。在宿主函数里调用的 `SetGlobal` 不重置，否则正在运行的脚本会得到新的额度。
 每个请求都设置全局变量的宿主，要在请求的第一次 `Call` 之前设置：在同一请求的两个钩子之间重置，会让这个请求再分配一次上限的量。
-上限约束的是一次请求分配多少，而不是模块在请求之间保留多少；在请求之间持续增长的运行时最好丢弃。
+重置保留上次的测量结果，所以模块在请求之间保留的内容仍然计入；在请求之间保留运行时的宿主，可以用下文的 `RebaseAllocation` 代替重置。
 
 超限之后运行时仍可复用：`ClearInterrupt` 加 `ReleaseCallData` 之后，它和其他请求结束后的池中运行时一样。不信任模块状态（超限可能让它只更新了一半）的宿主可以丢弃这个运行时。
 只清除中断而不重置，额度仍然用完，下一次分配会再次停下运行时。
 
 超限产生的是运行时唯一的待处理中断，所以宿主从另一个 goroutine 调用的 `Interrupt`（比如超时）可能替换它，调用随后返回宿主的错误。
-无论如何 `Stats().MemoryLimitHits` 都会计入这次超限，`Stats().LastMemoryLimitError` 保留它的错误直到下次重置。
+无论如何 `Stats().MemoryLimitHits` 都会计入这次超限，`Stats().LastMemoryLimitError` 保留它的错误直到下次重置或 `RebaseAllocation` 测量。
 
 没有设置上限时运行时不计数，每个本该计数的分配点只多两次读取和两次分支。
 
-在 `eventloop` 下，循环在每个定时器或 immediate 回调、每个任务之前重置额度，所以上限作用于一个宏任务及它排队的 promise 任务。
+重置约束的是一次请求分配多少。跨越许多任务长期运行的程序，比如不断等待工具结果的 agent 或一串定时器，可能每个任务都分配得不多，
+整体却一直增长。`RebaseAllocation` 约束这类程序保留的内存：宿主在任务之间、原本调用重置的地方调用它，它测量运行时的 JavaScript
+当前保留了多少，并以此作为额度的起点。此后上限计的是程序保留的量加上测量之后新分配的量。`Stats().LiveBytes` 是最近一次测量的结果。
+
+```go
+// 在宿主自己的事件循环的两个任务之间
+err := rt.RebaseAllocation(func(add func(moejs.Value)) {
+	for _, p := range pending { // 只有 Go 代码持有的 promise
+		add(p)
+	}
+})
+if err != nil {
+	return err // 程序保留的内存超过了上限
+}
+```
+
+测量遍历从运行时的全局对象、全局绑定、模块和排队的 promise 任务能到达的一切，按上限计算分配的方式计数。与 64 个字符以上的更长字符串共享字节的字符串，
+如 `slice`、`split` 的片段或正则表达式的匹配结果，会让那个更长的字符串活着，所以按它计一次；设置了上限时 `JSON.parse` 或
+`ParseJSONString` 从长文本中读出的值也一样。只由数据给出、长于 64 字节的属性名（计算属性名、`JSON.parse` 的键）留在运行时自己的
+形状里，测量把它们和运行时为对象保留的形状一起计入，运行时销毁时它们也随之释放；更短的属性名可能进入进程内所有运行时共享的形状，
+这部分有上界，不计入。编译后代码中的字符串常量由运行它的所有运行时共享，也不计入。
+
+只有 Go 代码持有的值它看不到：`NativeFunc` 闭包捕获的值，以及 `NewPromise` 的 promise（只有它的 settle 函数持有它，等待它的
+async 函数也只能经由它到达）。宿主通过传给 `RebaseAllocation` 的函数把这些值交给测量，这个函数只在真正测量时才被调用；也可以注册
+一个函数，在每次测量时加入这些值：
+
+```go
+// pending 是这个宿主稍后才 settle 的 NewPromise 的 promise。
+remove := rt.AddLiveRoots(func(add func(moejs.Value)) {
+	mu.Lock() // 只有宿主自己的 goroutine 持有的锁
+	defer mu.Unlock()
+	for _, p := range pending {
+		add(p)
+	}
+})
+defer remove()
+```
+
+没有上限时 `AddLiveRoots` 没有开销：这时除了 `Realm().MeasureLive` 不会有测量。注册的函数在使用运行时的 goroutine 上运行，可能在
+JavaScript 执行中途被调用（见下文），所以它只调用 `add`：不运行 JavaScript，不创建值，也不等待运行时执行 JavaScript 时被持有的锁。
+
+会回调 JavaScript 的宿主函数，在这次调用期间不能把 JavaScript 值只放在 Go 里，要么注册它们，因为测量可能在它回调的 JavaScript 里进行。
+在 Go 里建出一个大值的宿主函数（包括作为 getter 的宿主函数）会越过上限把它返回：建的过程中没有测量能看到它，下一次测量，最迟是下一次
+rebase，才会发现程序超过了上限。
+
+注册的函数在被移除之前一直计入它添加的内容，不管 JavaScript 是否还能到达，所以它适合只有 Go 持有的东西：进行中的请求、只有宿主会兑现的
+promise。宿主创建的对象的 Go 状态所保留的内容（流的队列、请求体的字节、以 Go 字符串保存的 header 值）改为通过对象报告：对象的负载
+（`Object.SetInternal`）实现 `moejs.LiveReporter` 时，到达这个对象的测量会调用它一次，把它报告的值当作对象自己的值遍历，并计入它报告的
+Go 内存字节数。这些状态在对象可达时计入；JavaScript 丢弃对象后，下次测量就不再计入，不必等 Go 的垃圾回收。
+
+```go
+type queueState struct {
+	chunks []moejs.Value // 流保留的 JavaScript 值
+	buf    []byte        // 它保留的 Go 字节
+}
+
+func (q *queueState) ReportLive(add func(moejs.Value), addBytes func(n int)) {
+	for _, c := range q.chunks {
+		add(c)
+	}
+	addBytes(cap(q.buf))
+}
+
+o := rt.Realm().NewObject()
+o.SetInternal(&queueState{})
+```
+
+`ReportLive` 遵守 `AddLiveRoots` 所注册函数的规则：只调用 `add` 和 `addBytes`。
+
+测量要遍历堆，所以有节奏地进行：只有当上次测量以来的分配量达到上限在上次测量结果之上剩余部分的一半
+`(MemoryLimit - LiveBytes) / 2` 与上次测量结果的一半二者中较大的那个时，`RebaseAllocation` 才测量，否则立即返回，不分配内存。
+保留得少的程序每分配半个上限测量一次；接近上限的程序测量得更频繁，但不会比每分配所保留量的一半更频繁。如果这样在下次测量之前
+就有一次分配会超过上限（不论之前有没有测量过），运行时会先用模块的绑定和注册的根测量，只有程序保留的仍然太多时才停下。这种测量在两次
+`RebaseAllocation` 或 `ResetAllocation` 之间做一次，此后每当上次测量以来的分配量达到决定 `RebaseAllocation` 测量节奏的那个量时再做一次，
+因此一次产生大量垃圾的调用能像跨越多次 rebase 那样继续运行。
+
+测量只在没有代码能把自己建出的东西藏在遍历之外的地方进行：普通 JavaScript 里，以及 `forEach`、`some`、`every`、各个 `find` 方法、
+`map`、`filter`、`flatMap`、`reduce`、`sort`、`replace` 和 `replaceAll`、`Array.from`、`JSON.parse` 的 reviver、生成器的 `next`
+和宿主函数的回调里，这些函数把建出的东西放在遍历能找到的地方。其他内建函数运行期间，测量会等待：
+这些代码可能把建出的东西放在 Go 变量里，比如 `JSON.parse` 正在建的树、`JSON.stringify` 正在写的文本。这期间它的分配最多
+可以超过上限达到上限在上次测量结果之上剩余部分的一半，再加上越过这个余量的那一次分配（比如数组增长时的存储），之后运行时会在内建函数
+返回后或下一次调用时测量，两个 promise 任务之间也会测量；超过这个余量的内建函数会停下，所以对上限来说太大的文本做 `JSON.parse`
+会在这个余量之内停下。解析器在数组或对象闭合之前把元素放在自己的栈上，这些栈增长时就计入上限，所以几百万个数字组成的数组和由对象组成的数组一样会停下。由内建函数调用组成的循环，一旦有一次调用超过上限，就会在每次迭代时测量。一次运行如果以超过上限的分配结束（脚本的最后一条语句，或忽略了计费错误的宿主函数），这次运行本身就会失败，有待处理的测量会先做完：超出的部分不会在没有任何提示的情况下让下一次运行停下；和任何一次超限之后一样，宿主清除中断并重置额度后，下一次运行就从干净的状态开始。`ParseJSON`、`ParseJSONString` 和 `FromGo`
+也同样等待。宿主自己在任何调用之外的 Go 代码做的分配，以及它在没有脚本运行处（事件循环任务里，或 Go 直接调用的宿主函数里）调用的 `ChargeMemory`，
+会立即测量，和 `RebaseAllocation` 一样：宿主在调用之间持有的东西，由它用 `AddLiveRoots` 注册。遍历用的工作存储在结束后交还给进程，
+供任何运行时的下次测量使用：运行时自己不保留。于是接近上限时，程序每分配几兆字节就要付出一次遍历其保留内容的代价：一个分配 64 KiB 垃圾的回调，
+在 64 MiB 上限、保留的数据为小对象时，保留 75 % 时的开销约为 1.3 倍，95 % 时 2.5 倍，98 % 时 3.7 倍。测量结果超过上限时，
+`RebaseAllocation` 返回 `*MemoryLimitError`（`Live` 为测量结果，`Allocated` 为 0）并计一次超限，但不中断运行时，反正下一次分配也
+会超过上限。测量期间的 `Interrupt` 会结束遍历，这次测量不改变任何状态；有待处理的中断时它不测量。
+
+`ResetAllocation`、`ReleaseCallData`、`Load` 和 `SetGlobal` 保留测量结果：程序保留的内容在它们之后仍然计入。按请求重置又保留运行时的
+宿主，也在每个请求开始时调用 `RebaseAllocation`，上次测量以来所有请求的分配量决定下次何时测量。
+
+在 `eventloop` 下，循环自己完成这些工作。额度覆盖整个 `Run`（或从 `Start` 到 `Stop`），循环在每个定时器或 immediate 回调、
+每个任务之前调用 `RebaseAllocation`，并通过 `AddLiveRoots` 注册待运行的定时器、immediate 和未兑现的 `NewPromise`，`Terminate` 会移除这些注册，
+因此换了新循环的运行时不会留住旧循环。保留自己所分配内存
+的程序，无论经过多少个回调或多少次运行，都会在接近上限时停下；保留得少的程序，总共分配再多也能继续运行。循环测量时不持有它的
+互斥锁，投递任务或 settle promise 的 goroutine 不必等待遍历；没有上限时循环不为此做任何事。超限像中断一样停下循环：`Run` 返回
+`*InterruptedError`，`errors.Is(err, moejs.ErrMemoryLimit)` 成立。设置 `eventloop.Options.ResetMemoryPerTask` 后，循环改为像以前的版本那样
+在每个回调和任务之前给出新的额度：上限约束的是一个宏任务及它排队的 promise 任务分配多少，而不是程序保留多少。
 
 ### 计数器
 
 `rt.Stats()` 返回运行时的计数器，每项都是常数时间读取。宿主在使用该运行时的 goroutine 上读取，可以在请求之间，也可以在请求中的宿主函数里：
 
-- `AllocatedBytes`、`Objects`、`Strings`、`Shapes`：设置上限以来的计数，`RequestAllocatedBytes` 是上次重置以来的。只在设置了上限时计数；
+- `AllocatedBytes`、`Objects`、`Strings`、`Shapes`：设置上限以来的计数，`RequestAllocatedBytes` 是上次重置或 `RebaseAllocation` 测量以来的。只在设置了上限时计数；
   上限设为 `math.MaxInt64` 可以只计数不限制。
+- `LiveBytes`：`RebaseAllocation` 最近一次测量的结果，重置不会清除它；还没有测量时为 0。
 - `MemoryLimitHits` 和 `LastMemoryLimitError`，见上文。
 - `Interrupts`：`Interrupt` 的调用次数，包括超限。
 - `ICEntries`：运行过的函数的内联缓存条目数。
@@ -217,9 +318,20 @@ rt := moejs.NewRuntime(moejs.Options{Importer: imp}) // 所有运行时共用一
 错误和栈追踪指向 TypeScript 源码，不需要 source map。`Function.prototype.toString` 返回函数的 TypeScript 源码，包括类型；
 Node 返回的是类型被替换成空白的文本。
 
-宿主编译不可信的 TypeScript 时应当限制源码长度。区分箭头函数和带括号的表达式所需的时间，可能随嵌套深度平方增长：像
-`a ? (b): T => a ? (b): T => …` 这样在真分支里层层嵌套的条件表达式，2,000 层约需 1.5 秒，接近嵌套上限时需几秒，
-而且一份源码里每个这样的表达式都会累加。`Runtime.Interrupt` 不能中止宿主自己调用的 `CompileTS` 或 `Compile`。
+编译时间和源码长度成正比，与嵌套深度无关；嵌套超过 10,000 层返回 `*SyntaxError`（"Nesting too deep (the parser allows 10000 levels)"）。
+宿主编译不可信的源码时仍应限制长度，也可以限制编译时间：`CompileWith`、`CompileScriptWith` 和 `FunctionOptions` 的 `Context`
+接受一个 `context.Context`，它结束后编译随即停止并返回它的错误。解析器、作用域分析和编译器在每个语句列表中每 1,024 条语句、在其他
+列表（数组和对象字面量的元素、实参、形参、一串二元运算符，联合、交叉类型和接口、对象类型、元组类型的成员）中每 1,024 项检查一次，所以一条很长的
+语句也会同样及时地停下。`Runtime.Interrupt` 不能中止宿主自己调用的编译。
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+defer cancel()
+mod, err := moejs.CompileWith("plugin.ts", src, moejs.CompileOptions{TypeScript: true, Context: ctx})
+if errors.Is(err, context.DeadlineExceeded) {
+	// 编译超时
+}
+```
 
 `Resolver` 或 `Importer` 可以按模块选择编译函数，比如按文件扩展名。`CompileTS` 和 `Compile` 编译的模块可以互相链接。
 
@@ -245,6 +357,25 @@ resolve := func(referrer moejs.Referrer, specifier string) (*moejs.Module, error
 声明和已有的全局绑定冲突时，脚本在运行任何代码之前抛出错误。
 
 `SetGlobal` 写入全局对象。脚本声明 `let x` 之后，这个全局词法绑定会遮蔽 `SetGlobal("x", …)` 设置的值（ECMA-262 9.1.1.4.1）。
+
+### 从源码编译函数
+
+`CompileFunction(name, params, body, opts)` 和 `Function` 构造器一样，从参数列表和函数体的源码编译出一个函数；`CompileFunctionTS` 对 TypeScript 做同样的事：
+
+```go
+s, err := moejs.CompileFunctionTS("rule.ts", "input: Input, limit?: number",
+	"type N = number;\nreturn input.messages.slice(0, (limit ?? 10) as N);",
+	moejs.FunctionOptions{})
+fn, err := rt.RunScript(s) // 得到函数
+res, err := rt.CallFunction(fn, moejs.Undefined(), arg)
+```
+
+`params` 是不带括号的参数列表，源码文本是 `function anonymous(params\n) {\nbody\n}`，所以函数体里的 `*SyntaxError` 在第 3 行或之后。
+参数和函数体都不能提前结束对方。脚本不声明任何东西：`RunScript` 在全局环境里创建这个函数并返回它，每个运行这个脚本的运行时都得到自己的函数。
+`FunctionOptions` 可以要求 async 函数、生成器函数，或两者都要。
+
+`CompileFunction` 的函数和 `Function` 构造器的一样，除非函数体以 `"use strict"` 开头，否则是非严格模式。`CompileFunctionTS` 遵循
+`CompileTS` 的规则：类型被擦除，有运行时语义的 TypeScript 返回 `*SyntaxError`，`toString` 返回 TypeScript 源码，函数是严格模式代码，和模块代码一样。
 
 ### Eval
 
@@ -342,6 +473,28 @@ JavaScript 没有读取过的 `json.RawMessage` 由 `ToGo` 返回为一个带有
 
 输出最长 2^30−24 字节。
 
+### 严格模式输出 JSON
+
+`AppendJSON` 遵循 `JSON.stringify`，后者会悄悄丢掉一些值：对象里值为 `undefined`、函数或 symbol 的成员会省略，数组里这样的元素写成 `null`，
+NaN 和 ±Infinity 写成 `null`。宿主如果宁可失败也不愿发出被改动的数据，可以使用严格模式：
+
+```go
+out, err := rt.AppendJSONWith(buf[:0], v, moejs.JSONOptions{Strict: true})
+var lossy *moejs.LossyJSONError
+if errors.As(err, &lossy) {
+	// lossy.Path 是 "$.messages[3].content"，lossy.Value 是 "undefined"
+}
+```
+
+严格模式遇到上面这些值都会失败；值本身没有 JSON 文本时（`AppendJSON` 会写 `null`）也会失败；检查的是 `toJSON` 返回的值，所以返回
+`undefined` 的 `toJSON` 同样失败。JSON 看不到其数据的对象也会失败，`JSON.stringify` 把它们写成 `{}` 或只写出它们自身的可枚举属性：
+`Map`、`Set`、`WeakMap`、`WeakSet`、`WeakRef`、`Promise`、`RegExp`、任何种类的 `Error`（包括继承它的类）、`ArrayBuffer`、
+`SharedArrayBuffer` 和 `DataView`。这时错误的 `Value` 是 "a Map"、"an Error" 等，`Object` 为 true，消息形如
+`moejs: $.cache is a Map, whose contents JSON does not write`。这类对象自己带有 `toJSON` 方法时按该方法的返回值写出；类型化数组的元素
+JSON 会写出，所以不受影响。错误的 `Path` 从 `$` 开始，属性写成 `.name` 或 `["name"]`，元素写成 `[i]`；错误消息形如
+`moejs: $.messages[3].content is undefined, which JSON leaves out`。出错时切片原样返回。-0 和非严格模式一样写成 `0`（两者相等）。
+严格模式不增加 `AppendJSON` 的开销；开启后，`FromGo` 转换来的 Go map 或切片按 JavaScript 看到的值写出，而不是直接从 Go 值写出。
+
 ### 写入宿主自己的类型
 
 `Unmarshal(v, target)` 把值写进一个 Go 值，结果和对 `AppendJSON` 的文本做 `json.Unmarshal` 相同。普通对象、数组和没有被修改过的参数直接写进
@@ -386,7 +539,7 @@ Go 值，跳过文本和字符串复制。其他值，比如带 `toJSON` 的值�
 
 ### 嵌套深度
 
-数组和对象嵌套超过 10,000 层时，`ParseJSON`、`ParseJSONString`、`ToGo` 和 `AppendJSON` 返回 `RangeError`。
+数组和对象嵌套超过 10,000 层时，`ParseJSON`、`ParseJSONString`、`ToGo` 和 `AppendJSON` 返回 `RangeError`，`JSON.parse` 和 `JSON.stringify` 抛出 `RangeError`。错误消息说明了原因（"JSON nesting is too deep (more than 10000 levels)"），`errors.Is(err, moejs.ErrTooDeep)` 可以识别它。
 
 ## Promise 与错误
 
@@ -444,7 +597,7 @@ err = loop.Run(func(rt *moejs.Runtime) error {
 每轮循环有三个阶段，对应 Node 的 timers、poll 和 check 阶段：
 
 1. 阶段开始时已到期的定时器，按到期时间排序，时间相同的按设置顺序。
-2. 阶段开始前投递的任务：`RunOnLoop`、`Hold` 的 `done` 函数和 `NewPromise` 的 settle 函数。
+2. 阶段开始前投递的任务：`RunOnLoop`、`Post`、`Hold` 的 `done` 函数和 `NewPromise` 的 settle 函数。
 3. 阶段开始前设置的 immediate。
 
 一个阶段新加入的工作留到之后的轮次。延迟至少 1 毫秒，所以定时器回调里设置的定时器在之后的轮次运行。
@@ -472,7 +625,8 @@ err = loop.Run(func(rt *moejs.Runtime) error {
 
 循环运行期间只有它的 goroutine 使用运行时。其他 goroutine 用三种方式把工作交给它：
 
-- `RunOnLoop(fn)` 投递 `fn`。循环终止后返回 false。
+- `RunOnLoop(fn)` 投递 `fn`。循环终止后返回 false。`eventloop.Post(loop, task)` 对返回 error 的任务做同样的事，循环像处理回调的错误一样处理它
+  （交给 `OnError`，或者停止循环）；自己兑现 promise 的任务把这些 promise 的 job 抛出的错误返回给循环，不会丢失。
 - `Hold()` 让循环一直运行到它的 `done(fn)` 被调用，`done` 会投递 `fn`。
 - 宿主函数在循环上调用 `NewPromise()`，得到一个 promise 和一个 `settle` 函数。`settle(f)` 在循环上运行 `f`：
   返回值兑现 promise，Go error 则以宿主函数的同一个错误会抛出的 `Error`（`ThrownValue`）拒绝它。
@@ -508,7 +662,7 @@ rt.SetGlobal("fetchJSON", moejs.NativeFunc(func(_ *moejs.Realm, _ moejs.Value, a
 `*InterruptedError`。`Loop.Interrupt(v)` 中断运行时并唤醒循环；单独调用 `Runtime.Interrupt` 时，睡眠中的循环要等到下一个定时器才醒。
 中断会保留，所以宿主再次运行循环之前要调用 `ClearInterrupt`。
 
-宿主任务（`RunOnLoop`、`done` 和 `settle` 的函数，以及 `OnError`）里的 panic 不会被恢复。它从 `Run` 向外展开；
+宿主任务（`RunOnLoop`、`Post`、`done` 和 `settle` 的函数，以及 `OnError`）里的 panic 不会被恢复。它从 `Run` 向外展开；
 `Start` 启动的循环则会让程序退出。当前阶段还没运行的任务和 immediate 留在队列里，等下一次 `Run`。发生 panic 的任务本身丢失，
 settle 函数 panic 的 promise 永远不会兑现。
 
@@ -527,6 +681,174 @@ settle 函数 panic 的 promise 永远不会兑现。
 和任务，并等到循环结束。之后 `Run` 返回 `ErrTerminated`，`RunOnLoop` 返回 false，定时器函数会抛出异常。即使当时没有 JavaScript
 在运行，中断也会保留，所以宿主再次使用运行时之前要调用 `ClearInterrupt`。再调用一次 `New` 可以给运行时一个新的循环。
 
+## Web API
+
+### 安装
+
+`webapi` 包安装基于 fetch 的 SDK 需要的 Web API：`fetch`、`Headers`、`Request`、`Response`、`ReadableStream`、
+`WritableStream`、`TransformStream`、`TextDecoderStream`、`TextEncoderStream`、两种排队策略、`AbortController`、
+`AbortSignal`、`EventTarget`、`Event`、`DOMException`、`URL`、`URLSearchParams` 和 `performance`。它们运行在事件循环上，
+I/O 只用 Go 标准库。单独的运行时没有这些对象，由宿主显式安装：
+
+```go
+rt := moejs.NewRuntime(moejs.Options{})
+loop, err := eventloop.New(rt, eventloop.Options{})
+api, err := webapi.Install(loop, webapi.Options{
+	Client: &http.Client{Timeout: 10 * time.Minute},
+	Allow:  webapi.AllowHosts("api.openai.com", "*.anthropic.com"),
+})
+defer api.Close()
+err = loop.Run(func(rt *moejs.Runtime) error {
+	_, err := rt.RunScript(script) // SDK 的代码调用 fetch
+	return err
+})
+```
+
+每个全局对象在 JavaScript 第一次读取它时才创建，运行时对从不使用的那些只付出名字的成本。没装这个包的运行时不受任何影响。
+这些全局对象是全局对象上可写、可配置的属性，和 Web IDL 的定义一样；运行时共用冻结的内建对象时也是如此，所以宿主可以删除或替换其中任何一个。
+
+每个运行时调用一次 `Install`。`Close` 停止所有进行中的 fetch，关闭所有没读到结尾的响应体，并停止 `AbortSignal.timeout` 的定时器。
+它可以在任意 goroutine 上调用，被它拒绝的 promise 在循环下次运行时兑现。`Close` 是最终的，之后的 fetch 都会拒绝：运行时被丢弃时调用它。
+`loop.Terminate` 不会停止进行中的 fetch，所以也要调用 `Close`。
+
+把运行时放进池里复用的宿主改用 context 结束一次运行的网络活动：
+
+```go
+ctx, cancel := context.WithCancel(requestCtx)
+api.SetContext(ctx) // 这次运行的 fetch 的父 context
+err = loop.Run(...)
+cancel() // 让这次运行中仍在进行的 fetch 失败，并关闭它们的 body
+// 运行时回到池里，下次运行时照常 fetch
+```
+
+取消这个 context 会让它之后启动、仍在进行中的 fetch 像网络错误一样失败，错误的 `cause` 是 context 的 cause；
+它们的响应体立即关闭，它们让循环保持运行的引用也随之释放。`Options.Context` 仍是每个请求的父 context。
+
+### 权限和客户端
+
+运行时只能访问宿主给它的网络：
+
+- `Options.Client` 发送请求。不提供时每个 `fetch` 都以 `TypeError` 拒绝（全部禁止）。客户端的 `Transport` 决定请求怎么走：
+  自定义的 `http.RoundTripper` 可以不经网络、直接在 Go 里响应请求，也可以记录请求，或者加上脚本看不到的凭据。
+- `Options.Allow` 在每个请求发送前调用，每次重定向也再调用一次。返回错误则 fetch 被拒绝。钩子看到的是实际发送的请求：
+  脚本设置了 `Host` 头时，`req.Host` 就是它。`webapi.AllowHosts` 按主机列表生成这样的钩子：`*.example.com` 匹配
+  example.com 的子域名，但不匹配 example.com 本身；`*` 匹配所有主机。脚本设置了 `Host` 头时，除了 URL 的主机，
+  这个主机也必须被允许。钩子在请求自己的 goroutine 上运行，所以并发的 fetch 会并发调用它。
+- `Allow` 为 nil 时不做任何检查：客户端能访问的每个地址都允许，包括内网、回环地址（`127.0.0.1`、`localhost`）
+  和云元数据地址 `169.254.169.254`。运行不受信任的脚本时，请给它主机列表。
+- `Options.Context` 是每个请求的 context 的父 context。取消它会让进行中的 fetch 失败，例如宿主关闭时。
+  `api.SetContext` 为一次运行的 fetch 增加一个父 context，供把运行时放进池里复用的宿主使用（见“安装”）。
+
+客户端的 `Timeout`、`Jar` 和 `CheckRedirect` 都生效。包会复制客户端来实现每个请求的 `redirect` 模式：`"follow"`（最多 20 次重定向）、
+`"manual"`（和 Node.js 一样返回 3xx 响应本身）和 `"error"`。
+
+### 事件循环上的 promise
+
+`fetch`、`text()`、`json()`、`arrayBuffer()`、`bytes()` 以及每次读取响应体，返回的 promise 都在循环上、任务阶段的某个任务里兑现。
+一个任务排入的 promise job 在下一个任务之前运行，和浏览器一样。等待响应的 fetch 和等待数据块的读取会让 `Run` 继续运行，
+没人读的响应体不会。和 Node.js 一样，`AbortSignal.timeout` 本身不让循环继续运行，使用这个 signal 的 fetch 才会。
+
+### 流式读取
+
+响应体是一个 `ReadableStream`。它的数据源只在流需要数据块时，也就是有读取在等待而队列为空时，才在一个 goroutine 上读取
+`http.Response` 的 body。Go 这一侧从不抢在 JavaScript 前面读取。读得慢的一方因此会通过 TCP 流量控制拖住服务器，内存占用以 socket 缓冲区为上限。
+
+```js
+const response = await fetch(url, { method: "POST", body, signal });
+const reader = response.body.getReader();
+for (;;) {
+  const { done, value } = await reader.read(); // value 是 Uint8Array
+  if (done) break;
+  onText(decoder.decode(value, { stream: true }));
+}
+```
+
+每个数据块都是一个 `Uint8Array`，内容是对 body 的一次读取返回的字节。至少填满读缓冲区一半的数据块直接交出，不复制；
+更小的数据块复制到一个刚好够大的缓冲区里，读缓冲区留给下一次读取。读缓冲区从 16 KiB 开始，读取一直填满时增长到 256 KiB；
+设置了 `MemoryLimit` 时最多增长到上限的八分之一，且不小于 4 KiB，这样一次只保留一个数据块的脚本离上限还很远。
+`for await (const chunk of response.body)`、`pipeThrough` 和 `pipeTo` 也这样读取。JavaScript 没碰过流的响应，
+`text()`、`json()` 等方法在 Go 这一侧一次读完整个 body。被它们读取的 body 就是已使用的：它的流已锁定、已被扰动，
+再次读取、`clone()` 或 `text()` 都是 `TypeError`。
+
+交给 JavaScript 的每个字节都在分配之前、在循环上计入运行时的 `MemoryLimit`；在 `eventloop` 下，上限限制的是整次运行跨任务保留和分配的内存，
+见上文的内存上限一节。流式读取的数据块在交出它的那个任务里计入。整体读取的 body 随到随计：一个 goroutine 最多读到已计入部分之后一个窗口
+（最大的读缓冲区）或 body 末尾，循环先计入这些字节，再读下一个窗口。Go 持有的 body 最多比已计入的多一个窗口，比一个窗口小的 body
+只花一个任务。已读的字节虽然只有 Go 持有，也计入每一次对运行保留内存的测量，并且只计一次。这个包在循环上的计入属于宿主自己：
+将要越过上限时立即测量，和 `RebaseAllocation` 一样。计入失败时关闭 body，读取以带有上限消息的
+`RangeError` 拒绝，循环随之停止（`errors.Is(err, moejs.ErrMemoryLimit)`），和 JavaScript 自己分配超过上限时一样。无论额度如何，
+比上限还大的 body 都无法交出：`Content-Length` 大于上限的 body 在读取任何字节之前就被拒绝；否则到达上限的那个窗口会多读一个字节，
+读取在计入这个窗口之前就以 `RangeError` 拒绝，和知道结果放不下的内置函数抛出的一样，Go 持有的 body 只比上限多一点。使用按任务计算额度的 `eventloop.Options.ResetMemoryPerTask` 时，整体读取的 body 就以此为界。
+声明的 `Content-Length` 最多预分配 1 MiB，且不超过上限。gzip 和 deflate 编码的 body 按解码后的字节计算，所以会膨胀的 body 也以同样的方式受限。没有设置 `MemoryLimit` 的宿主可以在自己的
+`Transport` 里限制 body 大小，例如用一个把每个响应的 `Body` 包进 `io.LimitReader` 的 `RoundTripper`。`tee()` 和
+`clone()` 的分支持有一个分支已读、另一个分支还没读的数据块，和浏览器一样；这些数据块在交出时已经计入。字节流
+（包括响应体）的第二个分支拿到的是副本，副本同样计入。
+
+这个包替 JavaScript 保存的很多东西是内存上限的测量走不到的 Go 状态：流排队的数据块、source、sink 和 promise，`AbortSignal` 或
+`EventTarget` 的监听器和 reason，以 Go 字符串保存的头部值、URL 和查询参数，由字符串或缓冲区构造的 body 的字节。每个对象的状态在测量到达该对象时
+报告自己保存的东西（`moejs.LiveReporter`），所以只要 JavaScript 还能到达这个对象就计入，到达不了就不再计入，不必等 Go 的垃圾回收，
+程序也无法把内存藏在这些地方躲开上限。没有对象能通向的进行中的工作，即进行中的 fetch 及等待它的 async 函数、整体读取的 body 和
+`AbortSignal.timeout` 的计时器，在运行期间通过 `Runtime.AddLiveRoots` 报告，每次 `Install` 注册一次，`Close` 结束注册；没有上限时这个包
+不注册任何东西。这些 Go 字符串在被保存时计入，两个共享同一批字符串的对象（一个 `Headers` 和它的副本）都会计入它们。
+
+gzip 和 deflate 编码的 body 会被解码：请求没有自己设置 `Accept-Encoding` 时由 Go 的 transport 解码，否则由这个包解码。
+不解码 Brotli。
+
+### 取消和错误
+
+- `reader.cancel()`、`response.body.cancel()` 和从 `for await` 里 break，都会关闭 Go 的 body 并取消请求的 context。
+  body 立即关闭，即使正有一次读取阻塞在上面。因此自定义 `RoundTripper` 的响应 body 必须允许 `Close` 与 `Read` 并发，
+  并让这次 `Read` 返回，net/http 的 body 和 `io.Pipe` 都是这样。
+- 请求的 `AbortSignal`（`AbortController`、`AbortSignal.timeout`、`AbortSignal.any`）也会取消 context。响应到达之前，
+  fetch 以 signal 的 reason 拒绝；之后，响应体的流以这个 reason 出错，正在等待的读取也以它拒绝。默认的 reason 是
+  `AbortError` 类型的 `DOMException`，`AbortSignal.timeout` 的是 `TimeoutError`。
+- 响应之前的网络错误、被拒绝的请求和重定向错误都以 `TypeError: fetch failed` 拒绝。它的 `cause` 是一个 `Error`，
+  内容是 Go 错误的文本；常见情况下还带有 Node 的 `code`（`ECONNREFUSED`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`）。
+- 流式读取期间的错误（例如连接被重置）让流以 `TypeError: terminated` 出错，正在等待的和之后的读取都以它拒绝。
+- body 读完、出错、取消、中止以及 `Close` 都会立即关闭 body 并结束请求的 context，不等垃圾回收。作为最后的保障，
+  JavaScript 没读就丢掉的响应，其 body 会在回收器释放它时关闭。这可能晚很多，宿主不应依赖它：读完或取消 body，并调用 `Close`。
+
+### 冻结的内建对象和 polyfill
+
+这个包的全局对象放在全局对象上，而全局对象保持可扩展，所以它们能和共享的冻结内建对象一起安装。它们的原型属于运行时自己，不冻结。
+
+只补充缺失全局对象的 polyfill 可以和冻结的内建对象一起使用；重新赋值或修改内建对象的 polyfill 不行，因为内建对象的全局绑定被锁定了。
+例如在严格模式代码里给 `TextEncoder`、`TextDecoder`、`structuredClone` 或 `queueMicrotask` 赋值会抛出
+`Cannot assign to read only property`。这样的 polyfill 应当先检查，保留 moejs 自带的实现：
+
+```js
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = TextEncoderPolyfill;
+}
+```
+
+- 可以和冻结的内建对象一起用的 polyfill：只定义缺失对象的那些，例如 `if (!globalThis.X)` 形式的 URL、AbortController、
+  Streams、fetch 和 Headers polyfill，event-target 的 shim，以及 `web-streams-polyfill/ponyfill`。装了 `webapi` 包之后，
+  它们发现全局对象已经存在，什么也不做。
+- 需要 `Options{MutableIntrinsics: true}` 的 polyfill：替换或扩展内建对象的那些，例如无条件安装的 `TextEncoder`、
+  `Promise` 或 `Symbol` 的替代品、全局（非 pure）模式的 `core-js`，以及任何给 `Array.prototype`、`Object.prototype`
+  或 `String.prototype` 添加方法的代码。这时每个运行时有自己可修改的内建对象，创建成本约为默认的 25 倍。
+
+使用 `MutableIntrinsics` 时，`Install` 在脚本运行之前就取好包要调用的内建对象（`Promise` 及其 `then` 和 `resolve`、
+`Uint8Array`、`TextDecoder` 和 `String.prototype.normalize`），所以脚本之后替换或删除它们不会影响这个包；`Install`
+之前就缺失的，需要它的功能会抛出 `TypeError`。仍有一个钩子：`Promise.prototype.then` 会查找被调用的 promise 的
+species 构造函数，所以脚本定义的 `Promise[Symbol.species]` getter 或 promise 的 `constructor`，会在包自己的 promise
+反应里运行（一次 `pipeTo` 大约调用十几次）。共享的冻结内建对象没有这个钩子。
+
+### 限制
+
+- 不提供 `Blob`、`File` 和 `FormData`。这些类型的 body 是 `TypeError`，`blob()` 和 `formData()` 会拒绝。
+- 只支持 `http:` 和 `https:` URL，`data:`、`blob:` 和 `file:` URL 会拒绝。
+- 没有 CORS，除客户端的 `Jar` 外没有 cookie，没有缓存，也没有禁止的请求头。请求的 `Host` 头决定请求的主机，
+  `Allow` 能看到它，`AllowHosts` 会检查它。
+  `mode`、`credentials`、`cache`、`referrer` 和 `integrity` 保留在 `Request` 对象上，但不起作用。
+- 长于 4 KiB 的请求方法是 `TypeError`，真实的方法远没有这么长。
+- 重定向遵循 Go 的方法规则：301、302 和 303 把 `GET`、`HEAD` 以外的方法都改成 `GET`；Fetch 标准在 301 和 302 时只改 `POST`。
+  重定向到另一个源（scheme、主机或端口不同）时去掉 `Authorization`、`Cookie` 和 `Proxy-Authorization`，和 undici 一样。
+- 流：`type: "bytes"` 的流接受 `ArrayBufferView` 数据块，没有 `byobRequest`；`getReader({ mode: "byob" })` 抛出 `TypeError`。
+  数据源的 `pull` 不返回 promise 时立即算作完成，而不是晚一个微任务。
+- `URL` 遵循当前的 URL 标准，包括国际化域名，不报告不导致解析失败的校验错误。
+- `performance` 有 `now()`、`timeOrigin` 和 `toJSON()`，没有 mark、measure 和性能条目。
+
 ## 隔离
 
 ### 共享冻结的内建对象
@@ -544,7 +866,90 @@ settle 函数 panic 的 promise 永远不会兑现。
 
 ### 按运行时设置时区
 
-`Options.TimeZone` 设置 `Date` 使用的本地时区，nil 表示 `time.Local`。
+`Options.TimeZone` 设置 `Date` 使用的本地时区，它也是 `Intl.DateTimeFormat` 的默认时区；nil 表示 `time.Local`。
+`Options.Locale` 设置 `Intl` 的默认区域（见下文“默认区域”）。
+
+## Intl
+
+### 已有的部分
+
+`Intl.getCanonicalLocales`、`Intl.supportedValuesOf`、带区域信息方法（`getWeekInfo` 等）的 `Intl.Locale`、`Intl.Segmenter`、
+`Intl.NumberFormat`、`Intl.DateTimeFormat` 和 `Intl.PluralRules`，以及用它们格式化的数字、BigInt、日期和数组的 `toLocaleString`
+方法。`Intl.Collator`、`Intl.RelativeTimeFormat`、`Intl.ListFormat`、`Intl.DisplayNames` 和 `Intl.DurationFormat`
+暂时还没有，[TODO.md](../TODO.md) 列出了它们。`String.prototype.localeCompare` 不论区域都使用 CLDR root 排序规则。
+
+### 区域
+
+默认区域在任何宿主上都是 `en-US`，不受进程环境影响，除非宿主用 `Options.Locale` 设置了别的区域，所以同一个程序在哪里运行结果都一样。语言标签按
+ECMA-402 的要求规范化，使用 CLDR 48 的别名数据；`Intl.Locale` 的 `maximize()` 和 `minimize()` 使用 CLDR 48 的 likely subtags。
+可用区域是 CLDR 的区域，每个“语言-文字-地区”区域另有对应的“语言-地区”形式（有 `zh-Hant-TW` 也就有 `zh-TW`）。`"best fit"`
+区域匹配与 `"lookup"` 相同。
+
+`Intl.NumberFormat` 和 `Intl.DateTimeFormat` 带有 11 个区域的 CLDR 48 数据：`en`、`zh-Hans`、`zh-Hant`、`ja`、`ko`、`de`、`fr`、
+`es`、`pt`、`ru` 和 `it`，以及这些语言的地区区域，每个地区区域与 ICU 一样按 CLDR 的父区域继承：`en-GB` 和 `en-AU` 继承 `en-001`，
+`es-MX` 继承 `es-419`，`pt-AO` 继承 `pt-PT`。它们的可用区域是这些语言的 CLDR 区域；`resolvedOptions().locale` 与 Node.js
+一样是匹配到的区域，并按它自己的数据格式化：`en-GB` 把 2026 年 10 月 11 日写作 `11/10/2026`，`en-IN` 分组为 `12,34,567`，
+`de-CH` 写作 `1'234.5`。与 ICU 一样，`zh-HK` 即 `zh-Hant-HK`，`zh-SG` 即 `zh-Hans-SG`。其他语言的区域回退到默认区域：
+`sv-SE` 按 `en-US` 格式化。`Intl.PluralRules` 有每种 CLDR 语言的规则。
+
+数字的字形跟随数字系统（`-u-nu-arab`、`numberingSystem` 选项），前提是它有简单的数字映射，即
+`Intl.supportedValuesOf("numberingSystem")` 列出的那些；其他数字系统按 ECMA-402 的允许被忽略。`Intl.DateTimeFormat`
+只有公历：其他历法（`-u-ca-japanese`、`calendar` 选项）会被忽略，`resolvedOptions().calendar` 为 `"gregory"`。
+
+与 Node.js 不同的地方，moejs 遵循 ECMA-402 和 UTS #35：
+
+- 值为 `true` 的关键字会去掉这个值：`new Intl.Locale("en-u-ca").calendar` 和 `en-u-co-true` 的 `collation` 都是 `""`，
+  Node.js 给出 `"true"`。
+- 选项值只按它的关键字的别名规范化：`{calendar: "yes"}` 仍是 `"yes"`（`en-u-ca-yes`），Node.js 把它变成 `true`。
+- `maximize()` 会替换未知的文字和地区代码：`zh-Zzzz-ZZ` 变成 `zh-Hans-CN`，Node.js 保持不变。
+- `Intl.Locale` 有 `variants` 选项和 getter，Node.js 24 没有。
+- `resolvedOptions().timeZone` 是传入的标识符，按数据库里的大小写：`Asia/Kolkata` 保持原样，Node.js 报告为 `Asia/Calcutta`。
+  `Intl.supportedValuesOf("timeZone")` 列出主标识符，包括 `UTC` 和 `Etc/GMT±n`。
+- 日语的 `hour12: true` 在所有地区都是 0-11 小时制（`h11`），Node.js 只在 `ja-JP` 使用它。
+- `Intl.PluralRules` 接受 BigInt（Node.js 拒绝），两个格式化结果相同的值的 `selectRange` 返回起点的类别。
+- `getCalendars()` 是 `["gregory"]`（即 `Intl.DateTimeFormat` 支持的历法）；没有数字数据的区域 `getNumberingSystems()` 是
+  `["latn"]`，Node.js 对 `ar-EG` 给出 `arab`。
+
+与 Node.js 一样，`format` 在 `formatToParts` 使用 U+202F（英语里 `AM`、`PM` 前的窄不换行空格）的地方写普通空格。
+
+### 默认区域
+
+`Options.Locale` 设置运行时的默认区域，即脚本没有指定区域时 `Intl` 构造函数和 `toLocaleString` 方法使用的区域。它是 `"zh-CN"`
+这样的 BCP 47 语言标签，在创建运行时时规范化，并去掉 Unicode 扩展（`-u-` 关键字；ECMA-402 的默认区域不带它们）。空字符串或格式不正确的标签表示
+`"en-US"`。之后可以用 `Realm.SetLocale` 修改。
+
+```go
+rt := moejs.NewRuntime(moejs.Options{Locale: "zh-CN", TimeZone: shanghai})
+// (1234.5).toLocaleString() 是 "1,234.5"；new Date(0).toLocaleString() 是
+// "1970/1/1 08:00:00"。
+```
+
+### 时区
+
+`Intl.DateTimeFormat` 和 `Date` 的 `toLocaleString` 方法的默认时区是运行时的 `Options.TimeZone`。它为 `nil` 时使用
+`time.Local`，时区名取自 `TZ`、`/etc/localtime` 或 `/etc/timezone`，都无法确定时为 `UTC`。
+
+`timeZone` 选项接受任意大小写的 IANA 名称（`asia/tokyo`）、偏移量（`+05:30`）和 `UTC`。moejs 用 Go 的 `time.LoadLocation`
+加载有名称的时区，不内嵌时区数据库：Go 会找到宿主的数据库（`/usr/share/zoneinfo`、`$ZONEINFO`）。在没有时区数据库的最小镜像（scratch、
+distroless static）上，宿主可以用 `import _ "time/tzdata"` 把 Go 自带的数据库编进程序（约 450 KB）。没有数据库时，`UTC`、
+`Etc/GMT±n` 和偏移量照常可用，有名称的时区会抛出 `RangeError`，说明宿主没有时区数据库以及如何补上。
+`Intl.supportedValuesOf("timeZone")` 只列出宿主上能加载的时区。它和 `Intl.DateTimeFormat` 都会在 10 秒后重新尝试加载失败的时区，
+所以程序运行期间安装的数据库会被用上。
+
+### Segmenter
+
+`Intl.Segmenter` 按 Unicode 17 的 Unicode 标准附录 #29（UAX #29）把文本分成字素簇、词和句子，不做区域定制。字素簇就是用户看到的一个字符：
+emoji ZWJ 序列、旗帜、带组合符号的字母、印度系文字的连字。
+
+分词不使用词典。词与词之间不写空格的文字（中文、日文、泰文、老挝文、高棉文、缅甸文）按附录的默认规则切分：每个表意文字自成一个词，一串泰文字母按字符切开。
+浏览器和 Node.js 会把这类文本切成词典里的词。由字母、数字、假名或表意文字组成的片段 `isWordLike` 为 true，与 Node.js 相同。
+
+### 开销
+
+创建运行时不会创建 `Intl`。进程里第一个用到它的运行时会构建它，它的数据（CLDR 别名、likely subtags 和区域列表、Unicode
+断行属性、各区域的数字和日期格式、时区名称）在第一次使用时解码，每个进程只解码一次；某个区域的数据在第一次用到该区域时解码。不带参数的
+`toLocaleString()` 在每个运行时里复用同一个格式化器，所以只需要分配结果。数字、日期和时区数据在程序二进制里约占 460 KB
+（其中地区区域占 85 KB）；加上 `Intl.NumberFormat`、`Intl.DateTimeFormat` 和 `Intl.PluralRules` 的代码，链接 moejs 的程序约增大 1 MB。
 
 ## 实现
 

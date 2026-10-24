@@ -26,7 +26,11 @@ type parser struct {
 	yieldKw  bool // yield is a keyword in sloppy code: in generators
 	ts       bool // TypeScript (Options.TypeScript): tsx holds its state
 	prevEnd  int  // end offset of the previously consumed token
-	depth    int  // recursion units in flight (MaxNestingDepth)
+	// depth counts the recursion units in flight (MaxNestingDepth). Past
+	// limit, enter takes its slow path (deeper): limit is MaxNestingDepth,
+	// or tsShared.peak while regions of a speculative parse record how deep
+	// they go (tsAssignRecorded).
+	depth, limit int32
 
 	// Statement context; saved and reset at every function boundary.
 	funcDepth     int32 // functions of any kind enclosing the current position
@@ -77,12 +81,15 @@ func ParseModule(name, src string, opts Options) (*Module, error) {
 // ParseScript parses src as a script: sloppy mode code unless its
 // directive prologue holds a "use strict" directive (Script.Strict).
 // Import and export declarations are rejected; HTML-like comments are
-// recognised.
+// recognised. A TypeScript script (Options.TypeScript) is strict mode code,
+// as a TypeScript module is, and has no HTML-like comments: it is how the
+// compiler reads the TypeScript of a function's parameters and body.
 func ParseScript(name, src string, opts Options) (*Script, error) {
-	if opts.TypeScript {
-		return nil, newFile(name, src).errorAt(0, "TypeScript is only supported in modules")
-	}
 	p := newParser(name, src, opts.Stop, false)
+	if opts.TypeScript {
+		p.ts, p.tsx = true, &tsShared{}
+		p.html, p.strict = false, true
+	}
 	s := &Script{}
 	if err := p.run(func() { s.Program = p.parseProgram(); s.Strict = p.strict }); err != nil {
 		return nil, err
@@ -94,7 +101,7 @@ func ParseScript(name, src string, opts Options) (*Script, error) {
 }
 
 func newParser(name, src string, stop func() error, isModule bool) *parser {
-	p := &parser{stop: stop, isModule: isModule, awaitKw: isModule}
+	p := &parser{stop: stop, isModule: isModule, awaitKw: isModule, limit: MaxNestingDepth}
 	p.html, p.strict = !isModule, isModule
 	p.lexer.init(newFile(name, src))
 	return p
@@ -124,9 +131,18 @@ func (p *parser) run(f func()) (err error) {
 // MaxNestingDepth; leave undoes it.
 func (p *parser) enter() {
 	p.depth++
+	if p.depth > p.limit {
+		p.deeper()
+	}
+}
+
+// deeper is enter's slow path: past MaxNestingDepth the parse fails, and
+// short of it a tracked region goes deeper than it went before.
+func (p *parser) deeper() {
 	if p.depth > MaxNestingDepth {
 		p.fail(p.start, "Nesting too deep (the parser allows "+strconv.Itoa(MaxNestingDepth)+" levels)")
 	}
+	p.tsx.peak, p.limit = p.depth, p.depth
 }
 
 func (p *parser) leave() { p.depth-- }
@@ -368,6 +384,9 @@ func (p *parser) parseProgram() Program {
 		}
 		if s := p.parseModuleItem(); s != nil {
 			prog.Body = append(prog.Body, s)
+		}
+		if p.ts && p.tsx.reuse != nil {
+			clear(p.tsx.reuse) // read again only within an item
 		}
 	}
 	prog.End = len(p.src)
@@ -1055,7 +1074,7 @@ func (p *parser) parseModuleSource() *StringLit {
 
 // unsupported fails at pos for a feature moejs does not implement.
 func (p *parser) unsupported(pos int, feature string) {
-	p.fail(pos, feature+" is not supported yet (see TODO.md)")
+	p.fail(pos, feature+" is not supported yet")
 }
 
 // parseModuleExportName parses an IdentifierName or a string literal used

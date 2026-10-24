@@ -185,10 +185,10 @@ func TestColdGlobalsShared(t *testing.T) {
 		"Object.defineProperty(globalThis, 'Set', {value: Set}) === globalThis":                                                                        "true",
 		"Object.freeze(globalThis), [Object.isFrozen(globalThis), typeof Symbol]":                                                                      "true,function",
 		"Object.create(globalThis).WeakRef === WeakRef":                                                                                                "true",
-		"Object.getOwnPropertyNames(globalThis).slice(-31)":                                                                                            "Symbol,Map,Set,WeakMap,WeakSet,WeakRef,AggregateError,structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval",
-		"typeof Set, Object.getOwnPropertyNames(globalThis).slice(-31)":                                                                                "Set,Symbol,Map,WeakMap,WeakSet,WeakRef,AggregateError,structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval",
-		"typeof DataView, Object.getOwnPropertyNames(globalThis).slice(-22)":                                                                           "BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval",
-		"typeof Uint8Array, Object.getOwnPropertyNames(globalThis).slice(-16)":                                                                         "DataView,Int8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval",
+		"Object.getOwnPropertyNames(globalThis).slice(-32)":                                                                                            "Symbol,Map,Set,WeakMap,WeakSet,WeakRef,AggregateError,structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval,Intl",
+		"typeof Set, Object.getOwnPropertyNames(globalThis).slice(-32)":                                                                                "Set,Symbol,Map,WeakMap,WeakSet,WeakRef,AggregateError,structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval,Intl",
+		"typeof DataView, Object.getOwnPropertyNames(globalThis).slice(-23)":                                                                           "BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval,Intl",
+		"typeof Uint8Array, Object.getOwnPropertyNames(globalThis).slice(-17)":                                                                         "DataView,Int8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval,Intl",
 		"globalThis.utils = 1, [typeof Map, Object.keys(globalThis)]":                                                                                  "function,utils",
 		"(() => { let n = 0; for (let i = 0; i < 3; i++) n += (typeof JSON) + (typeof Map); return n })()":                                             "0objectfunctionobjectfunctionobjectfunction",
 	} {
@@ -246,11 +246,13 @@ func TestLateGlobalsMutable(t *testing.T) {
 	assert.NotZero(t, r.coldGlobals, "the binary data globals are still pending")
 	r.ensureLate(StringKey(AtomSharedArrayBuffer))
 	lateEval := lateIndex(StringKey(AtomEval))
-	assert.Equal(t, uint32(1<<lateTextEncoder|1<<(lateTextEncoder+1)|1<<lateEval), r.coldGlobals, "one installer binds ArrayBuffer, SharedArrayBuffer and DataView")
+	assert.Equal(t, uint32(1<<lateTextEncoder|1<<(lateTextEncoder+1)|1<<lateEval|1<<lateIntl), r.coldGlobals, "one installer binds ArrayBuffer, SharedArrayBuffer and DataView")
 	r.ensureLate(StringKey(AtomTextDecoder))
-	assert.Equal(t, uint32(1<<lateEval), r.coldGlobals, "and one TextEncoder and TextDecoder")
+	assert.Equal(t, uint32(1<<lateEval|1<<lateIntl), r.coldGlobals, "and one TextEncoder and TextDecoder")
 	r.ensureLate(StringKey(AtomEval))
-	assert.Zero(t, r.coldGlobals, "eval is a group of its own")
+	assert.Equal(t, uint32(1<<lateIntl), r.coldGlobals, "eval is a group of its own")
+	r.ensureLate(StringKey(AtomIntl))
+	assert.Zero(t, r.coldGlobals, "and so is Intl")
 	assert.Zero(t, g.flags&flagHasLazy)
 	assert.Nil(t, g.internal)
 
@@ -261,9 +263,9 @@ func TestLateGlobalsMutable(t *testing.T) {
 		"globalThis.structuredClone = 1, structuredClone":                                                                   "1",
 		"delete globalThis.structuredClone, typeof structuredClone":                                                         "undefined",
 		"'structuredClone' in globalThis":                                                                                   "true",
-		"Object.getOwnPropertyNames(globalThis).slice(-24)":                                                                 "structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval",
-		"typeof DataView, Object.getOwnPropertyNames(globalThis).slice(-24)":                                                "ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,structuredClone,BigInt,Promise,queueMicrotask,Proxy,TextEncoder,TextDecoder,eval",
-		"typeof Atomics, Object.getOwnPropertyNames(globalThis).slice(-24)":                                                 "ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,structuredClone,BigInt,Promise,queueMicrotask,Proxy,TextEncoder,TextDecoder,eval",
+		"Object.getOwnPropertyNames(globalThis).slice(-25)":                                                                 "structuredClone,BigInt,Promise,queueMicrotask,Proxy,ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,TextEncoder,TextDecoder,eval,Intl",
+		"typeof DataView, Object.getOwnPropertyNames(globalThis).slice(-25)":                                                "ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,structuredClone,BigInt,Promise,queueMicrotask,Proxy,TextEncoder,TextDecoder,eval,Intl",
+		"typeof Atomics, Object.getOwnPropertyNames(globalThis).slice(-25)":                                                 "ArrayBuffer,SharedArrayBuffer,DataView,Int8Array,Uint8Array,Uint8ClampedArray,Int16Array,Uint16Array,Int32Array,Uint32Array,Float16Array,Float32Array,Float64Array,BigInt64Array,BigUint64Array,Atomics,structuredClone,BigInt,Promise,queueMicrotask,Proxy,TextEncoder,TextDecoder,eval,Intl",
 		"Object.preventExtensions(globalThis), typeof structuredClone":                                                      "function",
 		"Object.freeze(globalThis), Object.isFrozen(globalThis) && typeof structuredClone":                                  "function",
 	} {
@@ -316,7 +318,7 @@ func TestLateGroupsShared(t *testing.T) {
 		"[10n.toString(), typeof BigInt, BigInt.asIntN(8, 255n), Object.getOwnPropertyNames(BigInt.prototype)]": "10,function,-1,toString,valueOf,constructor,toLocaleString",
 		"[Object(1n) instanceof BigInt, Object.prototype.toString.call(1n), Object.isFrozen(BigInt.prototype)]": "true,[object BigInt],true",
 		"(() => { try { BigInt.prototype.x = 1 } catch (e) { return e.name } })()":                              "TypeError",
-		"[Object.getOwnPropertyNames(globalThis).slice(-19, -16), Object.isFrozen(Promise.prototype)]":          "ArrayBuffer,SharedArrayBuffer,DataView,true",
+		"[Object.getOwnPropertyNames(globalThis).slice(-20, -17), Object.isFrozen(Promise.prototype)]":          "ArrayBuffer,SharedArrayBuffer,DataView,true",
 		"new DataView(new ArrayBuffer(8), 2).byteLength + new SharedArrayBuffer(3).slice(1).byteLength":         "8",
 		"[new Proxy({}, {get: (t, k) => k}).x, Object.isFrozen(Proxy), typeof Proxy.revocable]":                 "x,true,function",
 	} {

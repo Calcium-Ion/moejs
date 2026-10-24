@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,7 +116,7 @@ func requireMemoryHit(t *testing.T, err error, limit int64) *moejs.MemoryLimitEr
 	var mle *moejs.MemoryLimitError
 	require.ErrorAs(t, err, &mle)
 	assert.Equal(t, limit, mle.Limit)
-	assert.Greater(t, mle.Allocated, limit)
+	assert.Greater(t, mle.Live+mle.Allocated, limit)
 	assert.Contains(t, err.Error(), "memory limit exceeded")
 	return mle
 }
@@ -161,7 +160,7 @@ func TestMemoryLimitStack(t *testing.T) {
 	rt, mod, _ := newMemRuntime(t, 1<<20)
 	_, err := rt.Call(mustHook(t, mod, "loop"))
 	mle := requireMemoryHit(t, err, 1<<20)
-	assert.True(t, strings.HasPrefix(mle.Stack, "    at loop (mem.js:5:"), mle.Stack)
+	assert.Contains(t, mle.Stack, "    at loop (mem.js:5:", mle.Stack)
 }
 
 // TestMemoryLimitClearWithoutReset: clearing the interrupt without a reset
@@ -380,7 +379,7 @@ export function setInside() { const a = []; for (let i = 0; i < 1000; i++) a.pus
 	err = rt2.Load(failing)
 	require.ErrorIs(t, err, moejs.ErrMemoryLimit)
 	st = rt2.Stats()
-	assert.Greater(t, st.RequestAllocatedBytes, int64(limit))
+	assert.Greater(t, st.LiveBytes+st.RequestAllocatedBytes, int64(limit))
 	require.NotNil(t, st.LastMemoryLimitError)
 	assert.Equal(t, int64(limit), st.LastMemoryLimitError.Limit)
 

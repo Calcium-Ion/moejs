@@ -26,7 +26,7 @@
 // One iteration of the loop has three phases, as Node's timers, poll and
 // check phases: the timers due when the phase starts, in order of expiry,
 // then of scheduling; the tasks posted before the phase started (RunOnLoop,
-// the done function of Hold, the settle function of NewPromise); the
+// Post, the done function of Hold, the settle function of NewPromise); the
 // immediates set before the phase started. The promise jobs and
 // queueMicrotask callbacks a callback or task queues run when it returns,
 // before the next one. With nothing to run, the loop sleeps until the next
@@ -75,18 +75,50 @@
 //
 // # Memory limit
 //
-// Options.MemoryLimit of the runtime bounds each macrotask: the loop
-// resets the runtime's allocation count (Runtime.ResetAllocation) before
-// each timer or immediate callback and each task, so the promise jobs a
-// callback queues count with it. A callback that passes the limit stops the
-// loop with its *moejs.InterruptedError, as any interrupt does. The limit
-// bounds what one macrotask allocates, not what the loop's callbacks keep
-// alive between them.
+// Options.MemoryLimit of the runtime bounds what the program keeps plus
+// what it allocates, over the whole run: Run, or Start until Stop, starts
+// a new budget (Runtime.ResetAllocation, which keeps the last measurement
+// of what the program retains), and before each timer or immediate
+// callback and each task the loop rebases it instead of resetting it
+// (Runtime.RebaseAllocation): once enough was allocated since the last
+// measurement, it measures what the runtime's JavaScript retains and counts
+// that in place of what was allocated. Where an allocation would pass the
+// limit before then, the runtime measures first (for an allocation a
+// builtin makes, at the latest before the next callback), and stops the
+// program only when it keeps too much. The measurement reaches what the loop holds for JavaScript, the
+// callbacks and arguments of the pending timers and immediates and the
+// promises of NewPromise not yet settled, and through them the async
+// functions awaiting those promises: the loop registers them with
+// Runtime.AddLiveRoots once the runtime has a limit, and Terminate removes
+// them, so that a runtime that gets a new Loop does not keep the old one.
+// It does not see values
+// only the host's Go code holds, such as the captures of a task posted
+// with RunOnLoop, unless the host registers them too. A program that keeps
+// what it allocates, across however many callbacks and runs, stops near
+// the limit; one that keeps little runs on, however much it allocates in
+// all. The loop holds its mutex only while it adds its roots, not while
+// the measurement walks the heap, so goroutines that post tasks or settle
+// promises do not wait for it. Without a limit the loop does no work for
+// it.
+//
+// A callback that passes the limit stops the loop with its
+// *moejs.InterruptedError, as any interrupt does, and so does a
+// measurement that finds the program keeps more than the limit: the loop
+// interrupts the runtime with the *moejs.MemoryLimitError before it takes
+// the next timer, task or immediate off its queues. Either way errors.Is
+// finds moejs.ErrMemoryLimit in what Run (or Stop) returns, and the
+// interrupt stays pending (Runtime.ClearInterrupt).
+//
+// Options.ResetMemoryPerTask restores the budget of earlier versions: a
+// new one before each callback and task, with the promise jobs it queues.
+// The limit then bounds what one macrotask allocates, not what the program
+// keeps alive between them.
 package eventloop
 
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Calcium-Ion/moejs"
@@ -113,6 +145,13 @@ type Options struct {
 	// a Node.js process. An interrupt always stops the loop and is never
 	// passed to OnError.
 	OnError func(err error)
+	// ResetMemoryPerTask resets the budget of the runtime's MemoryLimit
+	// before each callback and task (Runtime.ResetAllocation), as before:
+	// the limit then bounds what one macrotask allocates, not what the
+	// program keeps. By default the budget spans the run and the limit
+	// bounds what the program keeps plus what it allocates (see Memory
+	// limit in the package documentation).
+	ResetMemoryPerTask bool
 }
 
 // Loop is an event loop that owns one Runtime while it runs. Its methods
@@ -122,11 +161,36 @@ type Options struct {
 // callback, a task, a host function JavaScript calls there, or OnError. A
 // runtime has at most one Loop.
 type Loop struct {
+	// The fields the loop reads for every callback and task, never written
+	// after New, come first; the mutex, which goroutines posting tasks
+	// write all the time, starts at least a cache line after them (pad),
+	// so that it does not share one with them wherever the Loop lands.
 	rt      *moejs.Runtime
 	onError func(error)
-	epoch   time.Time
+	// resetPerTask is Options.ResetMemoryPerTask.
+	resetPerTask bool
+	epoch        time.Time
 	// wake is signalled when a task is posted or a stop requested.
 	wake chan struct{}
+	// quit is set, with l.mu held, when Stop or StopNoWait asks the running
+	// loop to end or Terminate ends it, and cleared by enter: the tasks
+	// phase reads it without l.mu (haltedTask).
+	quit atomic.Bool
+
+	// err is the error that stops the running loop. Only the goroutine
+	// running the loop reads and writes it, after enter reset it.
+	err error
+
+	// reg is the loop's registration of its roots with the runtime, made
+	// once the runtime has a memory limit (register) and removed once
+	// Terminate ended the loop. Only the goroutine using the runtime writes
+	// it, under mu, so that Terminate may read it there.
+	reg *liveReg
+	// The prototypes of the Timeout and Immediate objects, created on
+	// first use. Only the goroutine using the runtime touches them.
+	timeoutProto, immediateProto *moejs.Object
+
+	_ [64]byte // pad
 
 	mu sync.Mutex
 	// cur is the run in progress, nil while the loop does not run.
@@ -135,9 +199,6 @@ type Loop struct {
 	stop       bool  // Stop or StopNoWait asked the running loop to end
 	terminated bool  // Terminate ended the loop for good
 	lastErr    error // what ended the last run (Stop returns it)
-	// err is the error that stops the running loop. Only the goroutine
-	// running the loop reads and writes it, after enter reset it.
-	err error
 
 	timers     timerHeap
 	ids        map[int64]*timer // timers whose id was read, while active
@@ -147,10 +208,15 @@ type Loop struct {
 	holds      int // Hold and NewPromise not yet done or settled
 	seq        uint64
 	lastID     int64
-
-	// The prototypes of the Timeout and Immediate objects, created on
-	// first use. Only the goroutine using the runtime touches them.
-	timeoutProto, immediateProto *moejs.Object
+	// batch is the immediates phase's last batch: the immediates still
+	// pending in it are taken off l.immediates, but not settled.
+	batch []*immediate
+	// pending lists the promises of NewPromise of a loop with a memory
+	// limit, which only their settle functions keep otherwise, for the
+	// measurements (roots); a settled one stays until the list is
+	// compacted, at the next measurement or once it reached compactAt.
+	pending   []*pending
+	compactAt int
 }
 
 // run is one run of the loop, by Run or Start.
@@ -163,10 +229,11 @@ type run struct {
 // setInterval, clearInterval, setImmediate and clearImmediate as globals
 // of rt, as the package documentation describes. The error is SetGlobal's.
 func New(rt *moejs.Runtime, opts Options) (*Loop, error) {
-	l := &Loop{rt: rt, onError: opts.OnError, epoch: time.Now(), wake: make(chan struct{}, 1)}
+	l := &Loop{rt: rt, onError: opts.OnError, resetPerTask: opts.ResetMemoryPerTask, epoch: time.Now(), wake: make(chan struct{}, 1)}
 	if err := l.install(); err != nil {
 		return nil, err
 	}
+	l.register()
 	return l, nil
 }
 
@@ -198,6 +265,7 @@ func (l *Loop) Run(fn func(*moejs.Runtime) error) (err error) {
 		return err
 	}
 	defer func() { l.exit(err) }()
+	l.register()
 	if fn != nil {
 		err = fn(l.rt)
 	}
@@ -221,6 +289,7 @@ func (l *Loop) Start() error {
 	if err := l.enter(true); err != nil {
 		return err
 	}
+	l.register()
 	go func() {
 		var err error
 		defer func() { l.exit(err) }()
@@ -246,6 +315,7 @@ func (l *Loop) Stop() error {
 		return l.lastErr
 	}
 	l.stop = true
+	l.quit.Store(true)
 	l.mu.Unlock()
 	l.signal()
 	<-r.done
@@ -258,6 +328,7 @@ func (l *Loop) StopNoWait() {
 	l.mu.Lock()
 	if l.cur != nil {
 		l.stop = true
+		l.quit.Store(true)
 	}
 	l.mu.Unlock()
 	l.signal()
@@ -277,10 +348,17 @@ func (l *Loop) Terminate() {
 	l.mu.Lock()
 	if !l.terminated {
 		l.terminated = true
+		l.quit.Store(true)
 		// Before the loop can see terminated, so that the interrupt never
 		// lands after a ClearInterrupt the host makes once Run returned.
 		l.rt.Interrupt(ErrTerminated)
 		l.drop()
+		if l.reg != nil {
+			// The runtime lets go of the loop now, and of the registration at
+			// its next measurement or once a run ends (exit): this may run
+			// on another goroutine than the runtime's.
+			l.reg.loop.Store(nil)
+		}
 	}
 	r := l.cur
 	l.mu.Unlock()
@@ -356,23 +434,93 @@ func (l *Loop) Hold() (done func(fn func(*moejs.Runtime))) {
 // fails with (moejs.ErrForeign), goes to Options.OnError.
 func (l *Loop) NewPromise() (p moejs.Value, settle func(f func(*moejs.Runtime) (moejs.Value, error))) {
 	p, resolve, reject := l.rt.NewPromise()
-	release := l.hold()
-	return p, func(f func(*moejs.Runtime) (moejs.Value, error)) {
-		release(func(rt *moejs.Runtime) error {
-			v := moejs.Undefined()
-			if f != nil {
-				var err error
-				if v, err = f(rt); err != nil {
-					reason, ok := rt.ThrownValue(err)
-					if !ok {
-						return err
-					}
-					return reject(reason)
-				}
-			}
-			return resolve(v)
-		})
+	pd := &pending{l: l, resolve: resolve, reject: reject}
+	l.mu.Lock()
+	l.holds++
+	if l.reg != nil {
+		// A loop with a memory limit lists its promises (register).
+		pd.p = p
+		if len(l.pending) >= l.compactAt {
+			l.compact()
+		}
+		l.pending = append(l.pending, pd)
 	}
+	l.mu.Unlock()
+	return p, pd.settle
+}
+
+// pending is a promise of NewPromise and its resolving functions: a hold
+// on the loop, as Hold takes one (holds), until its settle function is
+// first called, and, in a loop with a memory limit, a root of the
+// measurements (Loop.pending) until its settle task settled it: the async
+// functions awaiting it are reachable only through it. released is
+// guarded by l.mu; p and settled are written and read only on the
+// goroutine using the runtime.
+type pending struct {
+	l               *Loop
+	p               moejs.Value // zero once settled, or when no limit lists it
+	resolve, reject func(moejs.Value) error
+	released        bool
+	settled         bool
+}
+
+// settle is the settle function of NewPromise: the first call posts the
+// settle task (run).
+func (pd *pending) settle(f func(*moejs.Runtime) (moejs.Value, error)) {
+	pd.release(func(rt *moejs.Runtime) error { return pd.run(rt, f) })
+}
+
+// run is the settle task: it settles the promise with what f returns and
+// then stops listing it. An interrupt f returns leaves it pending.
+func (pd *pending) run(rt *moejs.Runtime, f func(*moejs.Runtime) (moejs.Value, error)) error {
+	v := moejs.Undefined()
+	if f != nil {
+		var err error
+		if v, err = f(rt); err != nil {
+			reason, ok := rt.ThrownValue(err)
+			if !ok {
+				return err
+			}
+			err = pd.reject(reason)
+			pd.settled, pd.p = true, moejs.Value{}
+			return err
+		}
+	}
+	err := pd.resolve(v)
+	pd.settled, pd.p = true, moejs.Value{}
+	return err
+}
+
+// release releases the hold once, posting task when it is not nil.
+func (pd *pending) release(task func(*moejs.Runtime) error) {
+	l := pd.l
+	l.mu.Lock()
+	if pd.released {
+		l.mu.Unlock()
+		return
+	}
+	pd.released = true
+	l.holds--
+	if task != nil && !l.terminated {
+		l.tasks = append(l.tasks, task)
+	}
+	l.mu.Unlock()
+	l.signal()
+}
+
+// compact drops the settled promises from l.pending and sets the length
+// at which NewPromise compacts again: twice what is left, so that it costs
+// a constant per promise. It runs on the goroutine using the runtime, with
+// l.mu held.
+func (l *Loop) compact() {
+	kept := l.pending[:0]
+	for _, pd := range l.pending {
+		if !pd.settled {
+			kept = append(kept, pd)
+		}
+	}
+	clear(l.pending[len(kept):])
+	l.pending, l.compactAt = kept, 2*len(kept)+64
 }
 
 // hold takes a hold and returns the function that releases it once,
@@ -431,6 +579,7 @@ func (l *Loop) enter(background bool) error {
 	}
 	l.cur = &run{done: make(chan struct{})}
 	l.background, l.stop, l.lastErr, l.err = background, false, nil, nil
+	l.quit.Store(false)
 	return nil
 }
 
@@ -439,13 +588,21 @@ func (l *Loop) exit(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.terminated {
-		// What the run had in hand when Terminate dropped the rest.
+		// What the run had in hand when Terminate dropped the rest, and the
+		// promises, which only this goroutine touches.
 		l.drop()
+		l.pending = nil
+		if l.reg != nil {
+			l.reg.loop.Store(nil)
+			l.reg.remove()
+			l.reg = nil
+		}
 		err = ErrTerminated
 	}
 	l.cur.err = err
 	close(l.cur.done)
 	l.cur, l.background, l.stop, l.lastErr = nil, false, false, err
+	l.quit.Store(l.terminated)
 }
 
 // halted reports whether the running loop must end now. A pending
@@ -457,6 +614,23 @@ func (l *Loop) halted() bool {
 		l.err = l.rt.Realm().CheckInterrupt()
 	}
 	return l.err != nil || l.stop || l.terminated
+}
+
+// haltedTask is halted for the tasks phase, which takes l.mu only when a
+// stop or Terminate was asked for (quit): a pending interrupt is the
+// realm's atomic flag, and only this goroutine writes l.err. A stop that
+// comes meanwhile ends the loop at the next task, as one that comes while
+// a task runs does.
+func (l *Loop) haltedTask() bool {
+	if l.quit.Load() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return l.halted()
+	}
+	if l.err == nil {
+		l.err = l.rt.Realm().CheckInterrupt()
+	}
+	return l.err != nil
 }
 
 // drop discards every pending timer, immediate and task. l.mu is held.
@@ -474,6 +648,7 @@ func (l *Loop) drop() {
 	l.immediates = nil
 	clear(l.tasks)
 	l.tasks = nil
+	l.batch = nil
 	l.refs = 0
 }
 
@@ -486,6 +661,9 @@ func (l *Loop) loop() error {
 	sleep := time.NewTimer(time.Hour)
 	sleep.Stop()
 	defer sleep.Stop()
+	// The run's budget of the memory limit (budget), which keeps the last
+	// measurement of what the program retains.
+	l.rt.ResetAllocation()
 	for l.wait(sleep) && !l.runTimers() && !l.runTasks() && !l.runImmediates() {
 	}
 	return l.err
@@ -513,6 +691,7 @@ func (l *Loop) fail(err error) bool {
 // phase started, so it waits for a later iteration.
 func (l *Loop) runTimers() bool {
 	now := l.now()
+	budgeted := false
 	for {
 		l.mu.Lock()
 		if l.halted() {
@@ -523,6 +702,17 @@ func (l *Loop) runTimers() bool {
 			l.mu.Unlock()
 			return false
 		}
+		if !budgeted && l.budgetDue() {
+			// The budget may measure, which it does without l.mu, the
+			// due timer still queued among the roots.
+			l.mu.Unlock()
+			if l.rebase() {
+				return true
+			}
+			budgeted = true
+			continue
+		}
+		budgeted = false
 		t := l.timers.pop()
 		fn, this, args := t.fn, t.this, t.args
 		// Node reschedules an interval from the time its callback starts.
@@ -570,16 +760,12 @@ func (l *Loop) runTasks() bool {
 		}
 	}()
 	for i < len(batch) {
-		l.mu.Lock()
-		halt := l.halted()
-		l.mu.Unlock()
-		if halt {
+		if l.haltedTask() || l.budget() {
 			return true
 		}
 		task := batch[i]
 		batch[i] = nil
 		i++
-		l.rt.ResetAllocation()
 		if l.fail(task(l.rt)) {
 			return true
 		}
@@ -601,6 +787,8 @@ func (l *Loop) runImmediates() bool {
 	l.mu.Lock()
 	batch := l.immediates
 	l.immediates = nil
+	// Settled or requeued as the batch runs; the next batch replaces it.
+	l.batch = batch
 	l.mu.Unlock()
 	i := 0
 	// As in runTasks: OnError may panic.
@@ -613,6 +801,9 @@ func (l *Loop) runImmediates() bool {
 	}()
 	for i < len(batch) {
 		im := batch[i]
+		if l.budget() {
+			return true
+		}
 		l.mu.Lock()
 		if l.halted() {
 			l.mu.Unlock()
@@ -633,11 +824,138 @@ func (l *Loop) runImmediates() bool {
 	return false
 }
 
-// call calls a callback, with a new budget of the runtime's memory limit.
+// call calls a callback.
 func (l *Loop) call(fn, this moejs.Value, args []moejs.Value) error {
-	l.rt.ResetAllocation()
 	_, err := l.rt.CallFunction(fn, this, args...)
 	return err
+}
+
+// budget prepares the budget of the runtime's memory limit for the next
+// callback or task, before the loop takes it off its queue: nothing
+// without a limit, a new one with Options.ResetMemoryPerTask, else a
+// rebase on what the program keeps (Runtime.RebaseAllocation), which
+// measures only now and then, with the roots the loop registered with the
+// runtime (roots); when no measurement is due, its check (StartRebase) is
+// a few loads. A measurement past the limit interrupts the runtime
+// with its *moejs.MemoryLimitError, as the hit of a callback does, and
+// budget reports that the loop must end (halted). It runs on the loop
+// without l.mu: the measurement walks the heap while other goroutines post
+// tasks and settle promises.
+func (l *Loop) budget() bool {
+	r := l.rt.Realm()
+	if l.reg != nil {
+		if !r.StartRebase() {
+			return false
+		}
+	} else if r.MemoryLimit() <= 0 {
+		return false
+	}
+	return l.rebase()
+}
+
+// budgetDue reports whether budget has work to do: a memory limit with
+// Options.ResetMemoryPerTask, the first rebase, which registers the
+// loop's roots, or a measurement RebaseAllocation would make
+// (Realm.StartRebase, which starts its interval). It measures nothing,
+// so it may run with l.mu held.
+func (l *Loop) budgetDue() bool {
+	r := l.rt.Realm()
+	if l.reg != nil {
+		return r.StartRebase()
+	}
+	return r.MemoryLimit() > 0
+}
+
+// rebase is the work of budget once budgetDue reported some.
+func (l *Loop) rebase() bool {
+	if l.resetPerTask {
+		l.rt.ResetAllocation()
+		return false
+	}
+	l.register()
+	if err := l.rt.RebaseAllocation(nil); err != nil {
+		l.rt.Interrupt(err)
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return l.halted()
+	}
+	return false
+}
+
+// register registers the loop's roots with the runtime (roots), once it
+// has a memory limit, unless Options.ResetMemoryPerTask leaves nothing to
+// measure: New, Run, Start and the first rebase under a limit set later
+// call it, so that the promises of NewPromise are listed from the first.
+// It runs on the goroutine using the runtime.
+func (l *Loop) register() {
+	if l.reg != nil || l.resetPerTask || l.rt.Realm().MemoryLimit() <= 0 {
+		return
+	}
+	g := &liveReg{}
+	g.loop.Store(l)
+	g.remove = l.rt.AddLiveRoots(g.roots)
+	l.mu.Lock()
+	l.reg = g
+	l.mu.Unlock()
+}
+
+// liveReg is a loop's registration of its roots with the runtime
+// (Runtime.AddLiveRoots), which keeps it as long as the runtime lives: it
+// holds the loop only until Terminate ends the loop, so that a runtime
+// that gets a new Loop does not keep the old ones, and removes itself
+// from the runtime at the next measurement after that, when exit did not
+// (Terminate may run on another goroutine than the runtime's, while the
+// loop does not run).
+type liveReg struct {
+	loop   atomic.Pointer[Loop]
+	remove func()
+}
+
+// roots adds the loop's roots to a measurement (Loop.roots), or removes
+// the registration once the loop was terminated.
+func (g *liveReg) roots(add func(moejs.Value)) {
+	if l := g.loop.Load(); l != nil {
+		l.roots(add)
+	} else {
+		g.remove()
+	}
+}
+
+// roots adds to a measurement of the runtime's heap what the loop holds for
+// JavaScript: the callbacks, this and arguments of the pending timers and
+// immediates, and the promises of NewPromise not yet settled. It holds l.mu
+// while it adds them, which only queues them for the measurement's walk:
+// the walk runs after it returns. Only the goroutine using the runtime
+// changes the JavaScript heap, and nothing allocates for JavaScript with
+// l.mu held, so the measurement an allocation makes on the loop never
+// waits for it.
+func (l *Loop) roots(add func(moejs.Value)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.terminated {
+		return
+	}
+	call := func(fn, this moejs.Value, args []moejs.Value) {
+		add(fn)
+		add(this)
+		for _, v := range args {
+			add(v)
+		}
+	}
+	for _, t := range l.timers {
+		call(t.fn, t.this, t.args)
+	}
+	for _, ims := range [2][]*immediate{l.immediates, l.batch} {
+		for _, im := range ims {
+			if im.pending {
+				call(im.fn, im.this, im.args)
+			}
+		}
+	}
+	l.compact()
+	for _, pd := range l.pending {
+		add(pd.p)
+	}
 }
 
 // requeueImmediates puts the immediates a run left unrun back in front of
@@ -681,4 +999,20 @@ func (l *Loop) wait(sleep *time.Timer) bool {
 		}
 	}
 	return true
+}
+
+// Post posts task to the loop l as l.RunOnLoop does, for a task that can
+// fail: the loop handles its error as a callback's. An interrupt stops the
+// loop; any other error goes to Options.OnError, or stops the loop when
+// OnError is nil. A task that calls JavaScript or settles promises itself
+// returns what that fails with, so that an exception of the jobs it runs
+// or the error of a memory limit is not lost. Post returns false once
+// Terminate ended the loop, and task is dropped. It is a function rather
+// than a method so that a program that does not call it carries none of
+// it.
+func Post(l *Loop, task func(*moejs.Runtime) error) bool {
+	if task == nil {
+		return l.RunOnLoop(nil)
+	}
+	return l.post(task)
 }

@@ -15,9 +15,24 @@ import (
 // MaxToGoDepth bounds container nesting in ToGo/ToGoStrict: a plugin can
 // build a 3e6-deep array in well under a second, and exporting it
 // recursively overflowed the Go stack, a fatal error. Past the limit
-// ToGoStrict returns a RangeError and ToGo exports the deeper containers as
-// nil.
+// ToGoStrict returns a RangeError that wraps ErrTooDeep and ToGo exports
+// the deeper containers as nil.
 const MaxToGoDepth = 10000
+
+// ErrTooDeep is what the RangeError of a value nested deeper than
+// MaxToGoDepth arrays and objects wraps, so that errors.Is finds it in the
+// *Exception: JSON.parse's text and its reviver's walk, JSON.stringify's
+// value, and the value ToGoStrict exports.
+var ErrTooDeep = errors.New("nesting is too deep")
+
+// tooDeep returns the RangeError of a value nested deeper than
+// MaxToGoDepth, whose message is format with the limit, wrapping
+// ErrTooDeep.
+func (r *Realm) tooDeep(format string) error {
+	o := r.NewError(KindRangeError, format, MaxToGoDepth)
+	o.ErrorData().hostErr = ErrTooDeep
+	return &Exception{Value: ObjectValue(o)}
+}
 
 // ErrFromGoDepth is not returned by FromGo: the lazy conversion converts one
 // level per touch, so no depth needs bounding. The variable is kept so
@@ -107,9 +122,9 @@ func (r *Realm) fromGoOther(v any, h *hostHeap) (Value, error) {
 	case string:
 		return StringValue(FromGoString(x)), nil
 	case NativeFunc:
-		return ObjectValue(r.NewNativeFunction(AtomEmpty, 0, x)), nil
+		return ObjectValue(r.NewHostFunction(AtomEmpty, 0, x)), nil
 	case func(*Realm, Value, []Value) (Value, error):
-		return ObjectValue(r.NewNativeFunction(AtomEmpty, 0, NativeFunc(x))), nil
+		return ObjectValue(r.NewHostFunction(AtomEmpty, 0, NativeFunc(x))), nil
 	case *big.Int:
 		if x == nil {
 			return Null(), nil
@@ -184,12 +199,25 @@ type hostPair[V any] struct {
 
 func comparePairs[V any](a, b hostPair[V]) int { return strings.Compare(a.k, b.k) }
 
+// smallPairSort is the longest map orderPairs sorts by insertion, with the
+// keys compared in place rather than through comparePairs.
+const smallPairSort = 12
+
 // orderPairs puts one map's entries in build order: the named keys sorted
 // (the object's shape and enumeration order), then the canonical array
 // indices, which are stored as elements (their relative order is
 // irrelevant).
 func orderPairs[V any](seg []hostPair[V]) {
-	slices.SortFunc(seg, comparePairs[V])
+	if len(seg) <= smallPairSort {
+		// A map's keys are distinct, so any sort gives the one order.
+		for i := 1; i < len(seg); i++ {
+			for j := i; j > 0 && seg[j].k < seg[j-1].k; j-- {
+				seg[j], seg[j-1] = seg[j-1], seg[j]
+			}
+		}
+	} else {
+		slices.SortFunc(seg, comparePairs[V])
+	}
 	named := 0
 	for i := range seg {
 		if _, ok := parseArrayIndex(seg[i].k); ok {
@@ -360,6 +388,10 @@ func jsonNumberValue(n json.Number) (Value, error) {
 // Getters and traps that throw yield nil; use ToGoStrict to observe the
 // error.
 func (r *Realm) ToGo(v Value) any {
+	if !v.IsObject() {
+		out, _ := r.toGo(v, nil) // a primitive needs no state
+		return out
+	}
 	var st toGoState
 	out, _ := r.toGo(v, &st)
 	return out
@@ -369,6 +401,9 @@ func (r *Realm) ToGo(v Value) any {
 // property (a throwing getter, or an interrupt observed while one runs) and
 // returns it instead of a partial result.
 func (r *Realm) ToGoStrict(v Value) (any, error) {
+	if !v.IsObject() {
+		return r.toGo(v, nil) // a primitive needs no state
+	}
 	st := toGoState{strict: true}
 	return r.toGo(v, &st)
 }
@@ -381,10 +416,15 @@ type toGoState struct {
 	strict bool
 	depth  int // containers being exported (MaxToGoDepth)
 	n      int
-	objs   [8]*Object
-	outs   [8]any
+	objs   [toGoSmall]*Object
+	outs   [toGoSmall]any
 	seen   map[*Object]any
 }
+
+// toGoSmall is how many containers an export tracks in toGoState's arrays
+// before it builds the map: a hook result of a few dozen objects and
+// arrays costs no map.
+const toGoSmall = 32
 
 func (st *toGoState) lookup(o *Object) (any, bool) {
 	for i := range st.n {
@@ -453,7 +493,7 @@ func (r *Realm) toGo(v Value, st *toGoState) (any, error) {
 	}
 	if st.depth >= MaxToGoDepth {
 		if st.strict {
-			return nil, r.RangeError("Maximum export depth exceeded (%d nested containers)", MaxToGoDepth)
+			return nil, r.tooDeep("Nesting is too deep to export to Go (more than %d levels)")
 		}
 		return nil, nil
 	}

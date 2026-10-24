@@ -1,0 +1,4 @@
+go test fuzz v1
+string("BloB:HA:")
+string("")
+string("0")

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"reflect"
 	"unsafe"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
@@ -59,6 +60,11 @@ type FunctionData struct {
 	// object constructed with this function as new.target ended its
 	// construction with: the next one is allocated with room for them.
 	ctorSlots uint8
+	// measurable is set on a host's functions, whose values kept for later
+	// go to AddLiveRoots or LiveReporter, and on the Promise constructor: a
+	// measurement may run in the JavaScript they call back (measurable). It
+	// shares ctorSlots' word.
+	measurable bool
 }
 
 // boundFunc is the state of a bound function beyond its bound this.
@@ -363,9 +369,13 @@ func (r *Realm) CallState() CallState {
 
 // RestoreCallState resets the call bookkeeping to a snapshot taken at the
 // same host boundary. At the outermost boundary, DropJobs then discards the
-// jobs the call left queued.
+// jobs the call left queued, and no builtin or parse is left holding values
+// or bytes for a memory limit's measurements (holding, holdBytes).
 func (r *Realm) RestoreCallState(cs CallState) {
 	r.callDepth, r.interp.sp, r.interp.nframes = int32(cs.depth), cs.sp, cs.nframes
+	if m := r.mem(); m != nil && cs.depth == 0 {
+		m.holding, m.held = 0, 0
+	}
 }
 
 // IsCallable implements the IsCallable abstract operation.
@@ -411,6 +421,9 @@ func (r *Realm) CallObject(fn *Object, this Value, args []Value) (Value, error) 
 	}
 	r.callDepth--
 	if r.callDepth == 0 && r.jobsPending {
+		if j := r.lazy.jobs; !j.draining {
+			j.result = res
+		}
 		err = r.endJob(err)
 	}
 	return res, err
@@ -462,6 +475,9 @@ func (r *Realm) Construct(fn Value, args []Value, newTarget *Object) (Value, err
 	}
 	r.callDepth--
 	if r.callDepth == 0 && r.jobsPending {
+		if j := r.lazy.jobs; !j.draining {
+			j.result = res
+		}
 		err = r.endJob(err)
 	}
 	return res, err
@@ -544,6 +560,52 @@ func (r *Realm) NewNativeFunction(name *String, length int, fn NativeFunc) *Obje
 	o, fd := r.newNativeFunctionObject(name, length, FuncNative)
 	fd.native = fn
 	return o
+}
+
+// NewHostFunction is NewNativeFunction for a host's function. The
+// measurement of a charge past the memory limit runs in the JavaScript it
+// calls back, as in plain code: the host keeps no JavaScript value only in
+// Go across such a call, or registers what it keeps (AddLiveRoots,
+// LiveReporter).
+func (r *Realm) NewHostFunction(name *String, length int, fn NativeFunc) *Object {
+	o, fd := r.newNativeFunctionObject(name, length, FuncNative)
+	fd.native = fn
+	fd.measurable = true
+	return o
+}
+
+// measurableBuiltins are the builtins, by code pointer, that keep no
+// JavaScript value only in Go while they call back into JavaScript
+// (FunctionData.measurable): the ones that hold none, and the ones that
+// keep what they build on the register stack (map, filter, flatMap,
+// Array.from, reduce's accumulator, sort's list, the reviver's root) or
+// report the Go bytes they build (replace, holdBytes). A builtin that
+// holds values only in Go across a callback is not among them: a charge
+// made in its callbacks waits for it to return. A measurement looks them
+// up when it finds one below a frame (FunctionData.isMeasurable), so that
+// making a builtin costs nothing more.
+var measurableBuiltins map[uintptr]bool
+
+// isMeasurable reports whether a measurement may run in the JavaScript fd
+// calls back: a host's function, the Promise constructor or one of
+// measurableBuiltins.
+func (fd *FunctionData) isMeasurable() bool {
+	return fd.measurable || fd.kind == FuncNative && measurableBuiltins[reflect.ValueOf(fd.native).Pointer()]
+}
+
+func init() {
+	measurableBuiltins = map[uintptr]bool{}
+	for _, fn := range []NativeFunc{
+		arrayProtoForEach, arrayProtoSome, arrayProtoEvery,
+		arrayProtoFind, arrayProtoFindIndex, arrayProtoFindLast, arrayProtoFindLastIndex,
+		arrayProtoMap, arrayProtoFilter, arrayProtoFlatMap,
+		arrayProtoReduce, arrayProtoReduceRight, arrayProtoSort, arrayFrom,
+		jsonParse, stringProtoReplace, stringProtoReplaceAll, regexpProtoSymReplace,
+		mapProtoForEach, setProtoForEach,
+		generatorNext, generatorReturn, generatorThrow,
+	} {
+		measurableBuiltins[reflect.ValueOf(fn).Pointer()] = true
+	}
 }
 
 // NewNativeDataFunction creates a function object whose [[Call]] is fn with

@@ -281,18 +281,18 @@ func (h *hostHeap) str(g string) *String {
 	s := &h.strings[n]
 	if len(g) >= jsonPlainMin {
 		if isASCIILong(g) {
-			*s = String{s: g, n: int32(len(g)), kind: strASCII, json: jsonDeferred}
+			*s = String{s: g, n: int32(len(g)), kind: strASCII, flags: strHost, json: jsonDeferred}
 			h.strs[slot] = s
 			return s
 		}
 	} else if isASCII(g) {
-		*s = String{s: g, n: int32(len(g)), kind: strASCII}
+		*s = String{s: g, n: int32(len(g)), kind: strASCII, flags: strHost}
 		h.strs[slot] = s
 		return s
 	}
 	u := appendUTF16(make([]uint16, 0, len(g)), g)
 	h.r.charge(2 * cap(u))
-	*s = String{p: unitsPtr(u), n: int32(len(u)), kind: strUTF16}
+	*s = String{p: unitsPtr(u), n: int32(len(u)), kind: strUTF16, flags: strHost}
 	return s
 }
 

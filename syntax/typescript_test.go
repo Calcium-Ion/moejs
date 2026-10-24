@@ -158,28 +158,28 @@ func TestTypeScriptPairs(t *testing.T) {
 // naming the feature, and that invalid TypeScript fails.
 func TestTypeScriptRejects(t *testing.T) {
 	tests := []struct{ src, msg string }{
-		{"enum E { A }", "t.ts:1:1: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"export enum E { A }", "t.ts:1:8: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"const enum E { A }", "t.ts:1:1: SyntaxError: A TypeScript const enum is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"if (x) { const enum E { A } }", "t.ts:1:10: SyntaxError: A TypeScript const enum is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"namespace N { export const x = 1 }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"namespace N { ; }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"namespace N { declare const x: number }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"module M.N { function f() {} }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"namespace A { declare namespace B { export const x: number } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"namespace A { export { x } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
+		{"enum E { A }", "t.ts:1:1: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is"},
+		{"export enum E { A }", "t.ts:1:8: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is"},
+		{"const enum E { A }", "t.ts:1:1: SyntaxError: A TypeScript const enum is not supported: only erasable TypeScript is"},
+		{"if (x) { const enum E { A } }", "t.ts:1:10: SyntaxError: A TypeScript const enum is not supported: only erasable TypeScript is"},
+		{"namespace N { export const x = 1 }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
+		{"namespace N { ; }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
+		{"namespace N { declare const x: number }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
+		{"module M.N { function f() {} }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
+		{"namespace A { declare namespace B { export const x: number } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
+		{"namespace A { export { x } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
 		{`module "m" {}`, "t.ts:1:1: SyntaxError: Only ambient modules can use quoted names."},
 		{"global { }", "t.ts:1:1: SyntaxError: Augmentations for the global scope can only be directly nested in external modules or ambient module declarations."},
-		{"class C { constructor(private x: number) {} }", "t.ts:1:23: SyntaxError: A parameter property is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"class C { constructor(readonly x) {} }", "t.ts:1:23: SyntaxError: A parameter property is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"x = (public a) => a;", "t.ts:1:6: SyntaxError: A parameter property is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`import x = require("m");`, "t.ts:1:1: SyntaxError: import = require is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`import x = A.B; x.y();`, "t.ts:1:8: SyntaxError: An import alias used as a value is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`import x = A.B; export { x };`, "t.ts:1:8: SyntaxError: An import alias used as a value is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`export import x = A.B;`, "t.ts:1:1: SyntaxError: export import is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`export = 1;`, "t.ts:1:1: SyntaxError: export = is not supported: only erasable TypeScript is (see TODO.md)"},
-		{`export as namespace Foo;`, "t.ts:1:1: SyntaxError: export as namespace is not supported: only erasable TypeScript is (see TODO.md)"},
-		{"class A { accessor x = 1; }", "t.ts:1:11: SyntaxError: An accessor field is not supported: only erasable TypeScript is (see TODO.md)"},
+		{"class C { constructor(private x: number) {} }", "t.ts:1:23: SyntaxError: A parameter property is not supported: only erasable TypeScript is"},
+		{"class C { constructor(readonly x) {} }", "t.ts:1:23: SyntaxError: A parameter property is not supported: only erasable TypeScript is"},
+		{"x = (public a) => a;", "t.ts:1:6: SyntaxError: A parameter property is not supported: only erasable TypeScript is"},
+		{`import x = require("m");`, "t.ts:1:1: SyntaxError: import = require is not supported: only erasable TypeScript is"},
+		{`import x = A.B; x.y();`, "t.ts:1:8: SyntaxError: An import alias used as a value is not supported: only erasable TypeScript is"},
+		{`import x = A.B; export { x };`, "t.ts:1:8: SyntaxError: An import alias used as a value is not supported: only erasable TypeScript is"},
+		{`export import x = A.B;`, "t.ts:1:1: SyntaxError: export import is not supported: only erasable TypeScript is"},
+		{`export = 1;`, "t.ts:1:1: SyntaxError: export = is not supported: only erasable TypeScript is"},
+		{`export as namespace Foo;`, "t.ts:1:1: SyntaxError: export as namespace is not supported: only erasable TypeScript is"},
+		{"class A { accessor x = 1; }", "t.ts:1:11: SyntaxError: An accessor field is not supported: only erasable TypeScript is"},
 		{"@dec class A {}", "t.ts:1:1: SyntaxError: Invalid or unexpected token"},
 
 		{"x = (this: T) => 1;", "t.ts:1:6: SyntaxError: An arrow function cannot have a 'this' parameter."},
@@ -214,7 +214,7 @@ func TestTypeScriptRejects(t *testing.T) {
 		{"f<T>?.g;", "t.ts:1:5: SyntaxError: An instantiation expression cannot be followed by a property access."},
 		{"function f() { type T = 1 } export { T };", "t.ts:1:38: SyntaxError: Export 'T' is not defined"},
 		{"declare namespace D { interface I {} } export { I };", "t.ts:1:49: SyntaxError: Export 'I' is not defined"},
-		{"namespace N { import type X = A.B; export { X } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is (see TODO.md)"},
+		{"namespace N { import type X = A.B; export { X } }", "t.ts:1:1: SyntaxError: A TypeScript namespace with values is not supported: only erasable TypeScript is"},
 		{`namespace N { import x from "n"; }`, "t.ts:1:24: SyntaxError: Unexpected identifier 'from'"},
 		{"if (a) abstract class C {}", "t.ts:1:17: SyntaxError: Unexpected token 'class'"},
 	}
@@ -225,14 +225,23 @@ func TestTypeScriptRejects(t *testing.T) {
 }
 
 // TestTypeScriptOff checks that TypeScript syntax is not JavaScript: the
-// option is off unless set, and ParseScript rejects it.
+// option is off unless set.
 func TestTypeScriptOff(t *testing.T) {
 	for _, src := range []string{"let x: number;", "f<T>(x) => 1;", "interface I {}", "x as T;", "x!;"} {
 		_, err := ParseModule("t.js", src, Options{})
 		assert.Error(t, err, src)
 	}
-	_, err := ParseScript("t.ts", "let x = 1;", tsOpts)
-	assert.EqualError(t, err, "t.ts:1:1: SyntaxError: TypeScript is only supported in modules")
+	// ParseScript reads TypeScript as strict mode script code, as the
+	// compiler reads a function's parameters and body.
+	sc, err := ParseScript("t.ts", "let x: number = 1;", tsOpts)
+	require.NoError(t, err)
+	assert.True(t, sc.Strict)
+	_, err = ParseScript("t.ts", "with (x) {}", tsOpts)
+	assert.EqualError(t, err, "t.ts:1:1: SyntaxError: Strict mode code may not include a with statement")
+	_, err = ParseScript("t.ts", "import type X from 'm';", tsOpts)
+	assert.EqualError(t, err, "t.ts:1:1: SyntaxError: Cannot use import statement outside a module")
+	_, err = ParseScript("t.ts", "x = 1 <!-- 2;", tsOpts)
+	assert.Error(t, err, "no HTML-like comments")
 }
 
 // TestTypeScriptPositions checks that positions refer to the TypeScript

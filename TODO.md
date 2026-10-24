@@ -42,8 +42,23 @@ semantics fails with a `SyntaxError` that names it:
 - The legacy `caller` and `arguments` properties of sloppy functions:
   reading `f.caller` or `f.arguments` throws a TypeError, as it does for a
   strict function
-- `Intl`, and locale-tailored `localeCompare` and `toLocale*` methods
+- `Intl.Collator`, `Intl.RelativeTimeFormat`, `Intl.ListFormat`,
+  `Intl.DisplayNames` and `Intl.DurationFormat`
+- Locale data beyond eleven languages: `Intl.NumberFormat` and
+  `Intl.DateTimeFormat` carry the CLDR data of `en`, `zh-Hans`, `zh-Hant`,
+  `ja`, `ko`, `de`, `fr`, `es`, `pt`, `ru` and `it` (one line of the
+  generator each) and of their regional locales (`en-GB`, `pt-PT`,
+  `zh-Hant-HK`); a locale of another language formats as the default
+  locale
+- Calendars other than the Gregorian in `Intl.DateTimeFormat`
+  (`-u-ca-japanese`, `chinese`, ...), and numbering systems without a
+  simple digit mapping (`hans`, `roman`, ...)
+- Locale-tailored `localeCompare` and `toLocaleUpperCase`/`toLocaleLowerCase`
   (`localeCompare` uses the CLDR root collation order)
+- Dictionary word segmentation in `Intl.Segmenter`: words of text written
+  without spaces (Chinese, Japanese, Thai, Lao, Khmer, Myanmar) follow the
+  default rules of UAX #29, one segment per ideograph, where ICU uses
+  dictionaries. Segmentation has no locale tailoring (`-u-ss`)
 - `FinalizationRegistry`
 - Timers on a bare `Runtime`, which has none: `setTimeout` is a
   ReferenceError there. The `eventloop` package installs Node.js's
@@ -51,6 +66,12 @@ semantics fails with a `SyntaxError` that names it:
   without `timers/promises`, the `AbortSignal` options, `util.promisify`
   of the timer functions, the `Symbol.dispose` method of a `Timeout`, and
   Node's warning for a delay above 2147483647 ms
+- Web APIs on a bare `Runtime`, which has none: `fetch` is a
+  ReferenceError there. The `webapi` package installs `fetch`, `Headers`,
+  `Request`, `Response`, the Streams, `AbortController`, `URL` and
+  `performance` on a runtime with an event loop, without `Blob`, `File`,
+  `FormData`, BYOB readers, fetch of `data:`, `blob:` and `file:` URLs, and
+  Brotli decoding
 
 ## Known wrong results
 
@@ -111,6 +132,39 @@ These run, with a result that differs from the specification:
 - Listing the keys of a typed array of more than 2^24 elements
   (`Object.keys`, `for`-`in`, `Reflect.ownKeys`) throws a RangeError, where
   V8 lists them. Reading and writing its elements is not limited.
+- `MemoryLimit`: a few builtins keep what they build only in Go while they
+  call back into JavaScript, so a measurement waits for them to return:
+  `toSorted`, `Object.groupBy` and `Map.groupBy`, the `Map`, `Set`,
+  `WeakMap` and `WeakSet` constructors, `Object.fromEntries` and the
+  `Promise` combinators over an iterator, `JSON.stringify` with a replacer
+  or a `toJSON`, `join` and `toLocaleString` over objects with a
+  `toString`, and `%TypedArray%.from` with a map function and
+  `%TypedArray%.prototype.map`. Garbage made in their callbacks stops the
+  program once it passes half of what the limit leaves above the last
+  measurement, where the same garbage in a plain loop or `forEach` runs on:
+  these stop early, and never count less than the program keeps. The
+  measurement of an `Intl.DateTimeFormat` misses its cached bound `format`
+  function and its pattern's parts, so it counts less than such an object
+  keeps. A name atom of compiled code that data still uses after the code
+  is freed stays a constant the measurement skips, at most 64 bytes for
+  each such name. A parse for `FromGo` (a `json.RawMessage` it
+  materializes) charges its stacks but cannot stop. `Object.keys`,
+  `values` and `entries` allocate their list before it is charged, at
+  most the size of the object, which is counted already.
+- `webapi`: under the memory limit a whole-body read such as `text()`
+  never takes a body larger than the limit; without a limit nothing
+  bounds such a body but the host's `Transport`. A charge it makes that
+  would pass the limit measures at once. Chunks a stream or a `tee()` branch keeps
+  across tasks count as JavaScript's own allocations do, once each. Bytes
+  several objects share in Go count once for each of them, an overcount
+  that errs on the safe side: a body's bytes and its clones', a header
+  copied into other `Headers` or `Request`s, a URL's serialization and the
+  `href` string or the search params read from it.
+  `loop.Terminate` does not stop the fetches in flight (`Close` does). A
+  nil `Allow` approves every address the client reaches, the intranet,
+  loopback and `169.254.169.254` included. With `MutableIntrinsics`, a
+  `Promise[Symbol.species]` a script defines runs inside the package's own
+  promise reactions, because `Promise.prototype.then` reads it.
 
 ## Host API
 

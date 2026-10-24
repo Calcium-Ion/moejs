@@ -418,8 +418,8 @@ func TestProxyJSON(t *testing.T) {
 }); const before = log.join(); return [JSON.stringify(r), before].join('|')`, `{"a":1,"b":{"c":2}}|ownKeys,define c,delete d`},
 		{"parse reviver array proxy", `const r = JSON.parse('[1,[2]]', function (k, v) { if (k === '0' && Array.isArray(this) && this.length === 2 && this[0] === 1) this[1] = new Proxy([5, 6], {}); return typeof v === 'number' ? v * 10 : v }); return JSON.stringify(r)`, "[10,[50,60]]"},
 		// A reviver that grows the structure as it is walked.
-		{"parse reviver growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = new Proxy([5, 6], {}); return v })`, "!RangeError: Maximum call stack size exceeded"},
-		{"parse reviver growing plain", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: Maximum call stack size exceeded"},
+		{"parse reviver growing", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = new Proxy([5, 6], {}); return v })`, "!RangeError: JSON nesting is too deep (more than 10000 levels)"},
+		{"parse reviver growing plain", `return JSON.parse('[1,[2]]', function (k, v) { if (k === '0') this[1] = [5, 6]; return v })`, "!RangeError: JSON nesting is too deep (more than 10000 levels)"},
 		{"parse reviver deepest", `const s = '['.repeat(10000) + ']'.repeat(10000); let n = 0; JSON.parse(s, function (k, v) { n++; return v }); return n + (() => { try { JSON.parse('[' + s + ']') } catch (e) { return e.name } })()`, "10000RangeError"},
 	})
 }

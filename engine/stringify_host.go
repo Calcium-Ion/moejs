@@ -84,7 +84,7 @@ func (r *Realm) lacksToJSON(o *Object, epoch *uint32) bool {
 // it did; when it did not, nothing was written and the caller serializes o
 // as an object.
 func (js *jsonStringifier) hostNode(o *Object) (bool, error) {
-	if o.shape.key != hostSentinelKey || js.replacerFn.IsObject() || js.hasList || js.gap != nil || !js.r.protosLackToJSON(&js.plainEpoch) {
+	if o.shape.key != hostSentinelKey || js.replacerFn.IsObject() || js.hasList || js.gap != nil || js.strict || !js.r.protosLackToJSON(&js.plainEpoch) {
 		return false, nil
 	}
 	mark := js.sb.Len()

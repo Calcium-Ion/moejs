@@ -163,16 +163,6 @@ func numberProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	return StringValue(asciiString(NumberToStringRadix(f, int(radix)))), nil
 }
 
-// numberProtoToLocaleString has no locale data and formats like
-// toString().
-func numberProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error) {
-	f, err := thisNumberValue(r, this, "toLocaleString")
-	if err != nil {
-		return Undefined(), err
-	}
-	return StringValue(NumberToString(f)), nil
-}
-
 // numberProtoToFixed implements Number.prototype.toFixed (ES2023 21.1.3.3)
 // with exact decimal rounding (ties go to the larger value).
 func numberProtoToFixed(r *Realm, this Value, args []Value) (Value, error) {
