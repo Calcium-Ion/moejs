@@ -1069,6 +1069,290 @@ throw. The interrupt stays pending even when no JavaScript was running, so
 the host calls `ClearInterrupt` before it uses the runtime again. Another
 `New` gives the runtime a fresh loop.
 
+## Web APIs
+
+### Installing
+
+The `webapi` package installs the Web APIs that fetch-based SDKs need:
+`fetch`, `Headers`, `Request`, `Response`, `ReadableStream`,
+`WritableStream`, `TransformStream`, `TextDecoderStream`,
+`TextEncoderStream`, the queuing strategies, `AbortController`,
+`AbortSignal`, `EventTarget`, `Event`, `DOMException`, `URL`,
+`URLSearchParams` and `performance`. They run on an event loop, and only
+Go's standard library does the I/O. A bare runtime has none of them. The
+host installs them explicitly:
+
+```go
+rt := moejs.NewRuntime(moejs.Options{})
+loop, err := eventloop.New(rt, eventloop.Options{})
+api, err := webapi.Install(loop, webapi.Options{
+	Client: &http.Client{Timeout: 10 * time.Minute},
+	Allow:  webapi.AllowHosts("api.openai.com", "*.anthropic.com"),
+})
+defer api.Close()
+err = loop.Run(func(rt *moejs.Runtime) error {
+	_, err := rt.RunScript(script) // the SDK's code calls fetch
+	return err
+})
+```
+
+Each global is created the first time JavaScript reads it, so a runtime
+pays only for the names of the ones it never uses. A runtime without the
+package is unchanged. The globals are writable and configurable properties
+of the global object, as Web IDL defines them. This holds also when the
+runtime shares the frozen builtins, so a host can delete or replace any of
+them.
+
+`Install` is called once per runtime. `Close` stops every fetch in flight,
+closes every response body that was not read to its end and stops the
+timers of `AbortSignal.timeout`. It can be called from any goroutine; the
+promises it rejects settle the next time the loop runs. `Close` is final,
+and a fetch after it rejects: call it when the runtime is dropped.
+`loop.Terminate` does not stop the fetches in flight, so call `Close` as
+well.
+
+A host that pools runtimes ends one run's network activity with a context
+instead:
+
+```go
+ctx, cancel := context.WithCancel(requestCtx)
+api.SetContext(ctx) // the parent of the fetches of this run
+err = loop.Run(...)
+cancel() // fails this run's fetches still in flight, closes their bodies
+// the runtime goes back to the pool and fetches again in its next run
+```
+
+Canceling the context fails the fetches it started that are still in
+flight, as a network error does, with the context's cause as the error's
+`cause`. It closes their response bodies at once and releases what they
+kept the loop alive with. `Options.Context` stays the parent of every
+request.
+
+### Permissions and the client
+
+A runtime reaches only the network the host gives it:
+
+- `Options.Client` sends the requests. Without one, every `fetch` rejects
+  with a `TypeError` (deny all). The client's `Transport` decides how a
+  request travels: a custom `http.RoundTripper` can serve requests from Go
+  without a network, record them, or add credentials the script never sees.
+- `Options.Allow` is called before each request is sent, and again for
+  each redirect. An error rejects the fetch. The hook sees the request as
+  it is sent: `req.Host` is the `Host` header when the script set one.
+  `webapi.AllowHosts` returns one for a list of hosts: `*.example.com`
+  matches the subdomains of example.com but not example.com itself, and
+  `*` matches every host. When the script sets a `Host` header, that host
+  must be allowed too, as well as the URL's. The hook runs on the
+  request's goroutine, so concurrent fetches call it concurrently.
+- A nil `Allow` checks nothing. Every address the client can reach is
+  allowed, including the intranet, loopback (`127.0.0.1`, `localhost`)
+  and the cloud metadata address `169.254.169.254`. Give scripts you do
+  not trust a host list.
+- `Options.Context` is the parent of every request's context. Canceling
+  it fails the fetches in flight, for example when the host shuts down.
+  `api.SetContext` adds a parent for the fetches of one run, for a host
+  that pools runtimes (see Installing).
+
+The client's `Timeout`, `Jar` and `CheckRedirect` apply. The package copies
+the client to follow each request's `redirect` mode: `"follow"` (at most 20
+redirects), `"manual"` (the 3xx response itself, as Node.js gives it) and
+`"error"`.
+
+### Promises on the event loop
+
+`fetch`, `text()`, `json()`, `arrayBuffer()`, `bytes()` and every read of a
+response body return promises that settle on the loop, in a task of its
+tasks phase. The promise jobs a task queues run before the next task, as
+in a browser. A fetch waiting for its response and a body read waiting for
+its chunk keep `Run` alive. A response body that nobody reads does not.
+Like Node.js, `AbortSignal.timeout` does not keep the loop alive by itself;
+a fetch that uses the signal does.
+
+### Streaming
+
+A response body is a `ReadableStream`. Its source reads the
+`http.Response` body on a goroutine only when the stream asks for a chunk:
+when a read waits and the queue is empty. The Go side never reads ahead of
+JavaScript. A slow reader therefore holds the server back through TCP flow
+control, and memory stays bounded by the socket buffers.
+
+```js
+const response = await fetch(url, { method: "POST", body, signal });
+const reader = response.body.getReader();
+for (;;) {
+  const { done, value } = await reader.read(); // value is a Uint8Array
+  if (done) break;
+  onText(decoder.decode(value, { stream: true }));
+}
+```
+
+Each chunk is a `Uint8Array` over the bytes that one read of the body
+returned. A chunk that fills at least half of the read buffer is handed
+over without a copy; a smaller one is copied into a buffer of its own
+size, and the read buffer serves the next read. The read
+buffer starts at 16 KiB and grows to 256 KiB while reads fill it; under a
+`MemoryLimit` it grows to an eighth of the limit at most, and no less than
+4 KiB, so that a script that keeps one chunk at a time stays well under
+the limit.
+`for await (const chunk of response.body)`, `pipeThrough` and `pipeTo` read
+the same way. `text()`, `json()` and the other body methods of a response
+whose stream JavaScript has not touched read the whole body in one go on
+the Go side. A body they read is used: its stream is locked and disturbed,
+and a second read, `clone()` or `text()` is a `TypeError`.
+
+Every byte handed to JavaScript is charged to the runtime's
+`MemoryLimit` before it is allocated, on the loop; under `eventloop` the
+limit bounds what the run keeps and allocates across its tasks, as the
+memory limit section above describes. A streamed chunk is charged in the
+task that hands it over. A body read whole is charged as it arrives: a
+goroutine reads up to a window past what was charged (the largest read
+buffer), or to the body's end, and the loop charges those bytes before
+the next window is read. Go holds at most one window more of the body than
+was charged, and a body smaller than a window costs one task. The bytes
+read so far count in every measurement of what the run keeps, though only
+Go holds them, and the body is charged once. A charge the package makes on
+the loop is the host's own: when it would pass the limit, it measures at
+once, as `RebaseAllocation` does. A charge that fails closes the body, rejects
+the read with a `RangeError` that carries the limit's message, and stops
+the loop (`errors.Is(err, moejs.ErrMemoryLimit)`), as an allocation of
+JavaScript past the limit does. Whatever the budget, a body larger than
+the limit can never be taken: a body whose `Content-Length` is larger
+than the limit is rejected before a byte is read, and otherwise the
+window that reaches the limit reads one byte more, so the read rejects
+with a `RangeError` before that window is charged, as a builtin that
+knows its result does not fit throws, and Go holds little more of the
+body than the limit. With
+`eventloop.Options.ResetMemoryPerTask`, whose budget is per task, that is
+the bound of a body read whole. An announced `Content-Length` preallocates
+at most 1 MiB, and no more than the limit. A gzip or deflate body counts its decoded bytes, so a body that
+expands is bounded the same way. A host without a `MemoryLimit` can cap bodies in
+its `Transport`, for example with a `RoundTripper` that wraps each
+response's `Body` in an `io.LimitReader`. The branches of `tee()` and
+`clone()` hold the chunks one branch read and the other did not yet, as
+in browsers, and those chunks were charged when they were handed over; the
+second branch of a stream of bytes, a response body included, gets copies,
+which are charged too.
+
+Much of what the package keeps for JavaScript is Go state the measurements
+of the memory limit cannot walk: the queued chunks, source, sink and
+promises of a stream, the listeners and reason of an `AbortSignal` or
+`EventTarget`, header values, URLs and search params kept as Go strings,
+the bytes of a body built from a string or a buffer. Each object's state
+reports what it keeps when a measurement reaches the object
+(`moejs.LiveReporter`), so it counts while JavaScript can reach the object
+and stops counting once it cannot, without waiting for Go's collector, and
+a program cannot keep memory out of the limit's sight by parking it there.
+The work no object leads to, a fetch in flight with the async functions
+awaiting it, a body read whole and the timer of `AbortSignal.timeout`, is
+reported through `Runtime.AddLiveRoots` while it runs, with one
+registration per `Install` that `Close` ends; without a limit the package
+registers nothing. The Go strings are charged as the package keeps them,
+and two objects that share them, a `Headers` and its copy, both count
+them.
+
+A gzip or deflate body is decoded. Go's transport does it when the request
+did not set `Accept-Encoding` itself; the package does it otherwise. Brotli
+is not decoded.
+
+### Cancellation and errors
+
+- `reader.cancel()`, `response.body.cancel()` and breaking out of
+  `for await` close the Go body and cancel the request's context.
+  The body is closed at once, also while a read of it is blocked. A
+  custom `RoundTripper`'s response body must therefore allow `Close`
+  concurrently with `Read` and make the `Read` return, as net/http's
+  bodies and an `io.Pipe` do.
+- The request's `AbortSignal` (`AbortController`, `AbortSignal.timeout`,
+  `AbortSignal.any`) cancels the context too. Before the response arrives,
+  the fetch rejects with the signal's reason. After it, the body stream
+  errors with that reason, so a pending read rejects with it. The reason is
+  an `AbortError` `DOMException` by default and a `TimeoutError` for
+  `AbortSignal.timeout`.
+- A network error before the response, a denied request or a redirect
+  error rejects with `TypeError: fetch failed`. Its `cause` is an `Error`
+  with the Go error's text and, for the common cases, Node's `code`
+  (`ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`).
+- An error while the body streams, such as a connection reset, errors the
+  stream with `TypeError: terminated`, which pending and later reads
+  reject with.
+- The end of the body, an error, a cancel, an abort and `Close` each close
+  the body and end the request's context at once, without waiting for the
+  garbage collector. As a last resort, the body of a response that
+  JavaScript drops unread is closed when the collector frees it. That can
+  happen much later, so a host should not rely on it: read or cancel
+  bodies, and call `Close`.
+
+### Frozen builtins and polyfills
+
+The package's globals live on the global object, which stays extensible,
+so they install alongside the shared frozen builtins. Their prototypes
+belong to the runtime and are not frozen.
+
+A polyfill bundle that only adds missing globals works with the frozen
+builtins. One that reassigns or patches a builtin does not, because the
+global bindings of the builtins are locked. For example, assigning
+`TextEncoder`, `TextDecoder`, `structuredClone` or `queueMicrotask`
+throws `Cannot assign to read only property` in strict code. Such a
+polyfill should check first and keep moejs's own:
+
+```js
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = TextEncoderPolyfill;
+}
+```
+
+- Polyfills that work with frozen builtins: those that only define what is
+  missing, such as URL, AbortController, Streams, fetch and Headers
+  polyfills of the `if (!globalThis.X)` kind, event-target shims and
+  `web-streams-polyfill/ponyfill`. With the `webapi` package installed,
+  they find the globals present and do nothing.
+- Polyfills that need `Options{MutableIntrinsics: true}`: those that
+  replace or extend a builtin, such as a `TextEncoder` installed
+  unconditionally, `Promise` or `Symbol` replacements, `core-js` in its
+  global (non-pure) mode, and anything that adds methods to
+  `Array.prototype`, `Object.prototype` or `String.prototype`. Each runtime
+  then gets its own mutable builtins, which costs about 25 times as much to
+  create.
+
+With `MutableIntrinsics`, `Install` takes the builtins the package calls
+(`Promise` with its `then` and `resolve`, `Uint8Array`, `TextDecoder` and
+`String.prototype.normalize`) before a script runs, so a script that
+replaces or deletes them later does not reach the package. One that was
+missing before `Install` makes what needs it throw a `TypeError`. One hook
+remains: `Promise.prototype.then` looks up the species constructor of the
+promise it is called on, so a `Promise[Symbol.species]` getter, or a
+promise's `constructor`, that a script defines runs inside the package's
+own promise reactions (a `pipeTo` makes about a dozen such calls). The
+shared frozen builtins have no such hook.
+
+### Limits
+
+- `Blob`, `File` and `FormData` are not provided. A body of one of those
+  types is a `TypeError`, and `blob()` and `formData()` reject.
+- Only `http:` and `https:` URLs are fetched. `data:`, `blob:` and
+  `file:` URLs reject.
+- There are no CORS, no cookies beyond the client's `Jar`, no cache and no
+  forbidden headers. A request's `Host` header sets the request's host,
+  which `Allow` sees and `AllowHosts` checks. `mode`, `credentials`,
+  `cache`, `referrer` and `integrity` are kept on the `Request` object but
+  have no effect.
+- A request method longer than 4 KiB is a `TypeError`; no real method comes
+  near it.
+- Redirects follow Go's method rules: a 301, 302 or 303 turns any method
+  other than `GET` and `HEAD` into `GET`. The Fetch Standard does that for
+  `POST` only on 301 and 302. A redirect to another origin (another
+  scheme, host or port) drops `Authorization`, `Cookie` and
+  `Proxy-Authorization`, as undici does.
+- Streams: `type: "bytes"` streams take `ArrayBufferView` chunks and
+  have no `byobRequest`. `getReader({ mode: "byob" })` throws a
+  `TypeError`. A source's `pull` that returns no promise counts as done at
+  once rather than a microtask later.
+- `URL` follows the current URL Standard, internationalized domain names
+  included, and does not report validation errors that do not fail the
+  parse.
+- `performance` has `now()`, `timeOrigin` and `toJSON()`, without marks,
+  measures or entries.
+
 ## Isolation
 
 ### Shared frozen builtins

@@ -94,6 +94,18 @@ A bare runtime has no timers. The `eventloop` package adds `setTimeout`,
 `setInterval` and `setImmediate`, and an event loop on which host functions
 settle promises from other goroutines.
 
+### Web APIs
+
+The `webapi` package installs `fetch`, `Headers`, `Request`, `Response`,
+the Streams, `AbortController`, `URL` and `performance` on a runtime with an
+event loop, for SDKs written against fetch. The host decides which network
+fetch reaches through its `http.Client` and an allow hook: without a client
+there is none, and without a hook every address the client reaches, so
+give untrusted scripts a host list. Response bodies stream: Go reads a
+chunk only when JavaScript asks for one, each byte is charged to the
+runtime's memory limit, and cancel and abort reach the Go request. See
+the [guide](docs/guide.md#web-apis).
+
 ### Timeouts and errors
 
 Any goroutine can interrupt a running plugin, even one stuck in an endless

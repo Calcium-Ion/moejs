@@ -66,6 +66,12 @@ semantics fails with a `SyntaxError` that names it:
   without `timers/promises`, the `AbortSignal` options, `util.promisify`
   of the timer functions, the `Symbol.dispose` method of a `Timeout`, and
   Node's warning for a delay above 2147483647 ms
+- Web APIs on a bare `Runtime`, which has none: `fetch` is a
+  ReferenceError there. The `webapi` package installs `fetch`, `Headers`,
+  `Request`, `Response`, the Streams, `AbortController`, `URL` and
+  `performance` on a runtime with an event loop, without `Blob`, `File`,
+  `FormData`, BYOB readers, fetch of `data:`, `blob:` and `file:` URLs, and
+  Brotli decoding
 
 ## Known wrong results
 
@@ -142,6 +148,20 @@ These run, with a result that differs from the specification:
   keeps. A name atom of compiled code that data still uses after the code
   is freed stays a constant the measurement skips, at most 64 bytes for
   each such name.
+- `webapi`: under the memory limit a whole-body read such as `text()`
+  never takes a body larger than the limit; without a limit nothing
+  bounds such a body but the host's `Transport`. A charge it makes that
+  would pass the limit measures at once. Chunks a stream or a `tee()` branch keeps
+  across tasks count as JavaScript's own allocations do, once each. Bytes
+  several objects share in Go count once for each of them, an overcount
+  that errs on the safe side: a body's bytes and its clones', a header
+  copied into other `Headers` or `Request`s, a URL's serialization and the
+  `href` string or the search params read from it.
+  `loop.Terminate` does not stop the fetches in flight (`Close` does). A
+  nil `Allow` approves every address the client reaches, the intranet,
+  loopback and `169.254.169.254` included. With `MutableIntrinsics`, a
+  `Promise[Symbol.species]` a script defines runs inside the package's own
+  promise reactions, because `Promise.prototype.then` reads it.
 
 ## Host API
 

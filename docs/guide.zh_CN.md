@@ -681,6 +681,174 @@ settle 函数 panic 的 promise 永远不会兑现。
 和任务，并等到循环结束。之后 `Run` 返回 `ErrTerminated`，`RunOnLoop` 返回 false，定时器函数会抛出异常。即使当时没有 JavaScript
 在运行，中断也会保留，所以宿主再次使用运行时之前要调用 `ClearInterrupt`。再调用一次 `New` 可以给运行时一个新的循环。
 
+## Web API
+
+### 安装
+
+`webapi` 包安装基于 fetch 的 SDK 需要的 Web API：`fetch`、`Headers`、`Request`、`Response`、`ReadableStream`、
+`WritableStream`、`TransformStream`、`TextDecoderStream`、`TextEncoderStream`、两种排队策略、`AbortController`、
+`AbortSignal`、`EventTarget`、`Event`、`DOMException`、`URL`、`URLSearchParams` 和 `performance`。它们运行在事件循环上，
+I/O 只用 Go 标准库。单独的运行时没有这些对象，由宿主显式安装：
+
+```go
+rt := moejs.NewRuntime(moejs.Options{})
+loop, err := eventloop.New(rt, eventloop.Options{})
+api, err := webapi.Install(loop, webapi.Options{
+	Client: &http.Client{Timeout: 10 * time.Minute},
+	Allow:  webapi.AllowHosts("api.openai.com", "*.anthropic.com"),
+})
+defer api.Close()
+err = loop.Run(func(rt *moejs.Runtime) error {
+	_, err := rt.RunScript(script) // SDK 的代码调用 fetch
+	return err
+})
+```
+
+每个全局对象在 JavaScript 第一次读取它时才创建，运行时对从不使用的那些只付出名字的成本。没装这个包的运行时不受任何影响。
+这些全局对象是全局对象上可写、可配置的属性，和 Web IDL 的定义一样；运行时共用冻结的内建对象时也是如此，所以宿主可以删除或替换其中任何一个。
+
+每个运行时调用一次 `Install`。`Close` 停止所有进行中的 fetch，关闭所有没读到结尾的响应体，并停止 `AbortSignal.timeout` 的定时器。
+它可以在任意 goroutine 上调用，被它拒绝的 promise 在循环下次运行时兑现。`Close` 是最终的，之后的 fetch 都会拒绝：运行时被丢弃时调用它。
+`loop.Terminate` 不会停止进行中的 fetch，所以也要调用 `Close`。
+
+把运行时放进池里复用的宿主改用 context 结束一次运行的网络活动：
+
+```go
+ctx, cancel := context.WithCancel(requestCtx)
+api.SetContext(ctx) // 这次运行的 fetch 的父 context
+err = loop.Run(...)
+cancel() // 让这次运行中仍在进行的 fetch 失败，并关闭它们的 body
+// 运行时回到池里，下次运行时照常 fetch
+```
+
+取消这个 context 会让它之后启动、仍在进行中的 fetch 像网络错误一样失败，错误的 `cause` 是 context 的 cause；
+它们的响应体立即关闭，它们让循环保持运行的引用也随之释放。`Options.Context` 仍是每个请求的父 context。
+
+### 权限和客户端
+
+运行时只能访问宿主给它的网络：
+
+- `Options.Client` 发送请求。不提供时每个 `fetch` 都以 `TypeError` 拒绝（全部禁止）。客户端的 `Transport` 决定请求怎么走：
+  自定义的 `http.RoundTripper` 可以不经网络、直接在 Go 里响应请求，也可以记录请求，或者加上脚本看不到的凭据。
+- `Options.Allow` 在每个请求发送前调用，每次重定向也再调用一次。返回错误则 fetch 被拒绝。钩子看到的是实际发送的请求：
+  脚本设置了 `Host` 头时，`req.Host` 就是它。`webapi.AllowHosts` 按主机列表生成这样的钩子：`*.example.com` 匹配
+  example.com 的子域名，但不匹配 example.com 本身；`*` 匹配所有主机。脚本设置了 `Host` 头时，除了 URL 的主机，
+  这个主机也必须被允许。钩子在请求自己的 goroutine 上运行，所以并发的 fetch 会并发调用它。
+- `Allow` 为 nil 时不做任何检查：客户端能访问的每个地址都允许，包括内网、回环地址（`127.0.0.1`、`localhost`）
+  和云元数据地址 `169.254.169.254`。运行不受信任的脚本时，请给它主机列表。
+- `Options.Context` 是每个请求的 context 的父 context。取消它会让进行中的 fetch 失败，例如宿主关闭时。
+  `api.SetContext` 为一次运行的 fetch 增加一个父 context，供把运行时放进池里复用的宿主使用（见“安装”）。
+
+客户端的 `Timeout`、`Jar` 和 `CheckRedirect` 都生效。包会复制客户端来实现每个请求的 `redirect` 模式：`"follow"`（最多 20 次重定向）、
+`"manual"`（和 Node.js 一样返回 3xx 响应本身）和 `"error"`。
+
+### 事件循环上的 promise
+
+`fetch`、`text()`、`json()`、`arrayBuffer()`、`bytes()` 以及每次读取响应体，返回的 promise 都在循环上、任务阶段的某个任务里兑现。
+一个任务排入的 promise job 在下一个任务之前运行，和浏览器一样。等待响应的 fetch 和等待数据块的读取会让 `Run` 继续运行，
+没人读的响应体不会。和 Node.js 一样，`AbortSignal.timeout` 本身不让循环继续运行，使用这个 signal 的 fetch 才会。
+
+### 流式读取
+
+响应体是一个 `ReadableStream`。它的数据源只在流需要数据块时，也就是有读取在等待而队列为空时，才在一个 goroutine 上读取
+`http.Response` 的 body。Go 这一侧从不抢在 JavaScript 前面读取。读得慢的一方因此会通过 TCP 流量控制拖住服务器，内存占用以 socket 缓冲区为上限。
+
+```js
+const response = await fetch(url, { method: "POST", body, signal });
+const reader = response.body.getReader();
+for (;;) {
+  const { done, value } = await reader.read(); // value 是 Uint8Array
+  if (done) break;
+  onText(decoder.decode(value, { stream: true }));
+}
+```
+
+每个数据块都是一个 `Uint8Array`，内容是对 body 的一次读取返回的字节。至少填满读缓冲区一半的数据块直接交出，不复制；
+更小的数据块复制到一个刚好够大的缓冲区里，读缓冲区留给下一次读取。读缓冲区从 16 KiB 开始，读取一直填满时增长到 256 KiB；
+设置了 `MemoryLimit` 时最多增长到上限的八分之一，且不小于 4 KiB，这样一次只保留一个数据块的脚本离上限还很远。
+`for await (const chunk of response.body)`、`pipeThrough` 和 `pipeTo` 也这样读取。JavaScript 没碰过流的响应，
+`text()`、`json()` 等方法在 Go 这一侧一次读完整个 body。被它们读取的 body 就是已使用的：它的流已锁定、已被扰动，
+再次读取、`clone()` 或 `text()` 都是 `TypeError`。
+
+交给 JavaScript 的每个字节都在分配之前、在循环上计入运行时的 `MemoryLimit`；在 `eventloop` 下，上限限制的是整次运行跨任务保留和分配的内存，
+见上文的内存上限一节。流式读取的数据块在交出它的那个任务里计入。整体读取的 body 随到随计：一个 goroutine 最多读到已计入部分之后一个窗口
+（最大的读缓冲区）或 body 末尾，循环先计入这些字节，再读下一个窗口。Go 持有的 body 最多比已计入的多一个窗口，比一个窗口小的 body
+只花一个任务。已读的字节虽然只有 Go 持有，也计入每一次对运行保留内存的测量，并且只计一次。这个包在循环上的计入属于宿主自己：
+将要越过上限时立即测量，和 `RebaseAllocation` 一样。计入失败时关闭 body，读取以带有上限消息的
+`RangeError` 拒绝，循环随之停止（`errors.Is(err, moejs.ErrMemoryLimit)`），和 JavaScript 自己分配超过上限时一样。无论额度如何，
+比上限还大的 body 都无法交出：`Content-Length` 大于上限的 body 在读取任何字节之前就被拒绝；否则到达上限的那个窗口会多读一个字节，
+读取在计入这个窗口之前就以 `RangeError` 拒绝，和知道结果放不下的内置函数抛出的一样，Go 持有的 body 只比上限多一点。使用按任务计算额度的 `eventloop.Options.ResetMemoryPerTask` 时，整体读取的 body 就以此为界。
+声明的 `Content-Length` 最多预分配 1 MiB，且不超过上限。gzip 和 deflate 编码的 body 按解码后的字节计算，所以会膨胀的 body 也以同样的方式受限。没有设置 `MemoryLimit` 的宿主可以在自己的
+`Transport` 里限制 body 大小，例如用一个把每个响应的 `Body` 包进 `io.LimitReader` 的 `RoundTripper`。`tee()` 和
+`clone()` 的分支持有一个分支已读、另一个分支还没读的数据块，和浏览器一样；这些数据块在交出时已经计入。字节流
+（包括响应体）的第二个分支拿到的是副本，副本同样计入。
+
+这个包替 JavaScript 保存的很多东西是内存上限的测量走不到的 Go 状态：流排队的数据块、source、sink 和 promise，`AbortSignal` 或
+`EventTarget` 的监听器和 reason，以 Go 字符串保存的头部值、URL 和查询参数，由字符串或缓冲区构造的 body 的字节。每个对象的状态在测量到达该对象时
+报告自己保存的东西（`moejs.LiveReporter`），所以只要 JavaScript 还能到达这个对象就计入，到达不了就不再计入，不必等 Go 的垃圾回收，
+程序也无法把内存藏在这些地方躲开上限。没有对象能通向的进行中的工作，即进行中的 fetch 及等待它的 async 函数、整体读取的 body 和
+`AbortSignal.timeout` 的计时器，在运行期间通过 `Runtime.AddLiveRoots` 报告，每次 `Install` 注册一次，`Close` 结束注册；没有上限时这个包
+不注册任何东西。这些 Go 字符串在被保存时计入，两个共享同一批字符串的对象（一个 `Headers` 和它的副本）都会计入它们。
+
+gzip 和 deflate 编码的 body 会被解码：请求没有自己设置 `Accept-Encoding` 时由 Go 的 transport 解码，否则由这个包解码。
+不解码 Brotli。
+
+### 取消和错误
+
+- `reader.cancel()`、`response.body.cancel()` 和从 `for await` 里 break，都会关闭 Go 的 body 并取消请求的 context。
+  body 立即关闭，即使正有一次读取阻塞在上面。因此自定义 `RoundTripper` 的响应 body 必须允许 `Close` 与 `Read` 并发，
+  并让这次 `Read` 返回，net/http 的 body 和 `io.Pipe` 都是这样。
+- 请求的 `AbortSignal`（`AbortController`、`AbortSignal.timeout`、`AbortSignal.any`）也会取消 context。响应到达之前，
+  fetch 以 signal 的 reason 拒绝；之后，响应体的流以这个 reason 出错，正在等待的读取也以它拒绝。默认的 reason 是
+  `AbortError` 类型的 `DOMException`，`AbortSignal.timeout` 的是 `TimeoutError`。
+- 响应之前的网络错误、被拒绝的请求和重定向错误都以 `TypeError: fetch failed` 拒绝。它的 `cause` 是一个 `Error`，
+  内容是 Go 错误的文本；常见情况下还带有 Node 的 `code`（`ECONNREFUSED`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`）。
+- 流式读取期间的错误（例如连接被重置）让流以 `TypeError: terminated` 出错，正在等待的和之后的读取都以它拒绝。
+- body 读完、出错、取消、中止以及 `Close` 都会立即关闭 body 并结束请求的 context，不等垃圾回收。作为最后的保障，
+  JavaScript 没读就丢掉的响应，其 body 会在回收器释放它时关闭。这可能晚很多，宿主不应依赖它：读完或取消 body，并调用 `Close`。
+
+### 冻结的内建对象和 polyfill
+
+这个包的全局对象放在全局对象上，而全局对象保持可扩展，所以它们能和共享的冻结内建对象一起安装。它们的原型属于运行时自己，不冻结。
+
+只补充缺失全局对象的 polyfill 可以和冻结的内建对象一起使用；重新赋值或修改内建对象的 polyfill 不行，因为内建对象的全局绑定被锁定了。
+例如在严格模式代码里给 `TextEncoder`、`TextDecoder`、`structuredClone` 或 `queueMicrotask` 赋值会抛出
+`Cannot assign to read only property`。这样的 polyfill 应当先检查，保留 moejs 自带的实现：
+
+```js
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = TextEncoderPolyfill;
+}
+```
+
+- 可以和冻结的内建对象一起用的 polyfill：只定义缺失对象的那些，例如 `if (!globalThis.X)` 形式的 URL、AbortController、
+  Streams、fetch 和 Headers polyfill，event-target 的 shim，以及 `web-streams-polyfill/ponyfill`。装了 `webapi` 包之后，
+  它们发现全局对象已经存在，什么也不做。
+- 需要 `Options{MutableIntrinsics: true}` 的 polyfill：替换或扩展内建对象的那些，例如无条件安装的 `TextEncoder`、
+  `Promise` 或 `Symbol` 的替代品、全局（非 pure）模式的 `core-js`，以及任何给 `Array.prototype`、`Object.prototype`
+  或 `String.prototype` 添加方法的代码。这时每个运行时有自己可修改的内建对象，创建成本约为默认的 25 倍。
+
+使用 `MutableIntrinsics` 时，`Install` 在脚本运行之前就取好包要调用的内建对象（`Promise` 及其 `then` 和 `resolve`、
+`Uint8Array`、`TextDecoder` 和 `String.prototype.normalize`），所以脚本之后替换或删除它们不会影响这个包；`Install`
+之前就缺失的，需要它的功能会抛出 `TypeError`。仍有一个钩子：`Promise.prototype.then` 会查找被调用的 promise 的
+species 构造函数，所以脚本定义的 `Promise[Symbol.species]` getter 或 promise 的 `constructor`，会在包自己的 promise
+反应里运行（一次 `pipeTo` 大约调用十几次）。共享的冻结内建对象没有这个钩子。
+
+### 限制
+
+- 不提供 `Blob`、`File` 和 `FormData`。这些类型的 body 是 `TypeError`，`blob()` 和 `formData()` 会拒绝。
+- 只支持 `http:` 和 `https:` URL，`data:`、`blob:` 和 `file:` URL 会拒绝。
+- 没有 CORS，除客户端的 `Jar` 外没有 cookie，没有缓存，也没有禁止的请求头。请求的 `Host` 头决定请求的主机，
+  `Allow` 能看到它，`AllowHosts` 会检查它。
+  `mode`、`credentials`、`cache`、`referrer` 和 `integrity` 保留在 `Request` 对象上，但不起作用。
+- 长于 4 KiB 的请求方法是 `TypeError`，真实的方法远没有这么长。
+- 重定向遵循 Go 的方法规则：301、302 和 303 把 `GET`、`HEAD` 以外的方法都改成 `GET`；Fetch 标准在 301 和 302 时只改 `POST`。
+  重定向到另一个源（scheme、主机或端口不同）时去掉 `Authorization`、`Cookie` 和 `Proxy-Authorization`，和 undici 一样。
+- 流：`type: "bytes"` 的流接受 `ArrayBufferView` 数据块，没有 `byobRequest`；`getReader({ mode: "byob" })` 抛出 `TypeError`。
+  数据源的 `pull` 不返回 promise 时立即算作完成，而不是晚一个微任务。
+- `URL` 遵循当前的 URL 标准，包括国际化域名，不报告不导致解析失败的校验错误。
+- `performance` 有 `now()`、`timeOrigin` 和 `toJSON()`，没有 mark、measure 和性能条目。
+
 ## 隔离
 
 ### 共享冻结的内建对象
