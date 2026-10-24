@@ -288,8 +288,15 @@ measurement, plus the one allocation that crosses that (an array's storage
 as it grows), and the runtime measures once the builtin returns or at the
 next call, or between two promise jobs; a builtin that goes past that
 margin stops, so `JSON.parse` of a text too large for the limit stops
-within it. A loop of builtin calls is measured at each iteration once one
-passed the limit.
+within it: the parser charges its own stacks as they grow, where an
+array's or object's entries wait until it closes, so an array of millions
+of numbers stops as one of objects does. A loop of builtin calls is
+measured at each iteration once one passed the limit. A run that ends
+with an allocation past the limit (the script's last statement, a host
+function that ignored its charge's error) fails itself, after a
+measurement where one was pending: its overage never stops the next run
+unannounced, which starts clean once the host clears the interrupt and
+resets the budget, as after any hit.
 `ParseJSON`, `ParseJSONString` and `FromGo` wait in the same way. An
 allocation of the host's own Go code outside any call, and its
 `ChargeMemory` where no script runs (a loop's task, or a host function

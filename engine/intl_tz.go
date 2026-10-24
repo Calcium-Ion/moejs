@@ -1,5 +1,9 @@
 package engine
 
+// The zone names are ported from ICU's TimeZoneFormat, TimeZoneNames and
+// TimeZoneGenericNames (icu4c/source/i18n/tzfmt.cpp, tznames_impl.cpp and
+// tzgnames.cpp; Unicode License v3; see THIRD_PARTY_NOTICES).
+
 // Time zones of Intl.DateTimeFormat (ECMA-402 §6.5 and §11, ECMA-262
 // §21.4.1.19 and IsTimeZoneOffsetString): the available named time zone
 // identifiers (intl_tz_tables.go: the Zone and Link names of tzdata, each

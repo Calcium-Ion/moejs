@@ -1,5 +1,8 @@
 package compiler
 
+// calleePrinter is ported from V8's CallPrinter (src/ast/prettyprinter.cc;
+// BSD-3-Clause; see THIRD_PARTY_NOTICES).
+
 import (
 	"math"
 	"slices"

@@ -179,13 +179,16 @@ type memAccount struct {
 	holding int32
 	held    int64
 	// jsonText is the share root of the strings a parse in progress reads
-	// out of its text (shareText); nil between parses.
-	jsonText *String
-	total    int64 // charged since the limit was set
-	counts   [memKinds]int64
-	hits     int64
-	last     *MemoryLimitError // the last hit's, since the last reset or rebase
-	hitting  bool              // memoryLimitHit runs: its own charges do not hit again
+	// out of its text (shareText); nil between parses. jsonVals and
+	// jsonKeys are the capacities of the parse's value and key stacks last
+	// seen (jsonParser.every), whose growth is charged.
+	jsonText           *String
+	jsonVals, jsonKeys int
+	total              int64 // charged since the limit was set
+	counts             [memKinds]int64
+	hits               int64
+	last               *MemoryLimitError // the last hit's, since the last reset or rebase
+	hitting            bool              // memoryLimitHit runs: its own charges do not hit again
 	// hostCharge tells that the charge being made is the host's
 	// (ChargeMemory), which with no frame running measures at once
 	// (builtinRuns).
@@ -406,6 +409,7 @@ func (r *Realm) overBudgetSlow(n int) bool {
 		return m.allocated+int64(n) > m.room
 	case measureWaits:
 		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.endRunSees()
 		return m.allocated+m.flat.Load()+int64(n) > m.room+m.slack()
 	}
 	return true
@@ -446,6 +450,7 @@ func (r *Realm) overLimit(m *memAccount, n int64) bool {
 		// The interpreter measures at its next check of the flag, once the
 		// builtin returned (pendingInterrupt).
 		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.endRunSees()
 		return m.allocated <= m.room+m.slack()
 	}
 	return false
@@ -479,6 +484,7 @@ func (r *Realm) memoryLimitHit(m *memAccount) {
 	m.hits++
 	m.last = e
 	r.Interrupt(e)
+	r.endRunSees()
 }
 
 // shareText sets the share root of the strings a parse reads out of src

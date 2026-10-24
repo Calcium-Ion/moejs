@@ -1,5 +1,8 @@
 package engine
 
+// Ported from ICU's SimpleDateFormat (icu4c/source/i18n/smpdtfmt.cpp;
+// Unicode License v3; see THIRD_PARTY_NOTICES).
+
 // Formatting with a date pattern, as ICU's SimpleDateFormat does: the
 // pattern compiles once into literal runs and fields, and a time value
 // formats into UTF-8 bytes, with the span of each field for formatToParts.

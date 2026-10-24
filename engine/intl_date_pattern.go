@@ -1,5 +1,8 @@
 package engine
 
+// Ported from ICU's DateTimePatternGenerator (icu4c/source/i18n/dtptngen.cpp;
+// Unicode License v3; see THIRD_PARTY_NOTICES).
+
 // The pattern generator of Intl.DateTimeFormat: a port of ICU 78's
 // DateTimePatternGenerator (dtptngen.cpp), which V8 asks for the best
 // pattern of the skeleton it builds from the options. A locale's pattern

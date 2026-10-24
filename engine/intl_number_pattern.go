@@ -1,5 +1,9 @@
 package engine
 
+// Ported from ICU's number pattern code (icu4c/source/i18n/
+// number_patternstring.cpp, number_affixutils.cpp and
+// number_patternmodifier.cpp; Unicode License v3; see THIRD_PARTY_NOTICES).
+
 // The number patterns of CLDR as ICU reads them (number_patternstring.cpp,
 // number_affixutils.cpp, number_patternmodifier.cpp): a pattern's positive
 // and negative affixes and grouping sizes, and the rendering of an affix

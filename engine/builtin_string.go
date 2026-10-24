@@ -1148,6 +1148,9 @@ func stringProtoSplit(r *Realm, this Value, args []Value) (Value, error) {
 	}
 	if sep.Len() == 0 {
 		count := min(n, int(lim))
+		if r.overBudget(count * valueSize) {
+			return Undefined(), r.RangeError("Invalid array length")
+		}
 		items := make([]Value, count)
 		for i := range items {
 			items[i] = StringValue(charString(s.At(i)))
@@ -1177,6 +1180,11 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 		count := strings.Count(str, sp) + 1
 		if uint32(count) > lim {
 			count = int(lim)
+		}
+		// The pieces' list and Strings, allocated at once: past the memory
+		// limit it throws rather than allocate them.
+		if r.overBudget(count * (valueSize + stringHeaderSize)) {
+			return nil, r.RangeError("Invalid array length")
 		}
 		items := make([]Value, count)
 		pieces := make([]String, count) // one allocation for every piece
@@ -1214,7 +1222,7 @@ func splitByString(r *Realm, s, sep *String, lim uint32) (*Object, error) {
 		if q < 0 {
 			break
 		}
-		items = append(items, StringValue(r.substring(s, p, q)))
+		items = r.appendValue(items, StringValue(r.substring(s, p, q)))
 		if uint32(len(items)) == lim {
 			return r.NewArrayFromSlice(items), nil
 		}

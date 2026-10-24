@@ -147,7 +147,10 @@ These run, with a result that differs from the specification:
   function and its pattern's parts, so it counts less than such an object
   keeps. A name atom of compiled code that data still uses after the code
   is freed stays a constant the measurement skips, at most 64 bytes for
-  each such name.
+  each such name. A parse for `FromGo` (a `json.RawMessage` it
+  materializes) charges its stacks but cannot stop. `Object.keys`,
+  `values` and `entries` allocate their list before it is charged, at
+  most the size of the object, which is counted already.
 - `webapi`: under the memory limit a whole-body read such as `text()`
   never takes a body larger than the limit; without a limit nothing
   bounds such a body but the host's `Transport`. A charge it makes that

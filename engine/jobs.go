@@ -99,13 +99,14 @@ func (r *Realm) endJob(err error) error {
 	r.jobsPending = false
 	j.clearKept()
 	if len(j.queue) == 0 {
+		err = r.endRun(err)
 		j.result = Undefined()
 		return err
 	}
 	if _, ok := err.(*InterruptedError); ok {
 		j.result = Undefined()
 		r.dropJobs(nil, err)
-		return err
+		return r.endRun(err)
 	}
 	j.draining = true
 	defer func() { j.draining, r.jobsPending, j.result = false, j.pending(), Undefined() }()
@@ -144,7 +145,49 @@ func (r *Realm) endJob(err error) error {
 	if cap(j.queue) > 1024 {
 		j.queue = nil
 	}
+	return r.endRun(err)
+}
+
+// endRun ends a run, the outermost call's return (endJob), which a measurement
+// of the memory limit left pending or a hit of it made reach endJob as a
+// queued job does (endRunSees): see endRunSlow.
+func (r *Realm) endRun(err error) error {
+	if r.interruptFlag.Load() == 0 {
+		return err
+	}
+	return r.endRunSlow(err)
+}
+
+// endRunSlow makes a run end with its own overage, never the next run's.
+// No frame runs, so the end of the run is a safe point, as a host's rebase
+// is: a pending measurement is made while what was allocated is past the
+// limit, with the call's result as a root (jobState.result). A hit, this
+// one's or one no check of the interpreter came after (a builtin's last
+// allocation before the script ended, a host function that ignored its
+// charge's error), is the run's error. The interrupt stays pending and the
+// budget spent, as after any hit (ClearInterrupt, ResetAllocation).
+//
+//go:noinline
+func (r *Realm) endRunSlow(err error) error {
+	m := r.mem()
+	if r.interruptFlag.CompareAndSwap(flagMeasure, 0) && m != nil && m.allocated > m.room && !m.measuring && !m.hitting {
+		if r.rebase(m, nil) && m.lastLive > m.limit {
+			r.memoryLimitHit(m)
+		}
+	}
+	if r.interruptFlag.Load() < 0 {
+		if _, ok := err.(*InterruptedError); !ok {
+			err = r.interruptError()
+		}
+	}
 	return err
+}
+
+// endRunSees makes the end of the run see a pending measurement or a hit
+// (endRun) as it sees a queued job: the outermost return calls endJob.
+func (r *Realm) endRunSees() {
+	r.jobState()
+	r.jobsPending = true
 }
 
 // dropJobs drops the queued jobs for the interrupt err, which stopped the

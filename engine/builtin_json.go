@@ -210,14 +210,16 @@ func (p *jsonParser) parseText(src string, text *String) (Value, error) {
 	if l.json == nil {
 		l.json = &jsonStack{}
 	}
+	p.stack, p.keys = l.json.vals, l.json.keys
 	if m := l.mem; m != nil {
 		// The tree is held only by the parser until it returns: a charge
 		// made meanwhile waits (holding; a Go panic leaves it to
-		// RestoreCallState).
+		// RestoreCallState). The stacks' growth is charged as it goes
+		// (every), past the room the kept ones have.
 		m.shareText(src, text)
 		m.holding++
+		m.jsonVals, m.jsonKeys = cap(p.stack), cap(p.keys)
 	}
-	p.stack, p.keys = l.json.vals, l.json.keys
 	p.skipWS()
 	v, err := p.value()
 	if err == nil {
@@ -259,6 +261,34 @@ func (s *jsonStack) keep(vals []Value, keys []PropertyKey, used int) {
 // the container's entries where they are: keep clears the stacks once, up
 // to the largest length. Clearing them at each container would cost a bulk
 // write barrier per container while the collector marks.
+// every runs every 4096 values: under a memory limit it charges what the
+// value and key stacks grew by since it last looked, the capacity added to
+// their high-water mark (memAccount.jsonVals, jsonKeys), so that what is
+// charged is what the parse holds, a stack reused once a container closed
+// charging nothing again, and a large array or object, whose entries wait
+// on the stacks until it closes, stops within the limit's margin; and, but
+// in a quiet parse, it checks for an interrupt, the limit's hit included.
+// (Charging each growth's whole new array, as Go allocates it, made the
+// 1.25x steps of a large stack count five times what it held.)
+//
+//go:noinline
+func (p *jsonParser) every() error {
+	if m := p.r.mem(); m != nil {
+		if c := cap(p.stack); c > m.jsonVals {
+			p.r.chargeSlow((c-m.jsonVals)*valueSize, memBytes)
+			m.jsonVals = c
+		}
+		if c := cap(p.keys); c > m.jsonKeys {
+			p.r.chargeSlow((c-m.jsonKeys)*int(unsafe.Sizeof(PropertyKey{})), memBytes)
+			m.jsonKeys = c
+		}
+	}
+	if p.quiet {
+		return nil
+	}
+	return p.r.CheckInterrupt()
+}
+
 func (p *jsonParser) closed() {
 	if n := len(p.stack); n > int(p.used) {
 		p.used = uint16(min(n, math.MaxUint16))
@@ -313,8 +343,8 @@ func (p *jsonParser) unexpected() error {
 
 func (p *jsonParser) value() (Value, error) {
 	p.work++
-	if p.work&4095 == 0 && !p.quiet {
-		if err := p.r.CheckInterrupt(); err != nil {
+	if p.work&4095 == 0 {
+		if err := p.every(); err != nil {
 			return Undefined(), err
 		}
 	}

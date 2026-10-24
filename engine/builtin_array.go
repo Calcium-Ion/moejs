@@ -418,7 +418,7 @@ func arrayFrom(r *Realm, this Value, args []Value) (Value, error) {
 			}
 			if v, err = mapValue(v, k); err == nil {
 				if usesList {
-					list = append(list, v)
+					list = r.appendValue(list, v) // its growth charged
 					if hold != nil {
 						hold.elements = list
 					}

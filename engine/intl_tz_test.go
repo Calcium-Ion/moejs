@@ -176,14 +176,24 @@ func TestIntlZoneNames(t *testing.T) {
 	require.Equal(t, "UTC+0 | heure moyenne de Greenwich | UTC+0 | UTC+00:00 | heure : Côte d’Ivoire | heure moyenne de Greenwich", names("Africa/Abidjan", "fr", jan))
 	require.Equal(t, "MST | Mountain Standard Time | GMT-7 | GMT-07:00 | MST | Mountain Standard Time", names("America/Phoenix", "en", jul))
 	require.Equal(t, "GMT+1 | GMT+01:00 | GMT+1 | GMT+01:00 | United Kingdom Time | United Kingdom Time", names("Europe/London", "en", time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC)))
-	// The region of the generic styles' reference zone: Vancouver keeps
-	// UTC-07:00 from 2026-11-01 (ICU: permanent PDT), Los Angeles does
-	// not, so for US the name gets its location and for CA it does not.
+	// The region of the generic styles' reference zone: where Vancouver's
+	// offset is not Los Angeles's (from 2026-11-01 Vancouver keeps
+	// UTC-07:00 in tzdata 2026c and later, ICU's permanent PDT), for US the
+	// name gets its location; for CA, whose reference zone Vancouver is,
+	// it never does. The offsets are the host database's, the zones' rules.
 	van := intlTZMustZone(t, "America/Vancouver")
-	tv2045 := float64(time.Date(2045, 1, 15, 0, 0, 0, 0, time.UTC).UnixMilli())
-	require.Equal(t, "Pacific Time (Canada)", string(van.appendNameFor(nil, en, "US", intlZoneLongGeneric, tv2045)))
-	require.Equal(t, "Pacific Time (Canada)", string(van.appendName(nil, en, intlZoneLongGeneric, tv2045)))
-	require.Equal(t, "Pacific Time", string(van.appendNameFor(nil, en, "CA", intlZoneLongGeneric, tv2045)))
+	for _, tm := range []time.Time{jan, time.Date(2045, 1, 15, 0, 0, 0, 0, time.UTC)} {
+		tv := float64(tm.UnixMilli())
+		us := "Pacific Time"
+		_, vanOff := tm.In(van.loc).Zone()
+		_, laOff := tm.In(intlTZMustZone(t, "America/Los_Angeles").loc).Zone()
+		if vanOff != laOff {
+			us = "Pacific Time (Canada)"
+		}
+		require.Equal(t, us, string(van.appendNameFor(nil, en, "US", intlZoneLongGeneric, tv)), tm)
+		require.Equal(t, us, string(van.appendName(nil, en, intlZoneLongGeneric, tv)), tm)
+		require.Equal(t, "Pacific Time", string(van.appendNameFor(nil, en, "CA", intlZoneLongGeneric, tv)), tm)
+	}
 	old := time.Date(1800, 1, 1, 0, 0, 0, 0, time.UTC)
 	require.Equal(t, "GMT-4:56:02 | GMT-04:56:02 | GMT-4:56:02 | GMT-04:56:02 | New York Time | New York Time", names("America/New_York", "en", old))
 }
@@ -312,9 +322,10 @@ func TestIntlZoneOfLocation(t *testing.T) {
 // TestIntlLocalZone runs the test binary with several values of TZ and
 // checks the zone of time.Local.
 func TestIntlLocalZone(t *testing.T) {
+	jan := float64(time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC).UnixMilli())
 	if os.Getenv("MOEJS_INTL_TZ_CHILD") != "" {
 		z := intlZoneOfLocation(time.Local)
-		_, off, _ := z.at(float64(time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC).UnixMilli()))
+		_, off, _ := z.at(jan)
 		fmt.Printf("%s %d\n", z.id, off)
 		return
 	}
@@ -342,13 +353,22 @@ func TestIntlLocalZone(t *testing.T) {
 	} {
 		require.Equal(t, c[1], run("TZ="+c[0]), "TZ=%q", c[0])
 	}
-	// TZ unset: /etc/localtime.
-	want := "UTC"
-	if n := intlZoneNameOfPath("/etc/localtime"); n != "" {
-		want = intlTZPrimaryOf(n)
+	// TZ unset: Go's time.Local has the rules of /etc/localtime (UTC
+	// without one), which intlSystemZoneName names by its link, else by
+	// /etc/timezone (a copied /etc/localtime has no link).
+	want := "UTC 0"
+	if data, err := os.ReadFile("/etc/localtime"); err == nil {
+		name := intlZoneNameOfPath("/etc/localtime")
+		if b, err := os.ReadFile("/etc/timezone"); name == "" && err == nil {
+			name = strings.TrimSpace(string(b))
+		}
+		if loc, err := time.LoadLocationFromTZData(name, data); err == nil {
+			z := intlNewLocalZone(loc)
+			_, off, _ := z.at(jan)
+			want = fmt.Sprintf("%s %d", z.id, off)
+		}
 	}
-	got := run()
-	require.True(t, strings.HasPrefix(got, want+" "), "%s, /etc/localtime %s", got, want)
+	require.Equal(t, want, run(), "TZ unset")
 }
 
 // TestIntlZoneConcurrent resolves and names every zone from several

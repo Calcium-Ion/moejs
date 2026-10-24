@@ -1,5 +1,9 @@
 package engine
 
+// Ported from ICU's number formatter and NumberRangeFormatter
+// (icu4c/source/i18n/number_*.cpp and numrange_impl.cpp; Unicode License v3;
+// see THIRD_PARTY_NOTICES).
+
 // The formatter of Intl.NumberFormat: a resolved NumberFormat formats an
 // exact decimal (intl_decimal.go) as ICU 78 does (number_formatimpl.cpp):
 // the number's digits with grouping and the locale's symbols, wrapped by

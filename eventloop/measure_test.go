@@ -68,38 +68,45 @@ func runScriptLimit(t *testing.T, loop *eventloop.Loop, src string, limit int64)
 // TestMemoryLimitMeasuresWithoutBlockingPosters: a goroutine posting tasks
 // (RunOnLoop, or a settle function) is not held up by the loop's
 // measurements of the heap, which walk tens of MiB of small objects: the
-// loop holds its mutex only while it adds its roots.
+// loop holds its mutex only while it adds its roots. A root provider runs
+// inside each measurement the loop makes, on the loop's goroutine; there
+// it posts from another goroutine and waits for the post, which completes
+// before the measurement does unless the measurement holds the loop's
+// mutex, when it waits until its timeout (no time is compared but that).
 func TestMemoryLimitMeasuresWithoutBlockingPosters(t *testing.T) {
 	const limit = 128 << 20
 	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: limit})
 	loop, err := eventloop.New(rt, eventloop.Options{})
 	require.NoError(t, err)
-	var stop atomic.Bool
+	var posted, blocked atomic.Int64
 	var worst atomic.Int64
-	posted := make(chan struct{})
-	go func() {
-		defer close(posted)
-		for !stop.Load() {
-			start := time.Now()
+	remove := rt.AddLiveRoots(func(func(moejs.Value)) {
+		done := make(chan struct{})
+		start := time.Now()
+		go func() {
 			loop.RunOnLoop(func(*moejs.Runtime) {})
+			close(done)
+		}()
+		select {
+		case <-done:
+			posted.Add(1)
 			if d := int64(time.Since(start)); d > worst.Load() {
 				worst.Store(d)
 			}
-			time.Sleep(100 * time.Microsecond)
+		case <-time.After(30 * time.Second):
+			blocked.Add(1)
 		}
-	}()
+	})
 	// 48 MiB kept in small objects; each step allocates a quarter of what
 	// the limit leaves, so that about every other step measures.
-	start := time.Now()
 	err = runScript(t, loop, keepSmall(t, 48<<20, 40, 20<<20, 20<<20))
-	took := time.Since(start)
-	stop.Store(true)
-	<-posted
+	remove()
 	loop.Terminate()
 	require.NoError(t, err)
-	st := rt.Stats()
-	t.Logf("40 steps in %v; measured %d MiB live; the longest RunOnLoop call took %v", took, st.LiveBytes>>20, time.Duration(worst.Load()))
-	assert.Less(t, time.Duration(worst.Load()), 10*time.Millisecond, "a post waited for a measurement")
+	t.Logf("%d posts made inside measurements (measured %d MiB live), the longest in %v; %d waited for the measurement",
+		posted.Load(), rt.Stats().LiveBytes>>20, time.Duration(worst.Load()), blocked.Load())
+	assert.Positive(t, posted.Load(), "no measurement ran")
+	assert.Zero(t, blocked.Load(), "a post waited for a measurement")
 }
 
 // TestMemoryLimitNearLimitCost: a program that keeps most of its limit in

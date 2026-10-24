@@ -1,5 +1,9 @@
 package engine
 
+// The formatting is ported from V8's stack trace serialization
+// (src/objects/call-site-info.cc and the functions it calls; BSD-3-Clause;
+// see THIRD_PARTY_NOTICES).
+
 import (
 	"math"
 	"strconv"

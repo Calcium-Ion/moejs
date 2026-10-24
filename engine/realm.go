@@ -183,8 +183,9 @@ type Realm struct {
 	// buildingShared is true while the process-wide template is built.
 	// internLookups counts interning through the process-wide tables before
 	// the realm's caches exist (intern.go). jobsPending is set when a job is
-	// queued or an object kept alive for the current job, and cleared when
-	// the end of a job leaves neither (jobs.go). They and callDepth share two
+	// queued, an object kept alive for the current job, or the memory limit
+	// left the run's end work (endRunSees), and cleared when the end of a
+	// job leaves none (jobs.go). They and callDepth share two
 	// words with interruptFlag: the Realm is exactly a 288-byte size class.
 	coldGlobals      uint32
 	sharedIntrinsics bool

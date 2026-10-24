@@ -36,6 +36,11 @@ import (
 
 const version = "48.0"
 
+// notice follows the generated-code line of each output: the source and
+// license of its data.
+const notice = "// The tables hold Unicode CLDR " + version + " data, under the Unicode License v3;\n" +
+	"// see THIRD_PARTY_NOTICES.\n\n"
+
 const (
 	zipURL    = "https://unicode.org/Public/cldr/48/cldr-common-48.zip"
 	zipSHA512 = "07c69a6472b6446f2cf940fb2b22e48718e53ec458dc9733487869a851519f77" +

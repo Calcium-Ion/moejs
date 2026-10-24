@@ -1,5 +1,9 @@
 package engine
 
+// Ported from ICU's DateIntervalFormat and DateIntervalInfo
+// (icu4c/source/i18n/dtitvfmt.cpp and dtitvinf.cpp; Unicode License v3; see
+// THIRD_PARTY_NOTICES).
+
 // formatRange and formatRangeToParts of Intl.DateTimeFormat: a port of ICU
 // 78's DateIntervalFormat as V8 uses it. V8 makes the interval formatter
 // from the skeleton of the formatter's pattern, in its locale with the

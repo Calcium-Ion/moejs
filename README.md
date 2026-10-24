@@ -347,16 +347,16 @@ additions such as the `Set` methods, `Promise.try`, `Float16Array`,
 expressions support every flag and Unicode 17 properties, and `Date` takes
 its time zones from Go.
 
-On [test262](https://github.com/tc39/test262), 79,845 tests pass and 0
-fail. The other 14,234 tests use features moejs does not implement and are
+On [test262](https://github.com/tc39/test262), 80,971 tests pass and 0
+fail. The other 14,268 tests use features moejs does not implement and are
 skipped. Results by directory are in
 [bench/test262/RESULTS.md](bench/test262/RESULTS.md).
 
 Not implemented: import attributes and JSON modules, `using` declarations
-and `DisposableStack`, decorators, iterator helpers, `Intl.Collator` and
-the other `Intl` constructors but `Intl.Locale`, `Intl.Segmenter`,
-`Intl.NumberFormat`, `Intl.DateTimeFormat` and `Intl.PluralRules` (whose
-number and date data cover eleven languages), `Temporal`, `ShadowRealm`, `FinalizationRegistry` and `JSON.rawJSON`. A bare `Runtime`
+and `DisposableStack`, decorators, iterator helpers, `Intl.Collator`,
+`Intl.RelativeTimeFormat`, `Intl.ListFormat`, `Intl.DisplayNames`,
+`Intl.DurationFormat`, `Temporal`, `ShadowRealm`, `FinalizationRegistry`
+and `JSON.rawJSON`. A bare `Runtime`
 has no timers; the `eventloop` package installs them. [TODO.md](TODO.md)
 lists all of these, the known wrong results and the limits.
 
@@ -387,7 +387,11 @@ cd bench && go test -timeout 30m ./...
 ## Acknowledgements
 
 moejs takes design ideas from these projects. Its code was written
-independently.
+independently, except for the parts [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)
+lists: Intl's date, time zone and number formatting is ported from
+[ICU](https://icu.unicode.org/), and the `Date.parse` parser, the stack
+trace format and the callee text of "is not a function" errors from V8.
+Intl's locale data is [Unicode CLDR](https://cldr.unicode.org/).
 
 - [goja](https://github.com/dop251/goja) and [Sobek](https://github.com/grafana/sobek):
   the Go interop conventions and the `Export` rules. Sobek is also the
@@ -417,7 +421,10 @@ independently.
 
 ## License
 
-moejs is licensed under the [Apache License 2.0](LICENSE).
+moejs is licensed under the [Apache License 2.0](LICENSE). It contains Unicode
+CLDR and Unicode Character Database data and code ported from ICU and V8,
+which are under their own licenses.
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) lists them with their full texts. A program that embeds moejs ships those notices too.
 
 The benchmarks run new-api's task plugins, which are licensed under AGPL-3.0
 and downloaded separately by

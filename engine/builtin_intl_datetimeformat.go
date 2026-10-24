@@ -1,5 +1,9 @@
 package engine
 
+// The skeleton and hour cycle helpers are ported from V8's
+// src/objects/js-date-time-format.cc (BSD-3-Clause), the style patterns
+// from ICU's SimpleDateFormat (Unicode License v3); see THIRD_PARTY_NOTICES.
+
 // Intl.DateTimeFormat (ECMA-402 §11) with the Gregorian calendar, whose
 // output equals V8's with ICU 78: the constructor reads its options in the
 // specification's order and resolves the locale with the "ca", "hc" and "nu"
