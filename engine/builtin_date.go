@@ -487,15 +487,6 @@ var (
 	dateProtoToUTCString  = dateStringMethod("toUTCString", func(_ *Realm, tv float64) *String {
 		return dateToUTCString(tv)
 	})
-	dateProtoToLocaleString = dateStringMethod("toLocaleString", func(r *Realm, tv float64) *String {
-		return r.dateToLocaleString(tv, true, true)
-	})
-	dateProtoToLocaleDateString = dateStringMethod("toLocaleDateString", func(r *Realm, tv float64) *String {
-		return r.dateToLocaleString(tv, true, false)
-	})
-	dateProtoToLocaleTimeString = dateStringMethod("toLocaleTimeString", func(r *Realm, tv float64) *String {
-		return r.dateToLocaleString(tv, false, true)
-	})
 )
 
 func dateProtoToISOString(r *Realm, this Value, args []Value) (Value, error) {

@@ -187,15 +187,17 @@ func (l *Loop) setTimer(r *moejs.Realm, name string, args []moejs.Value, repeat 
 	o := r.NewObjectWithProto(l.timeoutPrototype())
 	o.SetInternal(t)
 	t.this = engine.ObjectValue(o)
+	// Nothing allocates for JavaScript with l.mu held (roots).
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.terminated {
+		l.mu.Unlock()
 		return moejs.Undefined(), terminatedError(r, name)
 	}
 	l.lastID++
 	t.id = l.lastID
 	t.when = l.now() + t.delay
 	l.push(t)
+	l.mu.Unlock()
 	return t.this, nil
 }
 
@@ -239,13 +241,15 @@ func (l *Loop) setImmediate(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (
 	o := r.NewObjectWithProto(l.immediatePrototype())
 	o.SetInternal(im)
 	im.this = engine.ObjectValue(o)
+	// Nothing allocates for JavaScript with l.mu held (roots).
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.terminated {
+		l.mu.Unlock()
 		return moejs.Undefined(), terminatedError(r, "setImmediate")
 	}
 	l.immediates = append(l.immediates, im)
 	l.refs++
+	l.mu.Unlock()
 	return im.this, nil
 }
 

@@ -1,5 +1,9 @@
 package engine
 
+// The formatting is ported from V8's stack trace serialization
+// (src/objects/call-site-info.cc and the functions it calls; BSD-3-Clause;
+// see THIRD_PARTY_NOTICES).
+
 import (
 	"math"
 	"strconv"
@@ -577,7 +581,7 @@ func holdsFunction(c propCell, fn *Object) bool {
 // the name inference gives up.
 func (r *Realm) stackStep(steps *int) bool {
 	*steps++
-	return *steps%interruptStride == 0 && r.interruptFlag.Load() != 0
+	return *steps%interruptStride == 0 && r.interrupted()
 }
 
 // isIdentifierName is V8's String::IsIdentifier.

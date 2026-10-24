@@ -41,6 +41,13 @@ const (
 	ClassTypedArray
 	ClassTextEncoder
 	ClassTextDecoder
+	ClassIntlLocale
+	ClassIntlSegmenter
+	ClassIntlSegments
+	ClassIntlSegmentIterator
+	ClassIntlNumberFormat
+	ClassIntlPluralRules
+	ClassIntlDateTimeFormat
 )
 
 var classNames = [...]string{
@@ -76,6 +83,13 @@ var classNames = [...]string{
 	ClassTypedArray:           "TypedArray",
 	ClassTextEncoder:          "TextEncoder",
 	ClassTextDecoder:          "TextDecoder",
+	ClassIntlLocale:           "Intl.Locale",
+	ClassIntlSegmenter:        "Intl.Segmenter",
+	ClassIntlSegments:         "Segments",
+	ClassIntlSegmentIterator:  "Segmenter String Iterator",
+	ClassIntlNumberFormat:     "Intl.NumberFormat",
+	ClassIntlPluralRules:      "Intl.PluralRules",
+	ClassIntlDateTimeFormat:   "Intl.DateTimeFormat",
 }
 
 // String returns the class name ("Object", "Array", ...).

@@ -23,6 +23,14 @@ const (
 	// strCharged marks a rope allocated as a ropeNode (memlimit.go): its
 	// flattening is charged to the account the node holds.
 	strCharged
+	// strConst marks a string constant of compiled code that every realm
+	// running it shares (funcMeta): the live measurement does not count it,
+	// as it does not count the shared shapes (memlive.go).
+	strConst
+	// strHost marks a string FromGo carved from its slab of Strings
+	// (hostHeap.str): a string that shares its units does not keep it
+	// (shareRoot), which would keep the slab and its other strings.
+	strHost
 )
 
 // String.json states; 0 is nothing known. jsonDeferred is the top bit, so
@@ -63,14 +71,18 @@ type String struct {
 	// ASCII), or a strRope's left child; one field for both keeps String
 	// in the 48-byte size class. units and children read it.
 	p unsafe.Pointer
-	// right is a strRope's right child.
+	// right is a strRope's right child. A flat string that shares the
+	// units of another, a substring or a value JSON.parse read out of a
+	// text, keeps that string here (its share root, shareRoot): the units
+	// it shares keep the whole of the root's alive, which the live
+	// measurement counts once (memlive.go).
 	right *String
 	n     int32  // length in code units
 	hash  uint32 // 0 = not computed
 	atom  uint32 // 0 = not interned
 	kind  uint8
-	// flags holds strInBuf and strCharged, both set when the String is
-	// made and never changed.
+	// flags holds strInBuf, strCharged, strConst and strHost, set when the
+	// String is made and never changed.
 	flags uint8
 	// numeric marks an atom that is a canonical numeric string other than
 	// an array index ("-0", "1.5", "NaN"): the keys a typed array answers
@@ -509,9 +521,43 @@ func (s *String) Substring(start, end int) *String {
 		return s.ropeSubstring(start, end)
 	}
 	if s.kind == strASCII {
-		return &String{s: s.s[start:end], n: int32(end - start), kind: strASCII}
+		return &String{s: s.s[start:end], n: int32(end - start), kind: strASCII, right: s.shareRoot()}
 	}
-	return FromUTF16(s.units()[start:end])
+	return s.shareUnits(FromUTF16(s.units()[start:end]))
+}
+
+// shareRoot returns the string whose units the flat string s shares, s
+// itself when it shares none: what a substring of s keeps alive. It
+// returns nil for a string shorter than shareMin, whose substrings count
+// their own units (at most shareMin more are kept), and for a string
+// FromGo carved from its slab (strHost), whose units are the host's Go
+// string: a substring keeps those alone, as before, uncounted.
+func (s *String) shareRoot() *String {
+	if r := s.right; r != nil {
+		return r
+	}
+	if s.n < shareMin || s.flags&strHost != 0 {
+		return nil
+	}
+	return s
+}
+
+// shareMin is the length from which a substring keeps its string as its
+// share root: below it, keeping the string's header too would cost more
+// than the units the measurement does not see.
+const shareMin = 64
+
+// shareUnits records in sub, made of units of s, that it shares them
+// (FromUTF16 keeps the units of a string that is not all ASCII).
+func (s *String) shareUnits(sub *String) *String {
+	if sub.kind == strUTF16 {
+		if s.kind == strRope {
+			sub.right = s
+		} else {
+			sub.right = s.shareRoot()
+		}
+	}
+	return sub
 }
 
 // The rope branches of the hot string operations below are out of line,
@@ -522,9 +568,9 @@ func (s *String) Substring(start, end int) *String {
 func (s *String) ropeSubstring(start, end int) *String {
 	f := s.flat(new(String))
 	if f.kind == strASCII {
-		return &String{s: f.s[start:end], n: int32(end - start), kind: strASCII}
+		return &String{s: f.s[start:end], n: int32(end - start), kind: strASCII, right: s}
 	}
-	return FromUTF16(f.units()[start:end])
+	return s.shareUnits(FromUTF16(f.units()[start:end]))
 }
 
 // Hash returns the cached content hash (never 0).

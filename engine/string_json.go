@@ -299,17 +299,33 @@ func (p *jsonParser) plain(lit string) *String {
 		return emptyString
 	}
 	if len(lit) > jsonShortMax {
-		p.r.chargeString(0)
+		if lz := p.r.lazy; lz != nil && lz.mem != nil {
+			return p.r.sharedPlain(lit)
+		}
 		return &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain}
 	}
 	slot := strSlot(lit)
 	if s := p.short[slot]; s != nil && s.s == lit {
 		return s
 	}
-	p.r.chargeString(0)
-	s := &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain}
+	var s *String
+	if lz := p.r.lazy; lz != nil && lz.mem != nil {
+		s = p.r.sharedPlain(lit)
+	} else {
+		s = &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain}
+	}
 	p.short[slot] = s
 	return s
+}
+
+// sharedPlain is plain's String of a realm with a memory limit: charged,
+// and with the text it shares the units of as its share root
+// (memAccount.jsonText), which the live measurement counts.
+//
+//go:noinline
+func (r *Realm) sharedPlain(lit string) *String {
+	r.chargeSlow(stringHeaderSize, memString)
+	return &String{s: lit, n: int32(len(lit)), kind: strASCII, json: jsonPlain, right: r.lazy.mem.jsonText}
 }
 
 // quoteASCII writes the quoted body of the ASCII string str. The interrupt
@@ -458,6 +474,9 @@ func (js *jsonStringifier) serialize(v Value) (ok bool, err error) {
 	depth := js.r.callDepth
 	if ok, err = js.write(rv); err != nil || !ok {
 		js.r.callDepth = depth // the levels an error leaves entered (push)
+		if !ok && err == nil && js.strict {
+			err = newJSONLoss(rv)
+		}
 		return false, err
 	}
 	return true, nil
@@ -475,7 +494,22 @@ func (js *jsonStringifier) serialize(v Value) (ok bool, err error) {
 // function that code calls may use dst: it is appended to when AppendJSON
 // returns, as append(dst, text...) would.
 func (r *Realm) AppendJSON(dst []byte, v Value) ([]byte, bool, error) {
-	js := jsonStringifier{r: r, raw: true}
+	return r.appendJSON(dst, v, false)
+}
+
+// AppendJSONWith is AppendJSON with the options of opts. With Strict, a
+// value AppendJSON would write otherwise or drop is a *LossyJSONError, and
+// dst comes back unchanged.
+func (r *Realm) AppendJSONWith(dst []byte, v Value, opts JSONOptions) ([]byte, bool, error) {
+	out, ok, err := r.appendJSON(dst, v, opts.Strict)
+	if l, isLoss := err.(*jsonLoss); isLoss {
+		err = l.export()
+	}
+	return out, ok, err
+}
+
+func (r *Realm) appendJSON(dst []byte, v Value, strict bool) ([]byte, bool, error) {
+	js := jsonStringifier{r: r, raw: true, strict: strict}
 	out := slices.Grow(dst, max(256, int(r.jsonSizeHint)+int(r.jsonSizeHint)/8))
 	js.sb.b = out[len(out):]
 	js.inDst = unsafe.SliceData(out) == unsafe.SliceData(dst)
@@ -532,10 +566,13 @@ func ownCap(n int) int { return max(256, 2*n) }
 // JSONParseGoString is JSONParse of the UTF-8 text, whose invalid bytes read
 // as U+FFFD as FromGoString reads them. ASCII and valid UTF-8 text is parsed
 // in place, never through UTF-16; the strings of the result may alias text.
+// Under a memory limit its allocation waits for it to return to be
+// measured, as a builtin's does: until then the tree it builds is held
+// only by the parser (parseText).
 func (r *Realm) JSONParseGoString(text string) (Value, error) {
 	p := jsonParser{r: r}
 	if isASCII(text) || utf8.ValidString(text) {
-		return p.parseText(text)
+		return p.parseText(text, nil)
 	}
 	return p.parse(FromGoString(text))
 }

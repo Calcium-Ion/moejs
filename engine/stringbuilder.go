@@ -27,6 +27,10 @@ type StringBuilder struct {
 	inline  [smallASCIIMax]byte
 }
 
+// heldBytes is the Go memory the builder's storage takes, which a builtin
+// reports while it calls back into JavaScript (holdBytes).
+func (b *StringBuilder) heldBytes() int { return cap(b.b) + 2*cap(b.u) }
+
 // Grow reserves capacity for n more code units.
 func (sb *StringBuilder) Grow(n int) {
 	if sb.u != nil {

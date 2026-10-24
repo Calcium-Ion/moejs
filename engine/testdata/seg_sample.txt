@@ -1,0 +1,11 @@
+The quick brown fox didn't jump over the lazy dog; it sat down at 3.14 p.m. and waited. Mr. Smith paid $1,000.50 for a 2.5 kg cheese wheel (approx. 12% off), e.g. in the U.S.A. we'd call that a bargain! Would you?
+Visit https://example.com/docs/intl?lang=en&page=2#segmenter or write to jane.doe@example.org before 2025-06-30T12:00:00Z. Version 4.2.1-rc_7 ships tomorrow... maybe.
+今天天气很好，我们一起去公园散步吧。中文没有空格，所以每个汉字都要单独处理！你觉得这个分词结果怎么样？她说：“明天见。”然后就走了。
+東京は日本の首都です。カタカナとひらがな、そして漢字が混ざった文章を分割します。ラーメンを食べに行きませんか？はい、行きましょう！
+안녕하세요. 저는 서울에서 왔습니다. 한국어는 띄어쓰기를 사용합니다! 오늘 날씨가 정말 좋네요?
+Emoji time 👨‍👩‍👧‍👦 and 🏳️‍🌈 and 🇯🇵🇺🇸🇫🇷 flags, skin tones 👍🏽👋🏿, keycaps 1️⃣ #️⃣, hearts ❤️‍🔥 and a coder 🧑🏽‍💻 at work. 😀😃😄 Great!
+Mixed scripts: Go语言写的JavaScript引擎moejs supports Intl.Segmenter now. 日本語 and 한국어 and English in one line; numbers like 1,234,567.89 and ０１２３ too.
+He said, "It's fine." She replied: 'No, it isn't.' Then... nothing happened (for once). Dr. Watson asked: Why?! Nobody knew.
+नमस्ते दुनिया। क्षत्रिय और ज्ञान की बातें हिन्दी में। বাংলা ভাষায় ক্ষমা চাই। مرحبا بالعالم. هذه جملة عربية؟ نعم! שלום עולם. צה"ל וארה"ב, ג'ירפה.
+Line one ends here.
+Line two: a café, naïve résumé, Ångström, Œuvre — and ﬁne ligatures, ＡＢＣ full width, ｶﾀｶﾅ half width.

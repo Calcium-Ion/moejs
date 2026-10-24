@@ -157,19 +157,6 @@ func bigintProtoToString(r *Realm, this Value, args []Value) (Value, error) {
 	return StringValue(FromGoString(b.v.Text(int(radix)))), nil
 }
 
-// bigintProtoToLocaleString implements BigInt.prototype.toLocaleString
-// without ECMA-402: the decimal form, as Number.prototype.toLocaleString.
-func bigintProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error) {
-	b, err := thisBigIntValue(r, this, "toLocaleString")
-	if err == nil {
-		err = r.checkBigIntFormat(b)
-	}
-	if err != nil {
-		return Undefined(), err
-	}
-	return StringValue(asciiString(b.ToString())), nil
-}
-
 // bigintProtoValueOf implements BigInt.prototype.valueOf.
 func bigintProtoValueOf(r *Realm, this Value, args []Value) (Value, error) {
 	b, err := thisBigIntValue(r, this, "valueOf")

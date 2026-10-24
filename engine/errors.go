@@ -91,7 +91,8 @@ func (e *Exception) Message() string {
 
 // Unwrap returns the Go error a native function returned when the thrown
 // value is the Error built for it (see hostErrorValue), so errors.Is and
-// errors.As see through a throw that JavaScript did not replace.
+// errors.As see through a throw that JavaScript did not replace; for a
+// RangeError of a value nested too deep, ErrTooDeep.
 func (e *Exception) Unwrap() error {
 	if !e.Value.IsObject() {
 		return nil
@@ -218,7 +219,7 @@ type ErrorData struct {
 	frames       []StackFrame
 	stack        Value // formatted string, or whatever was assigned to `stack`
 	materialized bool
-	hostErr      error // the Go error this Error was thrown for (hostErrorValue)
+	hostErr      error // the Go error this Error was thrown for (hostErrorValue), or ErrTooDeep
 }
 
 // Frames returns the captured compact stack.
@@ -253,7 +254,9 @@ func (r *Realm) NewError(kind ErrorKind, format string, args ...any) *Object {
 	if len(args) != 0 {
 		msg = fmt.Sprintf(format, args...)
 	}
-	return r.newErrorObject(r.errorProtos[kind], StringValue(FromGoString(msg)))
+	s := FromGoString(msg)
+	r.chargeGoString(s)
+	return r.newErrorObject(r.errorProtos[kind], StringValue(s))
 }
 
 // newErrorObject builds an error object with own `message` (omitted when
@@ -327,7 +330,11 @@ func (ed *ErrorData) stackValue(r *Realm, holder *Object) Value {
 				text += "\n" + frames
 			}
 		}
-		ed.stack = StringValue(FromGoString(text))
+		// The text holds the message, which can be a script's string: it is
+		// charged as NewError charges a message.
+		s := FromGoString(text)
+		r.chargeGoString(s)
+		ed.stack = StringValue(s)
 		ed.materialized = true
 		ed.frames = nil
 	}
@@ -362,7 +369,9 @@ func (ed *ErrorData) setStack(v Value) {
 // neither an *Exception nor an *InterruptedError: an Error whose message is
 // err.Error() and which keeps err for Exception.Unwrap.
 func (r *Realm) hostErrorValue(err error) Value {
-	o := r.newErrorObject(r.errorProtos[KindError], StringValue(FromGoString(err.Error())))
+	s := FromGoString(err.Error())
+	r.chargeGoString(s)
+	o := r.newErrorObject(r.errorProtos[KindError], StringValue(s))
 	o.ErrorData().hostErr = err
 	return ObjectValue(o)
 }

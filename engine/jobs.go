@@ -50,6 +50,10 @@ type jobState struct {
 	queue    []job
 	head     int // queue[head:] is still to run
 	draining bool
+	// result is what the call whose return drains the queue returned,
+	// which only its Go frame holds: under a memory limit, a root of the
+	// measurements made between the jobs (endJob, betweenJobs).
+	result Value
 	// tracker receives the HostPromiseRejectionTracker operations.
 	tracker func(p *Object, op PromiseRejectionOperation)
 }
@@ -79,10 +83,12 @@ func (r *Realm) enqueue(jb job) {
 // endJob runs at the return of the outermost call when r.jobsPending
 // (CallObject, Construct, ReleaseJobs): unless a drain is already running
 // further up, it ends the job for WeakRef and drains the queue. err is the
-// call's error, and endJob returns the call's error (see the file comment).
-// It leaves no job queued and no object kept, and so clears r.jobsPending
-// (a Go panic out of the call before it runs leaves the call's jobs queued,
-// and one out of a job the jobs after it, for DropJobs).
+// call's error, and endJob returns the call's error (see the file comment);
+// the caller stored the call's result in jobState.result, a root of the
+// measurements made between the jobs, which endJob clears. It leaves no job
+// queued and no object kept, and so clears r.jobsPending (a Go panic out of
+// the call before it runs leaves the call's jobs queued, and one out of a
+// job the jobs after it, for DropJobs).
 //
 //go:noinline
 func (r *Realm) endJob(err error) error {
@@ -93,14 +99,18 @@ func (r *Realm) endJob(err error) error {
 	r.jobsPending = false
 	j.clearKept()
 	if len(j.queue) == 0 {
+		err = r.endRun(err)
+		j.result = Undefined()
 		return err
 	}
 	if _, ok := err.(*InterruptedError); ok {
+		j.result = Undefined()
 		r.dropJobs(nil, err)
-		return err
+		return r.endRun(err)
 	}
 	j.draining = true
-	defer func() { j.draining, r.jobsPending = false, j.pending() }()
+	defer func() { j.draining, r.jobsPending, j.result = false, j.pending(), Undefined() }()
+	m := r.mem()
 	for j.head < len(j.queue) {
 		if ierr := r.CheckInterrupt(); ierr != nil {
 			r.dropJobs(nil, ierr)
@@ -118,6 +128,9 @@ func (r *Realm) endJob(err error) error {
 		}
 		jerr := r.runJob(&jb)
 		j.clearKept()
+		if m != nil && m.allocated > m.room {
+			r.betweenJobs(m)
+		}
 		if jerr == nil {
 			continue
 		}
@@ -132,7 +145,49 @@ func (r *Realm) endJob(err error) error {
 	if cap(j.queue) > 1024 {
 		j.queue = nil
 	}
+	return r.endRun(err)
+}
+
+// endRun ends a run, the outermost call's return (endJob), which a measurement
+// of the memory limit left pending or a hit of it made reach endJob as a
+// queued job does (endRunSees): see endRunSlow.
+func (r *Realm) endRun(err error) error {
+	if r.interruptFlag.Load() == 0 {
+		return err
+	}
+	return r.endRunSlow(err)
+}
+
+// endRunSlow makes a run end with its own overage, never the next run's.
+// No frame runs, so the end of the run is a safe point, as a host's rebase
+// is: a pending measurement is made while what was allocated is past the
+// limit, with the call's result as a root (jobState.result). A hit, this
+// one's or one no check of the interpreter came after (a builtin's last
+// allocation before the script ended, a host function that ignored its
+// charge's error), is the run's error. The interrupt stays pending and the
+// budget spent, as after any hit (ClearInterrupt, ResetAllocation).
+//
+//go:noinline
+func (r *Realm) endRunSlow(err error) error {
+	m := r.mem()
+	if r.interruptFlag.CompareAndSwap(flagMeasure, 0) && m != nil && m.allocated > m.room && !m.measuring && !m.hitting {
+		if r.rebase(m, nil) && m.lastLive > m.limit {
+			r.memoryLimitHit(m)
+		}
+	}
+	if r.interruptFlag.Load() < 0 {
+		if _, ok := err.(*InterruptedError); !ok {
+			err = r.interruptError()
+		}
+	}
 	return err
+}
+
+// endRunSees makes the end of the run see a pending measurement or a hit
+// (endRun) as it sees a queued job: the outermost return calls endJob.
+func (r *Realm) endRunSees() {
+	r.jobState()
+	r.jobsPending = true
 }
 
 // dropJobs drops the queued jobs for the interrupt err, which stopped the

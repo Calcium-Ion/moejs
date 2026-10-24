@@ -83,6 +83,7 @@ var implemented = setOf(
 	"array-find-from-last",
 	"array-grouping",
 	"BigInt",
+	"canonical-tz",
 	"change-array-by-copy",
 	"DataView",
 	"DataView.prototype.getFloat32",
@@ -101,6 +102,17 @@ var implemented = setOf(
 	"Int16Array",
 	"Int32Array",
 	"Int8Array",
+	"Intl-enumeration",
+	"Intl.DateTimeFormat-datetimestyle",
+	"Intl.DateTimeFormat-dayPeriod",
+	"Intl.DateTimeFormat-extend-timezonename",
+	"Intl.DateTimeFormat-formatRange",
+	"Intl.DateTimeFormat-fractionalSecondDigits",
+	"Intl.Locale",
+	"Intl.Locale-info",
+	"Intl.NumberFormat-unified",
+	"Intl.NumberFormat-v3",
+	"Intl.Segmenter",
 	"Map",
 	"Math.sumPrecise",
 	"Object.fromEntries",
@@ -166,15 +178,52 @@ var implemented = setOf(
 	"__setter__",
 )
 
-// nonGoal reports whether a feature is outside the project's goals: Intl
-// and the Atomics.wait family, which needs a blocking or multi-agent host,
-// and FinalizationRegistry. Such tests are skipped as "non-goal: <feature>".
+// outOfScope maps the tests that need what moejs's Intl leaves out on
+// purpose, or that check what it keeps as V8 has it, to the reason; they are
+// skipped as "out of scope: <reason>".
+var outOfScope = map[string]string{
+	// Intl.DateTimeFormat has the Gregorian calendar only: getCalendars is
+	// ["gregory"] for every region, so these find no region pair whose
+	// calendars differ, and the others format or resolve other calendars.
+	"intl402/Locale/prototype/getCalendars/likely-subtags-region.js":                                       gregoryOnly,
+	"intl402/Locale/prototype/getCalendars/region-override.js":                                             gregoryOnly,
+	"intl402/Locale/prototype/getCalendars/region-priority.js":                                             gregoryOnly,
+	"intl402/Locale/prototype/getCalendars/subdivision-region.js":                                          gregoryOnly,
+	"intl402/DateTimeFormat/canonicalize-calendar.js":                                                      gregoryOnly,
+	"intl402/DateTimeFormat/prototype/format/related-year-zh.js":                                           gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatRangeToParts/chinese-calendar-dates.js":                        gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatRangeToParts/dangi-calendar-dates.js":                          gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatRangeToParts/pattern-on-calendar.js":                           gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatToParts/chinese-calendar-dates.js":                             gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatToParts/pattern-on-calendar.js":                                gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatToParts/related-year-zh.js":                                    gregoryOnly,
+	"intl402/DateTimeFormat/prototype/formatToParts/related-year.js":                                       gregoryOnly,
+	"intl402/DateTimeFormat/prototype/resolvedOptions/resolved-calendar-unicode-extensions-and-options.js": gregoryOnly,
+	// moejs has no Intl.Collator.
+	"intl402/DateTimeFormat/this-value-ignored.js":                      noCollator,
+	"intl402/Intl/supportedValuesOf/collations-accepted-by-Collator.js": noCollator,
+	"intl402/NumberFormat/this-value-ignored.js":                        noCollator,
+	"intl402/PluralRules/undefined-newtarget-throws.js":                 noCollator,
+	// format writes a space where formatToParts has U+202F (before AM/PM
+	// in en), as V8 does; Node 24 fails this test too.
+	"intl402/DateTimeFormat/prototype/format/timedatestyle-en.js": "format's space for U+202F, as in V8",
+}
+
+const (
+	gregoryOnly = "Gregorian calendar only"
+	noCollator  = "no Intl.Collator"
+)
+
+// nonGoal reports whether a feature is outside the project's goals: the
+// Atomics.wait family, which needs a blocking or multi-agent host,
+// FinalizationRegistry, and the normative-optional parts of ECMA-402. Such
+// tests are skipped as "non-goal: <feature>".
 func nonGoal(feature string) bool {
 	switch feature {
-	case "Atomics.waitAsync", "FinalizationRegistry":
+	case "Atomics.waitAsync", "FinalizationRegistry", "intl-normative-optional":
 		return true
 	}
-	return strings.HasPrefix(strings.ToLower(feature), "intl")
+	return false
 }
 
 func setOf(names ...string) map[string]bool {

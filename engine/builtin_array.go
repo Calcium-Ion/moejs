@@ -351,14 +351,19 @@ func arrayFrom(r *Realm, this Value, args []Value) (Value, error) {
 		}
 		mapper = mapFn.AsObject()
 	}
-	argv := r.pushArgs(2)
-	defer r.popArgs(2)
+	// The result (or under a memory limit an array over the list) and the
+	// iterator are the third and fourth slots: the measurements made in the
+	// callbacks and in the iterator's next reach them.
+	argv := r.pushArgs(4)
+	defer r.popArgs(4)
+	argv[2], argv[3] = Undefined(), Undefined()
+	margs := argv[:2]
 	mapValue := func(v Value, k int64) (Value, error) {
 		if mapper == nil {
 			return v, nil
 		}
-		argv[0], argv[1] = v, Int64Value(k)
-		return r.CallObject(mapper, thisArg, argv)
+		margs[0], margs[1] = v, Int64Value(k)
+		return r.CallObject(mapper, thisArg, margs)
 	}
 	if items.IsNullish() {
 		return Undefined(), r.TypeError("Cannot convert undefined or null to object")
@@ -387,6 +392,13 @@ func arrayFrom(r *Realm, this Value, args []Value) (Value, error) {
 			src := ir.it.AsObject()
 			list = make([]Value, 0, min(int(src.ArrayLength()), len(src.elements)))
 		}
+		var hold *Object
+		if !usesList {
+			argv[2] = ObjectValue(a)
+		} else if hold = r.sliceHolder(); hold != nil {
+			argv[2] = ObjectValue(hold)
+		}
+		argv[3] = ir.it
 		for k := int64(0); ; k++ {
 			if err := interruptEvery(r, k); err != nil {
 				return Undefined(), err
@@ -406,7 +418,10 @@ func arrayFrom(r *Realm, this Value, args []Value) (Value, error) {
 			}
 			if v, err = mapValue(v, k); err == nil {
 				if usesList {
-					list = append(list, v)
+					list = r.appendValue(list, v) // its growth charged
+					if hold != nil {
+						hold.elements = list
+					}
 				} else {
 					err = a.CreateDataPropertyOrThrow(r, indexKey(r, k), v)
 				}
@@ -428,6 +443,7 @@ func arrayFrom(r *Realm, this Value, args []Value) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
+	argv[2] = ObjectValue(a)
 	for k := int64(0); k < n; k++ {
 		v, err := getIndex(r, arrayLike, k)
 		if err != nil {
@@ -890,6 +906,16 @@ func arrayProtoSort(r *Realm, this Value, args []Value) (Value, error) {
 	if err != nil {
 		return Undefined(), err
 	}
+	// Under a memory limit an array over the list is on the register
+	// stack: the measurements made in the getters and the comparator reach
+	// the values the list holds that the array no longer does.
+	pin := r.pushArgs(1)
+	defer r.popArgs(1)
+	pin[0] = Undefined()
+	hold := r.sliceHolder()
+	if hold != nil {
+		pin[0] = ObjectValue(hold)
+	}
 	items := make([]Value, 0, min(n, int64(len(o.elements))+interruptStride))
 	for k := int64(0); k < n; k++ {
 		if v, ok := denseElement(o, k); ok {
@@ -902,6 +928,9 @@ func arrayProtoSort(r *Realm, this Value, args []Value) (Value, error) {
 				return Undefined(), err
 			}
 			items = append(items, v)
+		}
+		if hold != nil {
+			hold.elements = items
 		}
 		if err := interruptEvery(r, k); err != nil {
 			return Undefined(), err
@@ -1425,10 +1454,10 @@ func (r *Realm) popJoin() {
 }
 
 // arrayProtoToLocaleString implements Array.prototype.toLocaleString
-// without ECMA-402: the separator is ",", and each element's
-// toLocaleString is invoked with no arguments (on the primitive itself,
-// not a wrapper). Like join, it treats an object already being joined as
-// "".
+// (ECMA-402): the separator is ",", and each element's
+// toLocaleString is invoked with the locales and options arguments (on the
+// primitive itself, not a wrapper). Like join, it treats an object already
+// being joined as "".
 func arrayProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error) {
 	o, err := r.ToObject(this)
 	if err != nil {
@@ -1444,6 +1473,7 @@ func arrayProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error)
 		return Undefined(), err
 	}
 	var sb StringBuilder
+	var localeArgs []Value
 	for k := int64(0); k < n; k++ {
 		if k > 0 {
 			sb.WriteString(commaString)
@@ -1457,7 +1487,10 @@ func arrayProtoToLocaleString(r *Realm, this Value, args []Value) (Value, error)
 			if err != nil {
 				return Undefined(), err
 			}
-			sv, err := r.Call(fn, v, nil)
+			if localeArgs == nil {
+				localeArgs = []Value{intlArg(args, 0), intlArg(args, 1)}
+			}
+			sv, err := r.Call(fn, v, localeArgs)
 			if err != nil {
 				return Undefined(), err
 			}
@@ -1776,9 +1809,12 @@ func arrayProtoMap(r *Realm, this Value, args []Value) (Value, error) {
 		}
 	}
 	thisArg := Arg(args, 1)
-	argv := r.pushArgs(3)
-	defer r.popArgs(3)
-	argv[2] = ObjectValue(o)
+	// The result is the fourth slot: the measurements made in the callbacks
+	// reach it (FunctionData.measurable).
+	argv := r.pushArgs(4)
+	defer r.popArgs(4)
+	argv[2], argv[3] = ObjectValue(o), ObjectValue(a)
+	argv = argv[:3]
 	for k := int64(0); k < n; k++ {
 		if err := interruptEvery(r, k); err != nil {
 			return Undefined(), err
@@ -1825,13 +1861,22 @@ func arrayProtoFilter(r *Realm, this Value, args []Value) (Value, error) {
 		}
 	}
 	thisArg := Arg(args, 1)
-	argv := r.pushArgs(3)
-	defer r.popArgs(3)
-	argv[2] = ObjectValue(o)
+	// The result, or under a memory limit an array over what is selected,
+	// is the fourth slot: the measurements made in the callbacks reach it.
+	argv := r.pushArgs(4)
+	defer r.popArgs(4)
+	argv[2], argv[3] = ObjectValue(o), Undefined()
 	var selected []Value
+	var hold *Object
 	if a == nil {
 		selected = make([]Value, 0, min(n, 32))
+		if hold = r.sliceHolder(); hold != nil {
+			argv[3] = ObjectValue(hold)
+		}
+	} else {
+		argv[3] = ObjectValue(a)
 	}
+	argv = argv[:3]
 	to := int64(0)
 	for k := int64(0); k < n; k++ {
 		if err := interruptEvery(r, k); err != nil {
@@ -1858,6 +1903,9 @@ func arrayProtoFilter(r *Realm, this Value, args []Value) (Value, error) {
 			to++
 		default:
 			selected = append(selected, v)
+			if hold != nil {
+				hold.elements = selected
+			}
 		}
 	}
 	if a != nil {
@@ -1947,9 +1995,11 @@ func reduceIndexed(r *Realm, this Value, args []Value, fromEnd bool) (Value, err
 			return Undefined(), r.TypeError("Reduce of empty array with no initial value")
 		}
 	}
+	// The accumulator stays in the first slot between the calls: the
+	// measurements made in a getter of the next element reach it.
 	argv := r.pushArgs(4)
 	defer r.popArgs(4)
-	argv[3] = ObjectValue(o)
+	argv[0], argv[3] = acc, ObjectValue(o)
 	for ; k != end; k += step {
 		if err := interruptEvery(r, k); err != nil {
 			return Undefined(), err
@@ -1961,12 +2011,12 @@ func reduceIndexed(r *Realm, this Value, args []Value, fromEnd bool) (Value, err
 		if !present {
 			continue
 		}
-		argv[0], argv[1], argv[2] = acc, v, Int64Value(k)
-		if acc, err = r.CallObject(fn, Undefined(), argv); err != nil {
+		argv[1], argv[2] = v, Int64Value(k)
+		if argv[0], err = r.CallObject(fn, Undefined(), argv); err != nil {
 			return Undefined(), err
 		}
 	}
-	return acc, nil
+	return argv[0], nil
 }
 
 func arrayProtoReduce(r *Realm, this Value, args []Value) (Value, error) {
@@ -1983,6 +2033,8 @@ type flatTarget struct {
 	items []Value
 	obj   *Object
 	n     int64
+	// hold is flatMap's array over items under a memory limit (sliceHolder).
+	hold *Object
 }
 
 func (t *flatTarget) add(r *Realm, v Value) error {
@@ -1995,6 +2047,9 @@ func (t *flatTarget) add(r *Realm, v Value) error {
 		}
 	} else {
 		t.items = append(t.items, v)
+		if t.hold != nil {
+			t.hold.elements = t.items
+		}
 	}
 	t.n++
 	return nil
@@ -2119,6 +2174,16 @@ func arrayProtoFlatMap(r *Realm, this Value, args []Value) (Value, error) {
 	t, err := newFlatTarget(r, o, n)
 	if err != nil {
 		return Undefined(), err
+	}
+	// The result, or under a memory limit an array over its items, is on
+	// the register stack: the measurements made in the callbacks reach it.
+	pin := r.pushArgs(1)
+	defer r.popArgs(1)
+	pin[0] = Undefined()
+	if t.obj != nil {
+		pin[0] = ObjectValue(t.obj)
+	} else if t.hold = r.sliceHolder(); t.hold != nil {
+		pin[0] = ObjectValue(t.hold)
 	}
 	if err := flattenIntoArray(r, &t, o, n, 1, mapper.AsObject(), Arg(args, 1)); err != nil {
 		return Undefined(), err

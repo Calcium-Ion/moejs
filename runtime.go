@@ -20,6 +20,10 @@ type Options struct {
 	MutableIntrinsics bool
 	// TimeZone is the local time zone of Date; nil means time.Local.
 	TimeZone *time.Location
+	// Locale is the default locale of Intl and of the toLocaleString
+	// methods, a BCP 47 language tag such as "zh-CN"; "" or a tag that is
+	// not well-formed means "en-US" (engine.RealmOptions).
+	Locale string
 	// Importer resolves the modules of import() and fills import.meta; nil
 	// means import() rejects with a TypeError.
 	Importer *Importer
@@ -35,11 +39,15 @@ type Options struct {
 	// CompileScript are not affected.
 	DisableDynamicCode bool
 	// MemoryLimit is the number of bytes the runtime's JavaScript may
-	// allocate between resets (ReleaseCallData, ResetAllocation, and the
-	// end of a Load or SetGlobal that succeeded) before the runtime
-	// interrupts itself: the call returns an *InterruptedError whose value
-	// is a *MemoryLimitError, which errors.Is finds as ErrMemoryLimit. Zero
-	// means no limit. The guide's "Memory limit" tells what is counted.
+	// retain, as the last measurement of its heap found, plus allocate
+	// since that measurement or the last reset (ReleaseCallData,
+	// ResetAllocation, and the end of a Load or SetGlobal that succeeded),
+	// before the runtime interrupts itself: the call returns an
+	// *InterruptedError whose value is a *MemoryLimitError, which errors.Is
+	// finds as ErrMemoryLimit. An allocation past the limit measures first,
+	// so a program that keeps little runs on however much it allocates.
+	// Zero means no limit. The guide's "Memory limit" tells what is
+	// counted.
 	MemoryLimit int64
 }
 
@@ -75,7 +83,7 @@ type Runtime struct {
 
 // NewRuntime creates a runtime.
 func NewRuntime(opts Options) *Runtime {
-	rt := &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone, MaxDynamicSource: opts.MaxDynamicSource, DisableDynamicCode: opts.DisableDynamicCode, MemoryLimit: opts.MemoryLimit})}
+	rt := &Runtime{realm: engine.NewRealmWith(engine.RealmOptions{SharedIntrinsics: !opts.MutableIntrinsics, TimeZone: opts.TimeZone, Locale: opts.Locale, MaxDynamicSource: opts.MaxDynamicSource, DisableDynamicCode: opts.DisableDynamicCode, MemoryLimit: opts.MemoryLimit})}
 	if opts.Importer != nil {
 		rt.realm.SetImportHooks(opts.Importer.engineHooks())
 	}
@@ -107,7 +115,7 @@ func (rt *Runtime) SetGlobal(name string, v any) (err error) {
 // its `name` and `length` properties; a negative length is 0, as no
 // function's length is negative.
 func (rt *Runtime) Function(name string, length int, fn NativeFunc) Value {
-	return engine.ObjectValue(rt.realm.NewNativeFunction(engine.FromGoString(name), max(length, 0), fn))
+	return engine.ObjectValue(rt.realm.NewHostFunction(engine.FromGoString(name), max(length, 0), fn))
 }
 
 // Load evaluates m's top level in this runtime. A runtime loads one module
@@ -167,6 +175,7 @@ func (rt *Runtime) Load(m *Module) (err error) {
 	}
 	defer rt.guardLoad(&err, r.CallState(), len(rt.argStack))
 	rt.mod = m
+	rt.rootModule()
 	r.HoldJobs()
 	var p *engine.Object
 	rt.env, p, err = r.EvaluateModuleAsync(m.code)
@@ -207,6 +216,7 @@ func (rt *Runtime) loadGraph(m *Module, g *engine.ModuleGraph) (err error) {
 	r := rt.realm
 	defer rt.guardGraph(&err, g, r.CallState(), len(rt.argStack))
 	rt.mod = m
+	rt.rootModule()
 	r.HoldJobs()
 	var p *engine.Object
 	rt.env, p, err = r.EvaluateGraph(g)
@@ -440,10 +450,141 @@ func (rt *Runtime) Interrupt(v any) { rt.realm.Interrupt(v) }
 func (rt *Runtime) ClearInterrupt() { rt.realm.ClearInterrupt() }
 
 // ResetAllocation starts a new budget of Options.MemoryLimit: what the
-// runtime counted since the last reset goes back to zero. ReleaseCallData,
-// Load and SetGlobal do it too; a host that does not pool runtimes calls
-// this where a request starts. It leaves a pending interrupt pending.
+// runtime counted since the last reset goes back to zero. The last
+// measurement of RebaseAllocation stays, so that what a long-lived program
+// keeps still counts. ReleaseCallData, Load and SetGlobal do it too; a
+// host that does not pool runtimes calls this where a request starts. It
+// leaves a pending interrupt pending.
 func (rt *Runtime) ResetAllocation() { rt.realm.ResetAllocation() }
+
+// RebaseAllocation bounds what a long-lived program keeps, where
+// ResetAllocation bounds what one request allocates: it measures what the
+// runtime's JavaScript retains and makes that the base of the budget of
+// Options.MemoryLimit, in place of what was allocated since the last reset
+// or rebase. From then on the limit counts the measurement plus what is
+// allocated after it (Stats: LiveBytes and RequestAllocatedBytes). A host
+// that runs its own event loop calls it between tasks, where it would
+// call ResetAllocation, so that a program that keeps what it allocates
+// stops at the limit, however many tasks it took to allocate it; package
+// eventloop does so. A host that resets per request (ResetAllocation,
+// SetGlobal, ReleaseCallData) can call it at each request's start too:
+// the resets keep the measurement.
+//
+// The measurement walks what is reachable from the runtime's global
+// object and global bindings, its module's bindings, the queued promise
+// jobs, the roots registered with AddLiveRoots and the values roots adds
+// (roots may be nil), and counts it as the limit counts allocation. A
+// string that shares the units of a longer one of 64 units or more, a
+// substring or a value JSON.parse or ParseJSONString read out of a longer
+// text while the limit was set, counts the longer one, which it keeps
+// alive. It cannot see
+// values only Go code holds: what a NativeFunc's closure captured, the
+// promise of NewPromise, which only the settle functions keep (and through
+// it the async functions awaiting it), a value a pending task of the
+// host's queue will pass to JavaScript. The host adds those through roots,
+// which RebaseAllocation calls with add only when it measures, or
+// registers them with AddLiveRoots.
+//
+// The measurement is paced: it is made only once the allocation since the
+// last one, resets included, reached the larger of half of what the limit
+// leaves above the last measurement, (MemoryLimit - LiveBytes) / 2, and
+// half of the last measurement; otherwise RebaseAllocation returns at once,
+// without allocating. When an allocation would pass the limit before the
+// next measurement, the runtime measures first, with the module's bindings
+// and the registered roots, and stops only when that measurement leaves no
+// room for it: once between two calls of RebaseAllocation or
+// ResetAllocation, and again each time the allocation since the last
+// measurement reaches what paces RebaseAllocation, so that a call that
+// makes much garbage runs on as it would across rebases. In the callbacks
+// of forEach, map, filter, flatMap, reduce, sort, replace, Array.from, a
+// JSON.parse reviver and a host function it runs as in plain code; an
+// allocation another builtin makes waits for it to return, within half of
+// what the limit leaves past it and the allocation that crosses that, and
+// the runtime measures once it returns or at the next call, or between
+// promise jobs; ParseJSON, ParseJSONString and FromGo wait so too. An
+// allocation of the host's own Go code outside any call, and its
+// ChargeMemory where no script runs (an event loop's task, or a host
+// function called from Go), measure at once, as RebaseAllocation does:
+// what the host holds between calls, it registers (AddLiveRoots). When the
+// measurement of RebaseAllocation passes the limit, it
+// returns the *MemoryLimitError (Live the measurement, Allocated 0) and
+// counts a hit, but does not interrupt the runtime: the host stops the
+// program, whose next allocation passes the limit anyway. An Interrupt
+// made while it measures ends the measurement, which then changes
+// nothing. Without a MemoryLimit it does nothing. It runs on the goroutine
+// using the runtime, between calls.
+func (rt *Runtime) RebaseAllocation(roots func(add func(Value))) error {
+	if !rt.realm.StartRebase() {
+		return nil
+	}
+	return rt.realm.RebaseAllocation(func(add func(Value)) {
+		rt.liveRoots(add)
+		if roots != nil {
+			roots(add)
+		}
+	})
+}
+
+// AddLiveRoots registers roots, a function that adds to every measurement
+// of the runtime's heap the JavaScript values only the host's Go code
+// holds: the pending work of the host's event loop, the values a
+// NativeFunc's closure keeps for a later call, the promises of NewPromise
+// whose settle functions the host keeps. The measurements of
+// RebaseAllocation and of an allocation that would pass the limit
+// (RebaseAllocation) and Realm().MeasureLive call it, and nothing else:
+// without a MemoryLimit it costs nothing but the registration. It returns
+// the function that removes it. roots runs on the goroutine using the
+// runtime, possibly in the middle of JavaScript (an allocation that would
+// pass the limit): it must only call add, without running JavaScript or
+// creating values, and must not wait for a lock that is held while the
+// runtime runs JavaScript; a lock taken only to read the host's own state
+// (a mutex that guards a queue) is fine. AddLiveRoots and remove run on
+// the goroutine using the runtime. Package eventloop registers the loop's
+// timers, immediates and the promises of Loop.NewPromise this way.
+//
+// A host function that calls back into JavaScript keeps no JavaScript value
+// only in Go across the call, or registers it, since a measurement may run
+// in the JavaScript it calls back.
+//
+// A registered root counts until it is removed, whether JavaScript still
+// reaches what it adds or not. What the Go state of an object the host
+// created keeps (a stream's queue, a body's bytes, header values kept as
+// Go strings) reports through LiveReporter instead, so that it counts
+// while the object is reachable and stops counting once JavaScript drops
+// it; AddLiveRoots is for what Go alone holds, such as requests in flight
+// and promises only the host will settle.
+func (rt *Runtime) AddLiveRoots(roots func(add func(Value))) (remove func()) {
+	return rt.realm.AddLiveRoots(roots)
+}
+
+// rootModule registers liveRoots with the realm when it has a memory
+// limit as Load starts, so that every measurement of its heap reaches the
+// module Load evaluates and what its top level threw: the one an
+// allocation that would pass the limit makes in the middle of JavaScript
+// and Realm().MeasureLive too, not only RebaseAllocation's, which adds
+// them itself (for a limit set later through the Realm).
+func (rt *Runtime) rootModule() {
+	if rt.realm.MemoryLimit() > 0 {
+		rt.realm.AddLiveRoots(rt.liveRoots)
+	}
+}
+
+// liveRoots adds what the runtime holds for JavaScript outside the
+// realm's roots: a module Load evaluated alone, which is not in the
+// realm's module map, and what its top level threw.
+func (rt *Runtime) liveRoots(add func(Value)) {
+	if rt.env != nil && rt.env.Env != nil {
+		for _, v := range rt.env.Slots() {
+			add(v)
+		}
+	}
+	if rt.failed != nil {
+		var ex *Exception
+		if errors.As(rt.failed, &ex) {
+			add(ex.Value)
+		}
+	}
+}
 
 // Stats returns the runtime's counters, each read in constant time; the
 // allocation counters count only while a MemoryLimit is set. It runs on
@@ -476,9 +617,9 @@ func (rt *Runtime) FromGo(v any) (Value, error) {
 }
 
 // ParseJSON is JSON.parse of b. Nesting deeper than 10,000 arrays and
-// objects (engine.MaxToGoDepth) is a RangeError. It parses a copy of b, so
-// the host may reuse b once it returns; for a large text, ParseJSONString
-// saves the copy.
+// objects (engine.MaxToGoDepth) is a RangeError that wraps ErrTooDeep. It
+// parses a copy of b, so the host may reuse b once it returns; for a large
+// text, ParseJSONString saves the copy.
 func (rt *Runtime) ParseJSON(b []byte) (Value, error) {
 	if err := rt.realm.ChargeMemory(len(b)); err != nil {
 		return engine.Undefined(), err
@@ -530,7 +671,8 @@ func (rt *Runtime) Get(v Value, key string) (res Value, err error) {
 // modified it (engine.Object.HostValue); an empty one converted to a plain
 // array or object, and a nil map to null. A getter or trap that throws, a
 // revoked proxy, or nesting deeper than 10,000 containers
-// (engine.MaxToGoDepth) is returned as the error. The Go string of an ASCII
+// (engine.MaxToGoDepth, a RangeError that wraps ErrTooDeep) is returned as
+// the error. The Go string of an ASCII
 // string is the one v holds: for a value ParseJSON or ParseJSONString
 // produced it may share the parsed text and keep it alive; strings.Clone
 // what is kept.
@@ -545,10 +687,10 @@ func (rt *Runtime) ToGo(v Value) (out any, err error) {
 // AppendJSON appends JSON.stringify(v) to dst as UTF-8. A value with no
 // JSON form (undefined, a function, a symbol) appends null. A proxy is
 // serialized as JSON.stringify does it: its traps run. Nesting deeper than
-// 10,000 arrays and objects (engine.MaxToGoDepth) is a RangeError, and so is
-// an output of more than 2^30-24 bytes: the string length limit counted in
-// bytes of UTF-8, JSON.stringify's limit for ASCII text and reached first
-// for other text.
+// 10,000 arrays and objects (engine.MaxToGoDepth) is a RangeError that
+// wraps ErrTooDeep, and an output of more than 2^30-24 bytes is a
+// RangeError too: the string length limit counted in bytes of UTF-8,
+// JSON.stringify's limit for ASCII text and reached first for other text.
 //
 // The output is written into dst's spare capacity, after reserving the last
 // output's length plus an eighth: a host that passes its previous output
@@ -568,13 +710,45 @@ func (rt *Runtime) ToGo(v Value) (out any, err error) {
 // appends to the same dst overwrites what AppendJSON appended, as any later
 // append would: a host function should use a buffer of its own.
 func (rt *Runtime) AppendJSON(dst []byte, v Value) (out []byte, err error) {
+	return rt.appendJSON(dst, v, false)
+}
+
+// JSONOptions are the options of AppendJSONWith.
+type JSONOptions = engine.JSONOptions
+
+// LossyJSONError is the error of AppendJSONWith with JSONOptions.Strict for
+// a value JSON has no text for: its Path names where it is, as in
+// $.messages[3].content, and its Value what it is, as in "undefined".
+type LossyJSONError = engine.LossyJSONError
+
+// AppendJSONWith is AppendJSON with the options of opts. With Strict, a
+// value AppendJSON writes otherwise or drops is an error, a
+// *LossyJSONError, and dst comes back as it was: an undefined, function or
+// symbol value (which an object leaves out and an array writes as null,
+// and which as the value itself AppendJSON writes as null), and NaN,
+// Infinity and -Infinity (written as null). What toJSON returns is
+// checked, so a toJSON that returns undefined fails; -0 is written as 0, as
+// without Strict. Strict costs AppendJSON nothing; with it a Go map or
+// slice FromGo converted is written through the values JavaScript sees.
+// Without Strict it is AppendJSON.
+func (rt *Runtime) AppendJSONWith(dst []byte, v Value, opts JSONOptions) (out []byte, err error) {
+	return rt.appendJSON(dst, v, opts.Strict)
+}
+
+func (rt *Runtime) appendJSON(dst []byte, v Value, strict bool) (out []byte, err error) {
 	r := rt.realm
 	defer rt.guard(&err, r.CallState(), len(rt.argStack))
 	r.HoldJobs()
 	// What a panic returns (guard), the output being suspect: a host
 	// function's inside the call, or a job's at the release.
 	out = dst
-	res, ok, err := r.AppendJSON(dst, v)
+	var res []byte
+	var ok bool
+	if strict {
+		res, ok, err = r.AppendJSONWith(dst, v, engine.JSONOptions{Strict: true})
+	} else {
+		res, ok, err = r.AppendJSON(dst, v)
+	}
 	// The jobs a toJSON or getter queued run at the release, after the
 	// output landed in dst's spare capacity; a host function they call may
 	// use dst (above), so when any are pending the output first moves out.

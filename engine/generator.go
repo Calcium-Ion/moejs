@@ -262,7 +262,9 @@ func (r *Realm) genResume(this, v, mode Value, method string) (Value, error) {
 // interrupt raised before resuming leaves the frame suspended.
 func (r *Realm) resumeFrame(g *genFrame, v, mode Value) (Value, error) {
 	if r.interruptFlag.Load() != 0 {
-		return Undefined(), r.interruptError()
+		if err := r.pendingInterrupt(); err != nil {
+			return Undefined(), err
+		}
 	}
 	if g.fd.icBase == icUnbound {
 		return r.resumeDynamic(g, v, mode)

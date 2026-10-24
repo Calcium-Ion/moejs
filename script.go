@@ -1,6 +1,8 @@
 package moejs
 
 import (
+	"context"
+
 	"github.com/Calcium-Ion/moejs/bytecode"
 	"github.com/Calcium-Ion/moejs/compiler"
 	"github.com/Calcium-Ion/moejs/engine"
@@ -24,18 +26,88 @@ type Script struct {
 // mode code unless it starts with a "use strict" directive. Bad source,
 // including features the engine does not support yet, is a *SyntaxError.
 func CompileScript(name, source string) (*Script, error) {
-	s, err := syntax.ParseScript(name, source, syntax.Options{})
+	return compileScript(name, source, syntax.Options{})
+}
+
+// CompileScriptWith is CompileScript with the options of opts (see
+// CompileWith). A TypeScript script is strict mode code.
+func CompileScriptWith(name, source string, opts CompileOptions) (*Script, error) {
+	return compileScript(name, source, syntax.Options{TypeScript: opts.TypeScript, Stop: stopFunc(opts.Context)})
+}
+
+func compileScript(name, source string, opts syntax.Options) (*Script, error) {
+	if opts.Stop != nil {
+		if err := opts.Stop(); err != nil {
+			return nil, err
+		}
+	}
+	s, err := syntax.ParseScript(name, source, opts)
 	if err != nil {
 		return nil, syntaxError(err)
 	}
-	code, err := compiler.CompileScript(s)
+	code, err := compiler.CompileScriptStop(s, opts.Stop)
 	if err != nil {
 		return nil, syntaxError(err)
 	}
 	return &Script{name: name, code: code}, nil
 }
 
-// Name returns the name given to CompileScript.
+// FunctionOptions are the options of CompileFunction and CompileFunctionTS:
+// the kind of function.
+type FunctionOptions struct {
+	// Async compiles an async function, as the AsyncFunction constructor
+	// does.
+	Async bool
+	// Generator compiles a generator function, as the GeneratorFunction
+	// constructor does; with Async, an async generator function.
+	Generator bool
+	// Context bounds the compile, as CompileOptions.Context does.
+	Context context.Context
+}
+
+// CompileFunction compiles a function from the source text of its
+// parameter list and of its body, as the Function constructor does: params
+// is the list without its parentheses ("a, b = 1", or "" for none), and the
+// text is that of `function anonymous(params\n) {\nbody\n}`, in which
+// neither part may end the other early. RunScript of the script returned
+// creates the function, in the runtime's global environment, and returns
+// it; CallFunction calls it. The script declares nothing, and the
+// function's name, "anonymous", is not bound in its body. The function is
+// sloppy mode code unless its body starts with a "use strict" directive.
+// Bad source is a *SyntaxError, whose position is in the text above (the
+// body starts on line 3). The script is immutable: any number of runtimes
+// may run it, each getting a function of its own.
+func CompileFunction(name, params, body string, opts FunctionOptions) (*Script, error) {
+	return compileFunction(name, params, body, opts, false)
+}
+
+// CompileFunctionTS is CompileFunction for TypeScript, with CompileTS's
+// rules: the parser erases the type syntax as it reads it, so parameters
+// may have types and be optional, the body may declare types and use type
+// assertions, and a *SyntaxError and a stack trace refer to the TypeScript
+// text; TypeScript that has run-time semantics (enum, a namespace with
+// values, a parameter property) is a *SyntaxError. The function is strict
+// mode code, as the code of a module CompileTS compiles is.
+func CompileFunctionTS(name, params, body string, opts FunctionOptions) (*Script, error) {
+	return compileFunction(name, params, body, opts, true)
+}
+
+func compileFunction(name, params, body string, opts FunctionOptions, ts bool) (*Script, error) {
+	stop := stopFunc(opts.Context)
+	if stop != nil {
+		if err := stop(); err != nil {
+			return nil, err
+		}
+	}
+	code, err := compiler.CompileFunction(name, params, body, opts.Generator, opts.Async, ts, stop)
+	if err != nil {
+		return nil, syntaxError(err)
+	}
+	return &Script{name: name, code: code}, nil
+}
+
+// Name returns the name given to CompileScript, CompileFunction or
+// CompileFunctionTS.
 func (s *Script) Name() string { return s.name }
 
 func (*Script) referrer() {}

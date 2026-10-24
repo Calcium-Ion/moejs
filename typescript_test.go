@@ -76,11 +76,11 @@ func TestCompileTSRejects(t *testing.T) {
 	_, err := moejs.CompileTS("shapes.ts", strings.Replace(tsShapes, "constructor(r: number)", "constructor(private readonly r: number)", 1))
 	var se *moejs.SyntaxError
 	require.ErrorAs(t, err, &se)
-	assert.Equal(t, &moejs.SyntaxError{File: "shapes.ts", Line: 20, Column: 14, Message: "A parameter property is not supported: only erasable TypeScript is (see TODO.md)"}, se)
+	assert.Equal(t, &moejs.SyntaxError{File: "shapes.ts", Line: 20, Column: 14, Message: "A parameter property is not supported: only erasable TypeScript is"}, se)
 
 	_, err = moejs.CompileTS("e.ts", "let a: number = 1;\nenum E { A, B }")
 	require.ErrorAs(t, err, &se)
-	assert.Equal(t, "e.ts:2:1: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is (see TODO.md)", se.Error())
+	assert.Equal(t, "e.ts:2:1: SyntaxError: A TypeScript enum is not supported: only erasable TypeScript is", se.Error())
 
 	_, err = moejs.CompileTS("e.ts", "function f<T>(x: T): T {\n\treturn x +;\n}")
 	require.ErrorAs(t, err, &se)

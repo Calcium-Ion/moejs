@@ -36,6 +36,12 @@ func installJSON(r *Realm) {
 // toJSON at each one's last uncounted level starts the next hold under 8 MB.
 const jsonMaxDepth = MaxToGoDepth
 
+// jsonTooDeep is the RangeError of a value nested deeper than jsonMaxDepth
+// arrays and objects. It wraps ErrTooDeep.
+func (r *Realm) jsonTooDeep() error {
+	return r.tooDeep("JSON nesting is too deep (more than %d levels)")
+}
+
 // jsonCallLevels is how many levels of a stringify or reviver walk count as
 // one call.
 const jsonCallLevels = 32
@@ -44,7 +50,8 @@ const jsonCallLevels = 32
 
 // JSONParse parses text with the JSON grammar and no reviver (Go-callable
 // entry point). Errors are JavaScript SyntaxErrors, except that nesting
-// deeper than MaxToGoDepth arrays and objects is a RangeError.
+// deeper than MaxToGoDepth arrays and objects is a RangeError that wraps
+// ErrTooDeep. Its allocation waits as JSONParseGoString's does.
 func (r *Realm) JSONParse(text *String) (Value, error) {
 	p := jsonParser{r: r}
 	return p.parse(text)
@@ -66,6 +73,11 @@ func jsonParse(r *Realm, this Value, args []Value) (Value, error) {
 	}
 	root := r.NewObject()
 	root.DefineOwnDataFast(r, StringKey(AtomEmpty), v, attrDefault)
+	// The root is on the register stack: the measurements made in the
+	// reviver reach the tree (FunctionData.measurable).
+	pin := r.pushArgs(1)
+	defer r.popArgs(1)
+	pin[0] = ObjectValue(root)
 	return r.internalizeJSONProperty(root, StringKey(AtomEmpty), reviver, 0)
 }
 
@@ -75,7 +87,7 @@ func jsonParse(r *Realm, this Value, args []Value) (Value, error) {
 // level), so past that the walk is a RangeError, not a Go stack overflow.
 func (r *Realm) internalizeJSONProperty(holder *Object, name PropertyKey, reviver Value, depth int) (Value, error) {
 	if depth > jsonMaxDepth {
-		return Undefined(), r.RangeError("Maximum call stack size exceeded")
+		return Undefined(), r.jsonTooDeep()
 	}
 	if depth > 0 && depth%jsonCallLevels == 0 {
 		if err := r.EnterCall(); err != nil {
@@ -184,20 +196,30 @@ func (p *jsonParser) parse(text *String) (Value, error) {
 		f = text.flat(new(String))
 	}
 	if f.kind == strASCII {
-		return p.parseText(f.s)
+		return p.parseText(f.s, text)
 	}
-	return p.parseText(wtf8FromUTF16(f.units()))
+	return p.parseText(wtf8FromUTF16(f.units()), nil)
 }
 
 // parseText parses src, ASCII or WTF-8; the strings of the result may alias
-// it.
-func (p *jsonParser) parseText(src string) (Value, error) {
+// it. src is the units of text, or the host's text or a working copy when
+// text is nil.
+func (p *jsonParser) parseText(src string, text *String) (Value, error) {
 	p.src = src
 	l := p.r.lazyState()
 	if l.json == nil {
 		l.json = &jsonStack{}
 	}
 	p.stack, p.keys = l.json.vals, l.json.keys
+	if m := l.mem; m != nil {
+		// The tree is held only by the parser until it returns: a charge
+		// made meanwhile waits (holding; a Go panic leaves it to
+		// RestoreCallState). The stacks' growth is charged as it goes
+		// (every), past the room the kept ones have.
+		m.shareText(src, text)
+		m.holding++
+		m.jsonVals, m.jsonKeys = cap(p.stack), cap(p.keys)
+	}
 	p.skipWS()
 	v, err := p.value()
 	if err == nil {
@@ -207,6 +229,10 @@ func (p *jsonParser) parseText(src string) (Value, error) {
 		}
 	}
 	l.json.keep(p.stack, p.keys, int(p.used))
+	if m := l.mem; m != nil {
+		m.jsonText = nil
+		m.holding--
+	}
 	if err != nil {
 		return Undefined(), err
 	}
@@ -235,6 +261,34 @@ func (s *jsonStack) keep(vals []Value, keys []PropertyKey, used int) {
 // the container's entries where they are: keep clears the stacks once, up
 // to the largest length. Clearing them at each container would cost a bulk
 // write barrier per container while the collector marks.
+// every runs every 4096 values: under a memory limit it charges what the
+// value and key stacks grew by since it last looked, the capacity added to
+// their high-water mark (memAccount.jsonVals, jsonKeys), so that what is
+// charged is what the parse holds, a stack reused once a container closed
+// charging nothing again, and a large array or object, whose entries wait
+// on the stacks until it closes, stops within the limit's margin; and, but
+// in a quiet parse, it checks for an interrupt, the limit's hit included.
+// (Charging each growth's whole new array, as Go allocates it, made the
+// 1.25x steps of a large stack count five times what it held.)
+//
+//go:noinline
+func (p *jsonParser) every() error {
+	if m := p.r.mem(); m != nil {
+		if c := cap(p.stack); c > m.jsonVals {
+			p.r.chargeSlow((c-m.jsonVals)*valueSize, memBytes)
+			m.jsonVals = c
+		}
+		if c := cap(p.keys); c > m.jsonKeys {
+			p.r.chargeSlow((c-m.jsonKeys)*int(unsafe.Sizeof(PropertyKey{})), memBytes)
+			m.jsonKeys = c
+		}
+	}
+	if p.quiet {
+		return nil
+	}
+	return p.r.CheckInterrupt()
+}
+
 func (p *jsonParser) closed() {
 	if n := len(p.stack); n > int(p.used) {
 		p.used = uint16(min(n, math.MaxUint16))
@@ -289,8 +343,8 @@ func (p *jsonParser) unexpected() error {
 
 func (p *jsonParser) value() (Value, error) {
 	p.work++
-	if p.work&4095 == 0 && !p.quiet {
-		if err := p.r.CheckInterrupt(); err != nil {
+	if p.work&4095 == 0 {
+		if err := p.every(); err != nil {
 			return Undefined(), err
 		}
 	}
@@ -861,7 +915,7 @@ const jsonKeyScanLimit = 64
 func (p *jsonParser) enter() error {
 	p.depth++
 	if p.depth > jsonMaxDepth {
-		return p.r.RangeError("Maximum call stack size exceeded")
+		return p.r.jsonTooDeep()
 	}
 	return nil
 }
@@ -1236,6 +1290,7 @@ type jsonStringifier struct {
 	hasList      bool
 	raw          bool    // AppendJSON: sb.b holds UTF-8 (quoteUTF8) and never upgrades
 	inDst        bool    // AppendJSON: sb.b is still dst's spare capacity (own)
+	strict       bool    // AppendJSONWith: a value written otherwise or dropped is an error (JSONOptions.Strict)
 	plainEpoch   uint32  // protosLackToJSON's answer: protoEpoch+1 when positive
 	gap          *String // nil for no indentation
 	// depth is the number of containers being serialized, the stack push
@@ -1383,19 +1438,33 @@ func (js *jsonStringifier) write(v Value) (bool, error) {
 			return false, err
 		}
 	case TypeNumber:
-		js.number(v.AsNumber())
+		if f := v.AsNumber(); f != f || math.IsInf(f, 0) {
+			if js.strict {
+				return false, newJSONLoss(v)
+			}
+			js.sb.writeASCIIBytes("null")
+		} else {
+			js.finite(f)
+		}
 	case TypeBigInt:
 		return false, js.r.TypeError("Do not know how to serialize a BigInt")
 	case TypeObject:
 		o := v.AsObject()
-		if o.class == ClassFunction {
-			return false, nil
-		}
-		if o.class == ClassArray {
-			return true, js.array(o)
-		}
-		if o.class == ClassProxy {
-			return js.proxy(o)
+		if o.class != ClassObject {
+			if o.class == ClassFunction {
+				return false, nil
+			}
+			if o.class == ClassArray {
+				return true, js.array(o)
+			}
+			if o.class == ClassProxy {
+				return js.proxy(o)
+			}
+			if js.strict {
+				if e := jsonOpaque(o); e != nil {
+					return false, e
+				}
+			}
 		}
 		return true, js.object(o)
 	default:
@@ -1428,6 +1497,11 @@ func (js *jsonStringifier) number(f float64) {
 		js.sb.writeASCIIBytes("null")
 		return
 	}
+	js.finite(f)
+}
+
+// finite writes the finite number f.
+func (js *jsonStringifier) finite(f float64) {
 	var buf [32]byte
 	writeASCIIBytes(&js.sb, AppendNumber(buf[:0], f))
 }
@@ -1523,7 +1597,7 @@ func (js *jsonStringifier) push(o *Object) error {
 			return js.r.TypeError("Converting circular structure to JSON")
 		}
 		if n >= jsonMaxDepth {
-			return js.r.RangeError("Maximum call stack size exceeded")
+			return js.r.jsonTooDeep()
 		}
 		if n%jsonCallLevels == 0 {
 			if err := js.r.EnterCall(); err != nil {
@@ -1613,6 +1687,9 @@ func (js *jsonStringifier) object(o *Object) error {
 				return err
 			}
 			if v.IsUndefined() || (v.IsObject() && v.AsObject().IsCallable()) || v.IsSymbol() {
+				if js.strict {
+					return newJSONLoss(v).in(p.key)
+				}
 				if err := js.tick(); err != nil {
 					return err
 				}
@@ -1633,7 +1710,7 @@ func (js *jsonStringifier) object(o *Object) error {
 				js.sb.WriteASCII(' ')
 			}
 			if _, err := js.write(v); err != nil {
-				return err
+				return jsonLossIn(err, p.key)
 			}
 		}
 	} else {
@@ -1660,6 +1737,9 @@ func (js *jsonStringifier) object(o *Object) error {
 				return err
 			}
 			if v.IsUndefined() || (v.IsObject() && v.AsObject().IsCallable()) || v.IsSymbol() {
+				if js.strict {
+					return newJSONLoss(v).in(k)
+				}
 				if err := js.tick(); err != nil {
 					return err
 				}
@@ -1685,7 +1765,7 @@ func (js *jsonStringifier) object(o *Object) error {
 				js.sb.WriteASCII(' ')
 			}
 			if _, err := js.write(v); err != nil {
-				return err
+				return jsonLossIn(err, k)
 			}
 		}
 	}
@@ -1756,9 +1836,12 @@ func (js *jsonStringifier) array(o *Object) error {
 		}
 		ok, err := js.write(v)
 		if err != nil {
-			return err
+			return jsonLossAt(err, i)
 		}
 		if !ok {
+			if js.strict {
+				return newJSONLoss(v).at(i)
+			}
 			js.sb.writeASCIIBytes("null")
 			if err := js.sb.checkLength(r); err != nil { // the indentation
 				return err

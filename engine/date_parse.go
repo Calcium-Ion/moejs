@@ -1,5 +1,8 @@
 package engine
 
+// Ported from V8's DateParser (src/date/dateparser.h, dateparser-inl.h and
+// dateparser.cc; BSD-3-Clause; see THIRD_PARTY_NOTICES).
+
 import "math"
 
 // Date.parse (ES2024 §21.4.3.2) accepts the Date Time String Format and,

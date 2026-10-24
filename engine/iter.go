@@ -210,6 +210,14 @@ func (r *Realm) iterStep(it, pos *Value) (Value, bool, error) {
 			}
 			return e, done, nil
 		}
+	case *intlSegments:
+		if x := r.intl; x != nil && next == x.segmentIterNextFn && o.class == ClassIntlSegmentIterator {
+			e, done := d.step(r)
+			if done {
+				*it = Undefined()
+			}
+			return e, done, nil
+		}
 	}
 	res, err := r.CallObject(next, v, nil)
 	if err != nil {

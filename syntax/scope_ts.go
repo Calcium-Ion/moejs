@@ -77,7 +77,7 @@ func (r *resolver) elideTypeImports() {
 	drop := make(map[*Binding]bool)
 	for _, id := range m.ts.aliases {
 		if b := id.Binding; used[b] {
-			r.fail(id.Pos, "An import alias used as a value is not supported: only erasable TypeScript is (see TODO.md)")
+			r.fail(id.Pos, "An import alias used as a value is not supported: only erasable TypeScript is")
 		}
 	}
 	for b := range info.aliasBindings {

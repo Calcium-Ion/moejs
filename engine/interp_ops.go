@@ -607,6 +607,9 @@ func (r *Realm) callValue(fn Value, this Value, args []Value) (Value, error) {
 		st.nframes = fi
 	case FuncNative:
 		res, err = fd.native(r, this, args)
+		if r.interruptFlag.Load() == flagMeasure && err == nil {
+			err = r.measureAfterCall(res)
+		}
 	default:
 		res, err = r.callOther(fd, this, args)
 	}
