@@ -196,3 +196,37 @@ func TestLazyCallPreservesExistingErrors(t *testing.T) {
 		})
 	}
 }
+
+// A native that decodes a string and returns or throws it hands it to the
+// caller only after the call folds the decode: the measurement that fold
+// makes must still reach it.
+func TestLazyNativeResultHonorsMemoryLimit(t *testing.T) {
+	const src = `
+let keep;
+export function returned(make) { keep = make(); }
+export function thrown(make) { try { make(); } catch (e) { keep = e; } }
+`
+	for _, name := range []string{"returned", "thrown"} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRealmWith(RealmOptions{MemoryLimit: 256 << 10})
+			env := evalModuleOn(t, r, src)
+			// The source and the empty realm fit; the decode does not.
+			s := r.hostString(strings.Repeat("é", 65536))
+			remove := r.AddLiveRoots(func(add func(Value)) { add(StringValue(s)) })
+			require.NoError(t, r.RebaseAllocation(nil))
+			r.ResetAllocation()
+			remove()
+			mk := r.NewNativeFunction(AtomEmpty, 0, func(r *Realm, _ Value, _ []Value) (Value, error) {
+				_ = s.Len()
+				if name == "thrown" {
+					return Undefined(), &Exception{Value: StringValue(s)}
+				}
+				return StringValue(s), nil
+			})
+			fn, ok := env.GetBindingValue(name)
+			require.True(t, ok)
+			_, err := r.Call(fn, Undefined(), []Value{ObjectValue(mk)})
+			require.ErrorIs(t, err, ErrMemoryLimit)
+		})
+	}
+}

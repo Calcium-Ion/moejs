@@ -196,8 +196,9 @@ const jsonStackMax = 256
 func (p *jsonParser) parse(text *String) (Value, error) {
 	src, knownUTF8 := text.wtf8()
 	p.knownUTF8 = knownUTF8
-	if text.kind == strRope && knownUTF8 || len(src) > 0 && unsafe.StringData(src) == unsafe.StringData(text.s) {
-		// src is text's units (ASCII) or its lazy source.
+	if len(src) > 0 && unsafe.StringData(src) == unsafe.StringData(text.s) {
+		// src is text's units (ASCII, a flattened rope's too) or its lazy
+		// source, not a copy.
 		return p.parseText(src, text)
 	}
 	return p.parseText(src, nil)

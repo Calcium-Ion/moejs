@@ -197,7 +197,7 @@ type memAccount struct {
 	// strings, allocated since the last fold. Either can happen on another
 	// goroutine than the realm's (a value the host kept), so the producer
 	// adds here atomically. The realm's goroutine folds it in at a charge,
-	// a loop back-edge, a call's return and a frame's exit (foldFlat).
+	// a loop back-edge, a call's return and a frame's exit (foldFlatSlow).
 	flat atomic.Int64
 }
 
@@ -423,18 +423,12 @@ func (r *Realm) flatDue() bool {
 	return lz != nil && lz.mem != nil && lz.mem.flat.Load() != 0
 }
 
-// foldFlat moves deferred rope-flatten and lazy-decode bytes into the
+// foldFlatSlow moves deferred rope-flatten and lazy-decode bytes into the
 // account and interrupts the realm when they pass the limit. It reports
 // whether that raised the interrupt. Producers only add to flat, from any
 // goroutine; the realm's goroutine folds at a loop back-edge and as a call
 // returns, which is where a script is stopped.
-func (r *Realm) foldFlat() bool {
-	if !r.flatDue() {
-		return false
-	}
-	return r.foldFlatSlow(r.lazy.mem)
-}
-
+//
 //go:noinline
 func (r *Realm) foldFlatSlow(m *memAccount) bool {
 	n := m.flat.Swap(0)
@@ -455,12 +449,29 @@ func (r *Realm) foldFlatSlow(m *memAccount) bool {
 	return m.hits != hits
 }
 
+// foldFlatKeeping is foldFlatSlow where v and the value err throws are
+// held only by Go: the measurement the fold may make takes them as roots.
+// A caller in run returns right after it, as pushArgs may grow the stack.
+//
+//go:noinline
+func (r *Realm) foldFlatKeeping(v Value, err error) bool {
+	pin := r.pushArgs(2)
+	pin[0] = v
+	if e, ok := err.(*Exception); ok {
+		pin[1] = e.Value
+	}
+	hit := r.foldFlatSlow(r.lazy.mem)
+	clear(pin)
+	r.popArgs(2)
+	return hit
+}
+
 // finishCall folds deferred storage on normal and exceptional returns.
 // A newly raised memory interrupt replaces the result or an ordinary
 // error. An existing InterruptedError is preserved, even if its flag was
 // cleared while unwinding.
 func (r *Realm) finishCall(res Value, err error) (Value, error) {
-	if _, interrupted := err.(*InterruptedError); interrupted || !r.foldFlat() {
+	if _, interrupted := err.(*InterruptedError); interrupted || !r.flatDue() || !r.foldFlatKeeping(res, err) {
 		return res, err
 	}
 	return Undefined(), r.interruptError()

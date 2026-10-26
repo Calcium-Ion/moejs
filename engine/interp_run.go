@@ -843,7 +843,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				thrown = e.Value
 			case *genFrame:
 				out := e.suspend(ev.env, ev.depth) // a generator suspends
-				if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+				if r.flatDue() && r.foldFlatKeeping(out, nil) {
 					// After suspend: the frame stays resumable once the
 					// host clears the interrupt.
 					return Undefined(), r.interruptError()
@@ -877,7 +877,7 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		if h == nil {
 			// Frames resumed or run without a call (await, module
 			// bodies) leave here before their rejection or module error.
-			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+			if r.flatDue() && r.foldFlatKeeping(thrown, nil) {
 				return Undefined(), r.interruptError()
 			}
 			if err == errThrown {
