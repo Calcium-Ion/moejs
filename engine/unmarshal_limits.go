@@ -713,7 +713,8 @@ func goEscapeLen(c byte) int64 {
 }
 
 // goQuotedLen is the length of json.Marshal's text of the Go string g: an
-// invalid byte is \ufffd, U+2028 and U+2029 are escaped.
+// invalid byte is replaced with the three-byte UTF-8 encoding of U+FFFD,
+// while U+2028 and U+2029 are escaped.
 func goQuotedLen(g string) int64 {
 	if isASCII(g) {
 		n := int64(len(g)) + 2 + 5*int64(strings.Count(g, "<")+strings.Count(g, ">")+strings.Count(g, "&"))
@@ -731,7 +732,9 @@ func goQuotedLen(g string) int64 {
 		}
 		r, size := utf8.DecodeRuneInString(g[i:])
 		switch {
-		case r == utf8.RuneError && size == 1, r == '\u2028', r == '\u2029':
+		case r == utf8.RuneError && size == 1:
+			n += 3
+		case r == '\u2028', r == '\u2029':
 			n += 6
 		default:
 			n += int64(size)
