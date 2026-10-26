@@ -71,8 +71,11 @@ type umTarget struct {
 	Untagged       string
 	Dash           string `json:"-"`
 	DashComma      string `json:"-,"`
-	BadTag         string `json:"a\\b"`
-	hidden         string //nolint:unused
+	// Keep this tag valid across encoding/json v1 and v2. The malformed-tag
+	// behavior differs between those implementations and is outside this
+	// decoder's field matching contract.
+	BadTag string `json:"a"`
+	hidden string //nolint:unused
 }
 
 // umDup has two fields tagged "a" (neither wins), and a tagged "b" and a

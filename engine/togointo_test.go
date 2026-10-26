@@ -186,8 +186,9 @@ func errText(err error) string {
 }
 
 // TestToGoIntoNumberStop checks a json.Number from a string: Unmarshal
-// stops at it, and the walk has written the same members before it, the
-// ones before it in sorted key order.
+// reports the error while preserving the members it has decoded. The
+// exact set is owned by encoding/json and differs between its v1 and v2
+// implementations.
 func TestToGoIntoNumberStop(t *testing.T) {
 	r := NewRealm()
 	v := evalValue(t, r, `({z: 1, b: "x", a: 2, c: 3})`)
@@ -197,7 +198,6 @@ func TestToGoIntoNumberStop(t *testing.T) {
 	require.Error(t, werr)
 	require.Equal(t, werr.Error(), errText(gerr))
 	require.Equal(t, want, got)
-	require.Equal(t, map[string]json.Number{"a": "2"}, got)
 }
 
 // TestToGoIntoIgnoresInterrupt checks that a pending interrupt is not
