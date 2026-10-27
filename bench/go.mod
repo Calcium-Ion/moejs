@@ -1,9 +1,9 @@
-module github.com/Calcium-Ion/moejs/bench
+module github.com/MoeForge/moejs/bench
 
 go 1.26.6
 
 require (
-	github.com/Calcium-Ion/moejs v0.0.0-00010101000000-000000000000
+	github.com/MoeForge/moejs v0.0.0-00010101000000-000000000000
 	github.com/buke/quickjs-go v0.7.7
 	github.com/evanw/esbuild v0.28.2
 	github.com/grafana/sobek v0.0.0-20260708062710-267a0e055bb4
@@ -30,4 +30,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace github.com/Calcium-Ion/moejs => ../
+replace github.com/MoeForge/moejs => ../
