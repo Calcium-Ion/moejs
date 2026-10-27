@@ -9,7 +9,6 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -717,11 +716,12 @@ func goEscapeLen(c byte) int64 {
 // string that is not UTF-8: the escape \ufffd, six bytes, by encoding/json's
 // own encoder (Go 1.26 and before, GOEXPERIMENT=nojsonv2 after), U+FFFD
 // itself, three bytes, by encoding/json/v2's, which json.Marshal runs on from
-// Go 1.27 (GOEXPERIMENT=jsonv2 before).
-var goInvalidLen = sync.OnceValue(func() int64 {
+// Go 1.27 (GOEXPERIMENT=jsonv2 before). Set when the package initializes, so
+// that goQuotedLen's loop reads a variable rather than calling a function.
+var goInvalidLen = func() int64 {
 	b, _ := json.Marshal("\xff")
 	return int64(len(b)) - 2
-})
+}()
 
 // goQuotedLen is the length of json.Marshal's text of the Go string g: an
 // invalid byte is goInvalidLen bytes, U+2028 and U+2029 are escaped.
@@ -743,7 +743,7 @@ func goQuotedLen(g string) int64 {
 		r, size := utf8.DecodeRuneInString(g[i:])
 		switch {
 		case r == utf8.RuneError && size == 1:
-			n += goInvalidLen()
+			n += goInvalidLen
 		case r == '\u2028', r == '\u2029':
 			n += 6
 		default:
