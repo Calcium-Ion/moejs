@@ -72,7 +72,11 @@ test262 directory and how to update the baseline.
 - When it changes what runs, update TODO.md and, for the Go API,
   docs/guide.md.
 - For a performance change, include the benchmark numbers before and after
-  and the command that produced them.
+  and the command that produced them. A change to strings, JSON or the
+  interpreter loop should also show the plugin scenarios, which
+  `bench/scripts/plugin_ab.sh` runs with moejs before and after the change
+  ([docs/performance.md](docs/performance.md#reproducing) shows how to set
+  them up).
 
 We squash a pull request into one commit when we merge it, so the branch's
 commit history can stay as it is.

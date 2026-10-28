@@ -191,6 +191,16 @@ go test -run TestFootprint -v .
 
 `bench/scripts/run_all.sh` 运行全部测量，包括并发吞吐与分阶段基准。
 
+插件场景由 `bench/cmd/pluginbench` 运行。`bench/scenarios/gen.py` 把输入生成到 `bench/testdata/scenarios`（不纳入 git），并用 `bench/scenarios/SHA256SUMS` 校验，这些哈希就是上面数据测量时所用文件的哈希。输入都不作为数据保存：小请求来自 `bench/testdata/fixtures` 里的调用，图片是固定种子生成的随机字节，agent 会话里的工具结果取自 Go 1.26.6 源码树，gen.py 通过 `GOTOOLCHAIN=go1.26.6 go env GOROOT` 找到它。运行前需要先下载插件，并装有 Python 3.9 或更高版本：
+
+```sh
+python3 bench/scenarios/gen.py
+cd bench
+go run ./cmd/pluginbench -engine moejs -scenario agent100k -workers 8
+```
+
+`bench/scripts/plugin_ab.sh <base> <head>` 先确认两边结果相同，再用两个 git 版本或两份检出的 moejs 跑这些场景。C 版 QuickJS 和 quickjs-ng 两列来自一个不在仓库里的 C 宿主程序。
+
 ## PGO
 
 `default.pgo` 以整套钩子负载录制（在 `bench/` 中运行 `go run -trimpath ./cmd/pgo` 重新生成）。Go 只会自动使用 main 包目录下的

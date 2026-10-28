@@ -215,6 +215,26 @@ go test -run TestFootprint -v .
 `bench/scripts/run_all.sh` runs the full set, including the parallel
 throughput and per-phase benchmarks.
 
+The plugin scenarios run in `bench/cmd/pluginbench`. `bench/scenarios/gen.py`
+writes their inputs into `bench/testdata/scenarios` (git-ignored) and checks
+them against `bench/scenarios/SHA256SUMS`, the hashes of the files the
+figures above were measured with. No input is kept as data: the small
+requests are the calls of `bench/testdata/fixtures`, the images are seeded
+random bytes, and the agent sessions' tool results are lines of the Go 1.26.6
+source tree, which gen.py finds with `GOTOOLCHAIN=go1.26.6 go env GOROOT`. It
+needs the plugins and Python 3.9 or later:
+
+```sh
+python3 bench/scenarios/gen.py
+cd bench
+go run ./cmd/pluginbench -engine moejs -scenario agent100k -workers 8
+```
+
+`bench/scripts/plugin_ab.sh <base> <head>` runs the scenarios with moejs at
+two git revisions or checkouts, after checking that both return the same
+results. The C QuickJS and quickjs-ng columns come from a C host that is not
+in the repository.
+
 ## PGO
 
 `default.pgo` is recorded from the whole hook workload
