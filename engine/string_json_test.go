@@ -667,7 +667,7 @@ func TestJSONParseEscapedStringAllocs(t *testing.T) {
 // TestJSONParseEscapedStringCharge checks that parsing an escaped literal
 // charges the lazy block, and the decoded units are charged on the first read.
 func TestJSONParseEscapedStringCharge(t *testing.T) {
-	block := int64(unsafe.Sizeof(lazyStringBlock{}))
+	block := int64(unsafe.Sizeof(chargedLazyStringBlock{}))
 	for _, text := range []string{
 		`"ab\ncd"`,
 		`"` + strings.Repeat(`abc\n\t\"def`, 1000) + `"`,
@@ -797,7 +797,7 @@ func TestFromGoLongStringJSON(t *testing.T) {
 
 // TestJSONParseSharesShortLiterals checks that repeated short plain
 // literals are one String, and that literals of the same slot but other
-// content, long ones and escaped ones are not merged.
+// content and long ones are not merged.
 func TestJSONParseSharesShortLiterals(t *testing.T) {
 	r := NewRealm()
 	long := strings.Repeat("x", jsonShortMax+1)

@@ -28,7 +28,9 @@ export function unwind(xs, i) {
   }
 }
 `
-	one := `"` + strings.Repeat("中", 16384) + `"`
+	// The decoded units alone exceed 64 KiB, without spare UTF-16 capacity.
+	const units = 65536
+	one := `"` + strings.Repeat("中", units) + `"`
 	input := "[" + strings.Repeat(one+",", 31) + one + "]"
 	for _, name := range []string{"thrown", "constructed", "unwind"} {
 		for _, budget := range []struct {
@@ -55,7 +57,7 @@ export function unwind(xs, i) {
 				if !budget.hit {
 					var ex *Exception
 					require.ErrorAs(t, err, &ex)
-					require.Equal(t, float64(16384), ex.Value.AsNumber())
+					require.Equal(t, float64(units), ex.Value.AsNumber())
 					require.Zero(t, r.Stats().MemoryLimitHits)
 					remove()
 					return
@@ -98,8 +100,8 @@ func TestLazySameSourceEqualsWithoutDecode(t *testing.T) {
 			require.Equal(t, c.want, pair[0].Equals(pair[1]), c.name)
 		}
 		if c.name != "text_and_json" {
-			require.Nil(t, c.a.lazyData().decoded, c.name)
-			require.Nil(t, c.b.lazyData().decoded, c.name)
+			require.Nil(t, c.a.lazyPublished(), c.name)
+			require.Nil(t, c.b.lazyPublished(), c.name)
 		}
 	}
 }
@@ -152,7 +154,7 @@ func TestLazyCallPreservesExistingErrors(t *testing.T) {
 	for _, name := range []string{"no_read", "within_budget", "pending_host_interrupt", "cleared_host_interrupt", "already_charged"} {
 		t.Run(name, func(t *testing.T) {
 			r := NewRealmWith(RealmOptions{MemoryLimit: 64 << 10})
-			size := 16384
+			size := 65536
 			if name == "within_budget" {
 				size = 16
 			}
@@ -197,6 +199,30 @@ func TestLazyCallPreservesExistingErrors(t *testing.T) {
 	}
 }
 
+func TestLazyBytecodePreservesClearedInterrupt(t *testing.T) {
+	for _, prefix := range []string{"", "async "} {
+		r := NewRealmWith(RealmOptions{MemoryLimit: 64 << 10})
+		env := evalModuleOn(t, r, `export `+prefix+`function invoke(make) { return make(); }`)
+		s := r.hostString(strings.Repeat("中", 65536))
+		var want error
+		make := r.NewNativeFunction(AtomEmpty, 0, func(r *Realm, _ Value, _ []Value) (Value, error) {
+			_ = s.Len()
+			r.Interrupt(errors.New("host interruption"))
+			want = r.CheckInterrupt()
+			r.ClearInterrupt()
+			return Undefined(), want
+		})
+		fn, ok := env.GetBindingValue("invoke")
+		require.True(t, ok)
+		_, got := r.Call(fn, Undefined(), []Value{ObjectValue(make)})
+		require.Same(t, want, got, "wrapper %q preserves the observed interruption", prefix)
+		require.Zero(t, r.Stats().MemoryLimitHits)
+		require.Zero(t, r.callDepth)
+		require.Zero(t, r.interp.nframes)
+		require.Zero(t, r.interp.sp)
+	}
+}
+
 // A native that decodes a string and returns or throws it hands it to the
 // caller only after the call folds the decode: the measurement that fold
 // makes must still reach it.
@@ -205,20 +231,25 @@ func TestLazyNativeResultHonorsMemoryLimit(t *testing.T) {
 let keep;
 export function returned(make) { keep = make(); }
 export function thrown(make) { try { make(); } catch (e) { keep = e; } }
+export async function asyncThrown(make) { try { make(); } catch (e) { keep = e; } }
 `
-	for _, name := range []string{"returned", "thrown"} {
+	for _, name := range []string{"returned", "thrown", "asyncThrown"} {
 		t.Run(name, func(t *testing.T) {
 			r := NewRealmWith(RealmOptions{MemoryLimit: 256 << 10})
 			env := evalModuleOn(t, r, src)
 			// The source and the empty realm fit; the decode does not.
 			s := r.hostString(strings.Repeat("é", 65536))
 			remove := r.AddLiveRoots(func(add func(Value)) { add(StringValue(s)) })
+			// Rebase is paced: make the initial retained-size measurement
+			// due before resetting, rather than relying on decode waste.
+			require.NoError(t, r.ChargeMemory(128<<10))
 			require.NoError(t, r.RebaseAllocation(nil))
+			require.Positive(t, r.Stats().LiveBytes)
 			r.ResetAllocation()
 			remove()
 			mk := r.NewNativeFunction(AtomEmpty, 0, func(r *Realm, _ Value, _ []Value) (Value, error) {
 				_ = s.Len()
-				if name == "thrown" {
+				if name != "returned" {
 					return Undefined(), &Exception{Value: StringValue(s)}
 				}
 				return StringValue(s), nil

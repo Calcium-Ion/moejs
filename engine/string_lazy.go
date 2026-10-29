@@ -9,7 +9,7 @@ import (
 
 // lazyStringMode fixes how retained bytes are decoded. Reads may populate
 // caches, but never change the mode or the retained bytes. The text modes
-// come first (lazyStringData.textMode).
+// come first (String.lazyTextMode).
 type lazyStringMode uint8
 
 const (
@@ -41,39 +41,30 @@ const (
 )
 
 // lazyStringData publishes one decoded flat String, content and length
-// together, to concurrent readers through once. facts and hash are caches
-// that racing readers may fill twice with the same value.
-//
-// mem is the account of the realm that created the string, when that realm
-// had a memory limit. It is written once, before the string is published,
-// and resolve adds the decoded storage to mem.flat. Decoding can run on any
-// goroutine, so it does not touch the account's other fields. The realm's
-// goroutine folds flat in and applies the limit at the next loop back-edge,
-// call return or charge. A string created with no limit keeps mem nil and
-// its decoding is not charged. One whose realm later drops the limit still
-// adds to the old account, which nothing reads.
+// together, to concurrent readers through once. The String's right field
+// publishes the cache, hash caches its hash atomically, and immutable flags
+// and negative n carry the mode and optional JSON plan. With no limit this
+// leaves one 64-byte allocation, rather than 96 bytes for a short value.
 type lazyStringData struct {
-	once    sync.Once
-	facts   atomic.Uint32
-	hash    atomic.Uint32 // 0 = not computed
-	mode    lazyStringMode
-	mem     *memAccount
-	decoded *String
+	once  sync.Once
+	facts atomic.Uint32
 }
 
-func (d *lazyStringData) textMode() bool { return d.mode <= lazyWTF8 }
+func (s *String) lazyMode() lazyStringMode { return lazyStringMode(s.flags >> lazyModeShift & 3) }
+func (s *String) lazyTextMode() bool       { return s.lazyMode() <= lazyWTF8 }
 
 // validUTF8 reports whether text, the retained bytes, is the UTF-8 of the
 // string's content: text mode bytes that are valid UTF-8 (which encodes no
 // surrogates). The check runs once.
-func (d *lazyStringData) validUTF8(text string) bool {
-	if !d.textMode() {
+func (s *String) validLazyUTF8() bool {
+	if !s.lazyTextMode() {
 		return false
 	}
+	d := s.lazyData()
 	f := d.facts.Load()
 	if f&(factUTF8Valid|factUTF8Invalid) == 0 {
 		f = factUTF8Invalid
-		if utf8.ValidString(text) {
+		if utf8.ValidString(s.s) {
 			f = factUTF8Valid
 		}
 		d.facts.Or(f)
@@ -84,13 +75,14 @@ func (d *lazyStringData) validUTF8(text string) bool {
 // plainJSON reports whether text can be copied between JSON quotes as ASCII
 // without escaping. Only text mode strings of at least jsonPlainMin bytes
 // are scanned; false can also mean the mode or length is ineligible.
-func (d *lazyStringData) plainJSON(text string) bool {
-	if len(text) < jsonPlainMin || !d.textMode() {
+func (s *String) plainLazyJSON() bool {
+	if len(s.s) < jsonPlainMin || !s.lazyTextMode() {
 		return false
 	}
+	d := s.lazyData()
 	f := d.facts.Load()
 	if f&(factJSONPlain|factJSONEscapes) == 0 {
-		ascii, plain := jsonASCII(text)
+		ascii, plain := jsonASCII(s.s)
 		f = factJSONEscapes
 		if ascii {
 			f = factUTF8Valid | factJSONEscapes
@@ -104,52 +96,77 @@ func (d *lazyStringData) plainJSON(text string) bool {
 }
 
 // resolve decodes text once; every caller waits for the same result, and
-// the original String keeps its source and n == -1. The decoded storage is
+// the original String keeps its source and negative n. The decoded storage is
 // charged to mem, when the string was created under a memory limit.
-func (d *lazyStringData) resolve(text string) *String {
+func (s *String) resolved() *String {
+	d := s.lazyData()
 	d.once.Do(func() {
-		var n int
-		d.decoded, n = decodeLazyString(text, d.mode)
-		if d.textMode() && d.decoded.kind == strASCII {
+		saved := -1
+		if s.n < -1 {
+			saved = -int(s.n) - 2
+		}
+		decoded, n := decodeLazyStringPlanned(s.s, s.lazyMode(), saved, s.flags&strLazyJSONWide != 0)
+		atomic.StorePointer(s.rightWord(), unsafe.Pointer(decoded))
+		if s.lazyTextMode() && decoded.kind == strASCII {
 			d.facts.Or(factUTF8Valid)
 		}
 		d.facts.Or(factDecoded)
-		if d.mem != nil {
-			d.mem.flat.Add(int64(n))
+		if m := s.lazyAccount(); m != nil {
+			m.addFlat(int64(n))
 		}
 	})
-	return d.decoded
+	return (*String)(atomic.LoadPointer(s.rightWord()))
 }
 
 // published returns the decoded String once resolve has set it, without
 // waiting for a resolve in progress (the live measurement).
-func (d *lazyStringData) published() *String {
-	if d.facts.Load()&factDecoded == 0 {
+func (s *String) lazyPublished() *String {
+	if s.lazyData().facts.Load()&factDecoded == 0 {
 		return nil
 	}
-	return d.decoded
+	return (*String)(atomic.LoadPointer(s.rightWord()))
 }
 
 // decodeLazyString reuses the existing decoders. JSON modes require
 // syntax-checked contents. The integer is the heap storage the result
 // retains, header included, which a memory limit charges.
 func decodeLazyString(text string, mode lazyStringMode) (*String, int) {
+	return decodeLazyStringPlanned(text, mode, -1, false)
+}
+
+func decodeLazyStringPlanned(text string, mode lazyStringMode, saved int, wide bool) (*String, int) {
 	if mode == lazyJSONContents || mode == lazyJSONVerbatim {
 		var sb StringBuilder
-		decodeJSONContents(&sb, text)
+		coallocated := decodeJSONContents(&sb, text, saved, wide)
 		n := sb.retained()
+		if coallocated != nil {
+			return coallocated, n + stringHeaderSize
+		}
 		return sb.String(), n + stringHeaderSize
 	}
 	if isASCIILong(text) {
 		return asciiString(text), stringHeaderSize
 	}
-	u := make([]uint16, 0, len(text)) // a byte decodes to at most one unit
+	// Reserve code units, not source bytes: UTF-8 CJK takes three bytes
+	// for one unit. Invalid Go text follows range's replacement semantics.
+	n := 0
 	if mode == lazyWTF8 {
-		u = appendWTF8Units(u, text)
+		n = wtf8Units(text)
 	} else {
-		u = appendUTF16(u, text)
+		for _, r := range text {
+			n++
+			if r >= 0x10000 {
+				n++
+			}
+		}
 	}
-	return FromUTF16(u), 2*cap(u) + stringHeaderSize
+	s, u := newUTF16Buf(n)
+	if mode == lazyWTF8 {
+		appendWTF8Units(u[:0], text)
+	} else {
+		appendUTF16(u[:0], text)
+	}
+	return s, 2*cap(u) + stringHeaderSize
 }
 
 // lazyStringBlock keeps a String and its cache in one allocation.
@@ -158,25 +175,78 @@ type lazyStringBlock struct {
 	data  lazyStringData
 }
 
+// chargedLazyData is the data of a lazy string a limited realm made
+// (strLazyCharged): the account its decoding adds to and, for a JSON
+// value, its share root. Both are immutable after publication; decoding
+// adds solely to the atomic account. They are reached through p, so they
+// do not depend on where the String header lives.
+type chargedLazyData struct {
+	lazyStringData
+	mem  *memAccount
+	root *String
+}
+
+type chargedLazyStringBlock struct {
+	value String
+	data  chargedLazyData
+}
+
 func newLazyString(text string, mode lazyStringMode) *String {
+	return newAccountedLazyString(text, mode, nil)
+}
+
+func newAccountedLazyString(text string, mode lazyStringMode, mem *memAccount) *String {
 	if len(text) == 0 {
 		return emptyString
 	}
+	if mem != nil {
+		b := &chargedLazyStringBlock{data: chargedLazyData{mem: mem}}
+		b.value = String{s: text, p: unsafe.Pointer(&b.data), n: -1, kind: strLazy, flags: uint8(mode)<<lazyModeShift | strLazyCharged}
+		return &b.value
+	}
 	b := &lazyStringBlock{}
-	b.data.mode = mode
-	b.value = String{s: text, p: unsafe.Pointer(&b.data), n: -1, kind: strLazy}
+	b.value = String{s: text, p: unsafe.Pointer(&b.data), n: -1, kind: strLazy, flags: uint8(mode) << lazyModeShift}
 	return &b.value
 }
 
 func (s *String) isLazy() bool { return s.kind == strLazy }
 
 func (s *String) lazyData() *lazyStringData { return (*lazyStringData)(s.p) }
-func (s *String) resolved() *String         { return s.lazyData().resolve(s.s) }
+
+// chargedData is the chargedLazyData of a lazy string a limited realm
+// made, nil for any other.
+func (s *String) chargedData() *chargedLazyData {
+	if s.flags&strLazyCharged != 0 {
+		return (*chargedLazyData)(s.p)
+	}
+	return nil
+}
+
+func (s *String) lazyAccount() *memAccount {
+	if d := s.chargedData(); d != nil {
+		return d.mem
+	}
+	return nil
+}
+
+func (s *String) lazyShareRoot() *String {
+	if d := s.chargedData(); d != nil {
+		return d.root
+	}
+	return nil
+}
+
+func (s *String) lazyBlockSize() int {
+	if s.flags&strLazyCharged != 0 {
+		return int(unsafe.Sizeof(chargedLazyStringBlock{}))
+	}
+	return int(unsafe.Sizeof(lazyStringBlock{}))
+}
 
 // sourceUTF8 returns the retained bytes of a lazy string when they are the
 // UTF-8 of its content, which exports then share without decoding.
 func (s *String) sourceUTF8() (string, bool) {
-	if s.isLazy() && s.lazyData().validUTF8(s.s) {
+	if s.isLazy() && s.validLazyUTF8() {
 		return s.s, true
 	}
 	return "", false
@@ -185,25 +255,23 @@ func (s *String) sourceUTF8() (string, bool) {
 // sameLazyContent reports that two lazy strings retaining the same bytes
 // text decode to the same content: one mode, both JSON modes (one decoder),
 // or text modes and valid UTF-8, which the text modes decode alike.
-func sameLazyContent(a, b *lazyStringData, text string) bool {
-	if a.mode == b.mode {
+func sameLazyContent(a, b *String) bool {
+	if a.lazyMode() == b.lazyMode() {
 		return true
 	}
-	if a.textMode() != b.textMode() {
+	if a.lazyTextMode() != b.lazyTextMode() {
 		return false
 	}
-	return !a.textMode() || a.validUTF8(text)
+	return !a.lazyTextMode() || a.validLazyUTF8()
 }
 
-// lazyHash is Hash of a lazy string, cached in its holder: the String's
-// own hash field is never written once a lazy string is shared.
+// lazyHash caches Hash atomically in the String's existing hash slot.
 func (s *String) lazyHash() uint32 {
-	d := s.lazyData()
-	if h := d.hash.Load(); h != 0 {
+	if h := atomic.LoadUint32(&s.hash); h != 0 {
 		return h
 	}
-	h := d.resolve(s.s).contentHash()
-	d.hash.Store(h)
+	h := s.resolved().contentHash()
+	atomic.StoreUint32(&s.hash, h)
 	return h
 }
 
@@ -212,16 +280,20 @@ func (s *String) lazyHash() uint32 {
 // converts it, and any other keeps its bytes until its content or length is
 // first read. GoString of it shares the bytes when they are valid UTF-8.
 func FromHostString(text string) *String {
+	return fromAccountedHostString(text, nil)
+}
+
+func fromAccountedHostString(text string, mem *memAccount) *String {
 	if len(text) < jsonPlainMin && isASCII(text) {
 		return asciiString(text)
 	}
-	return newLazyString(text, lazyText)
+	return newAccountedLazyString(text, lazyText, mem)
 }
 
 // hostString is FromHostString under the realm's memory limit: a lazy
 // string's block is charged now and its decoded storage on first read.
 func (r *Realm) hostString(text string) *String {
-	s := FromHostString(text)
+	s := fromAccountedHostString(text, r.mem())
 	r.accountLazy(s)
 	return s
 }
@@ -230,11 +302,11 @@ func (r *Realm) hostString(text string) *String {
 // a memory limit the parse's text is their share root (shareText), as for
 // plain's strings, so the live measurement counts the text once.
 func (r *Realm) lazyString(text string, mode lazyStringMode) *String {
-	s := newLazyString(text, mode)
-	r.accountLazy(s)
+	s := newAccountedLazyString(text, mode, r.mem())
 	if m := r.mem(); m != nil && s.isLazy() {
-		s.right = m.jsonText
+		s.chargedData().root = m.jsonText
 	}
+	r.accountLazy(s)
 	return s
 }
 
@@ -246,6 +318,5 @@ func (r *Realm) accountLazy(s *String) {
 	if m == nil || !s.isLazy() {
 		return
 	}
-	s.lazyData().mem = m
-	r.chargeString(int(unsafe.Sizeof(lazyStringBlock{})) - stringHeaderSize)
+	r.chargeString(s.lazyBlockSize() - stringHeaderSize)
 }

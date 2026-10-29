@@ -122,7 +122,7 @@ func TestLazyUTF8LimitedRealmDefersUnitCharge(t *testing.T) {
 		s := v.AsString()
 		require.True(t, s.isLazy())
 		require.Nil(t, cacheOf(s))
-		require.Same(t, r.mem(), s.lazyData().mem)
+		require.Same(t, r.mem(), s.lazyAccount())
 		require.NoError(t, r.CheckInterrupt())
 		before := r.Stats().RequestAllocatedBytes
 		require.Equal(t, len([]rune(text)), s.Len())
@@ -140,7 +140,7 @@ func TestLazyUTF8LimitedRealmDefersUnitCharge(t *testing.T) {
 }
 
 func TestLazyUTF8LimitedJSONChargesOnRead(t *testing.T) {
-	for _, size := range []int{1024, 200000} {
+	for _, size := range []int{1024, 200000, 600000} {
 		r := NewRealmWith(RealmOptions{MemoryLimit: 1 << 20})
 		text := strings.Repeat("中", size)
 		v, err := r.JSONParseGoString(`"` + text + `"`)
@@ -154,7 +154,7 @@ func TestLazyUTF8LimitedJSONChargesOnRead(t *testing.T) {
 		require.Equal(t, size, s.Len())
 		require.GreaterOrEqual(t, r.Stats().RequestAllocatedBytes-before, int64(2*size))
 		r.charge(0)
-		if size == 200000 {
+		if 2*size > 1<<20 {
 			require.ErrorIs(t, r.CheckInterrupt(), ErrMemoryLimit)
 			require.Positive(t, r.Stats().MemoryLimitHits)
 		} else {
@@ -177,7 +177,8 @@ export function sum(xs) {
 export function one(s) { return s.length; }
 `
 	const limit = int64(64 << 10)
-	one := `"` + strings.Repeat("中", 16384) + `"`
+	// A single decoded string must exceed the budget with exact capacity.
+	one := `"` + strings.Repeat("中", 65536) + `"`
 	many := "[" + strings.Repeat(one+",", 15) + one + "]"
 
 	r := NewRealmWith(RealmOptions{MemoryLimit: limit})
@@ -241,7 +242,7 @@ export function read() { return out; }
 	// The empty realm itself measures past 64K.
 	r := NewRealmWith(RealmOptions{MemoryLimit: 256 << 10})
 	env := evalModuleOn(t, r, src)
-	v, err := r.JSONParseGoString(`"` + strings.Repeat("中", 65536) + `"`)
+	v, err := r.JSONParseGoString(`"` + strings.Repeat("中", 140000) + `"`)
 	require.NoError(t, err)
 	call := func(name string, args ...Value) (Value, error) {
 		fn, ok := env.GetBindingValue(name)
@@ -264,7 +265,7 @@ export function read() { return out; }
 	require.NoError(t, err)
 	got, err := call("read")
 	require.NoError(t, err)
-	require.Equal(t, float64(65537), got.AsNumber())
+	require.Equal(t, float64(140001), got.AsNumber())
 }
 
 // TestLazyDecodeOtherGoroutineLeavesTheAccount is a host reading a lazy
@@ -313,7 +314,7 @@ func TestLazyUTF8LimitedASCIISubstring(t *testing.T) {
 // cacheOf is the decoded result a lazy string has published, or nil. Tests
 // read it once the goroutines that decode have finished.
 func cacheOf(s *String) *String {
-	return s.lazyData().decoded
+	return s.lazyPublished()
 }
 
 func TestLazyUTF8MatchesFromGoString(t *testing.T) {
@@ -491,7 +492,7 @@ func TestUnifiedEscapedJSONLazy(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, tc.canonical, string(out))
-		if s.lazyData().mode == lazyJSONVerbatim {
+		if s.lazyMode() == lazyJSONVerbatim {
 			require.Nil(t, cacheOf(s), "canonical literal should copy without decoding")
 		}
 		require.Equal(t, tc.text, s.GoString())
@@ -677,7 +678,6 @@ func TestUnifiedConcurrentChecksAndDecode(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := FromHostString(tc.text)
-			d := s.lazyData()
 			want := utf16.Encode([]rune(tc.text))
 			var wg sync.WaitGroup
 			start := make(chan struct{})
@@ -693,11 +693,11 @@ func TestUnifiedConcurrentChecksAndDecode(t *testing.T) {
 								t.Error("decoded content changed")
 							}
 						case 1:
-							if d.validUTF8(tc.text) != tc.valid {
+							if s.validLazyUTF8() != tc.valid {
 								t.Error("UTF-8 check changed")
 							}
 						case 2:
-							if d.plainJSON(tc.text) != tc.plain {
+							if s.plainLazyJSON() != tc.plain {
 								t.Error("JSON check changed")
 							}
 						case 3:
@@ -730,9 +730,9 @@ func TestUnifiedJSONStaysLazyUnderMemoryLimit(t *testing.T) {
 			require.True(t, s.isLazy())
 			require.Nil(t, cacheOf(s))
 			if limit != 0 {
-				require.Same(t, r.mem(), s.lazyData().mem)
+				require.Same(t, r.mem(), s.lazyAccount())
 			} else {
-				require.Nil(t, s.lazyData().mem)
+				require.Nil(t, s.lazyAccount())
 			}
 			got := s.UTF16()
 			if expected == nil {
@@ -749,7 +749,7 @@ func TestUnifiedCanonicalQuoteInterrupt(t *testing.T) {
 	v, err := r.JSONParseGoString(`"` + strings.Repeat(`中文\n`, 8192) + `"`)
 	require.NoError(t, err)
 	s := v.AsString()
-	require.Equal(t, lazyJSONVerbatim, s.lazyData().mode)
+	require.Equal(t, lazyJSONVerbatim, s.lazyMode())
 	js := jsonStringifier{r: r, raw: true}
 	js.sb.b = make([]byte, 0, 256)
 	r.Interrupt("cancel")
@@ -763,7 +763,7 @@ func TestUnifiedFromGoMemoryLimit(t *testing.T) {
 		name, text string
 		lazy       bool
 	}{
-		{"ascii", "ascii", false}, {"invalid", "a\xffb", true}, {"cjk", strings.Repeat("中", 200000), true},
+		{"ascii", "ascii", false}, {"invalid", "a\xffb", true}, {"cjk", strings.Repeat("中", 200000), true}, {"cjk-over-budget", strings.Repeat("中", 600000), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text := tc.text
@@ -777,14 +777,14 @@ func TestUnifiedFromGoMemoryLimit(t *testing.T) {
 				return
 			}
 			require.Nil(t, cacheOf(s))
-			require.Same(t, r.mem(), s.lazyData().mem)
+			require.Same(t, r.mem(), s.lazyAccount())
 			require.Positive(t, r.Stats().RequestAllocatedBytes, "the lazy block is charged")
 			require.NoError(t, r.CheckInterrupt())
 			before := r.Stats().RequestAllocatedBytes
 			require.Equal(t, len(utf16.Encode([]rune(text))), s.Len())
 			require.GreaterOrEqual(t, r.Stats().RequestAllocatedBytes-before, int64(2*s.Len()))
 			require.Equal(t, goText(text), s.GoString())
-			if len(text) > 1<<18 {
+			if 2*s.Len() > 1<<20 {
 				require.NoError(t, r.CheckInterrupt())
 				r.charge(0)
 				require.ErrorIs(t, r.CheckInterrupt(), ErrMemoryLimit)

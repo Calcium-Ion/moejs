@@ -614,8 +614,12 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 		// --- control flow ---
 		case bytecode.Jmp:
 			off := int(int16(w >> 16))
-			if off < 0 && (r.interruptFlag.Load() < 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
-				return Undefined(), r.interruptError()
+			if off < 0 {
+				if flags := r.interruptFlag.Load(); flags&(flagInterrupt|flagFlat) != 0 {
+					if err := r.loopInterrupt(flags); err != nil {
+						return Undefined(), err
+					}
+				}
 			}
 			pc += off
 			continue
@@ -659,12 +663,15 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					break
 				}
 			}
-			if off := int(int16(w >> 16)); off < 0 && (r.interruptFlag.Load() < 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
-				// The back edge of a rotated loop, taken or not (its exit).
-				// Pending rope and lazy-string bytes are folded here, so a
-				// loop that only reads lengths stops.
-				return Undefined(), r.interruptError()
-			} else if res == (k < 4) {
+			off := int(int16(w >> 16))
+			if off < 0 {
+				if flags := r.interruptFlag.Load(); flags&(flagInterrupt|flagFlat) != 0 {
+					if err := r.loopInterrupt(flags); err != nil {
+						return Undefined(), err
+					}
+				}
+			}
+			if res == (k < 4) {
 				pc += off // relative to the X word
 			} else {
 				pc++
@@ -684,10 +691,15 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 					break
 				}
 			}
-			if off := int(int16(w >> 16)); off < 0 && (r.interruptFlag.Load() < 0 || (r.flatDue() && r.foldFlatSlow(r.lazy.mem))) {
-				// The back edge of a rotated loop, taken or not (its exit).
-				return Undefined(), r.interruptError()
-			} else if res == (k < 4) {
+			off := int(int16(w >> 16))
+			if off < 0 {
+				if flags := r.interruptFlag.Load(); flags&(flagInterrupt|flagFlat) != 0 {
+					if err := r.loopInterrupt(flags); err != nil {
+						return Undefined(), err
+					}
+				}
+			}
+			if res == (k < 4) {
 				pc += off // relative to the X word
 			} else {
 				pc++
@@ -750,12 +762,12 @@ func (r *Realm) run(fi int, fd *FunctionData, base int, env *Env, this Value, ca
 				(*regs.at(int(a))) = res
 			}
 		case bytecode.Ret:
-			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+			if r.flatDue() && r.foldFlatSlow(r.mem()) {
 				return Undefined(), r.interruptError()
 			}
 			return (*regs.at(int(a))), nil
 		case bytecode.RetUndef:
-			if r.flatDue() && r.foldFlatSlow(r.lazy.mem) {
+			if r.flatDue() && r.foldFlatSlow(r.mem()) {
 				return Undefined(), r.interruptError()
 			}
 			return Undefined(), nil

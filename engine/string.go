@@ -14,7 +14,7 @@ const (
 	strUTF16              // u holds code units, at least one >= 0x80
 	strRope               // left/right children; flattened lazily, never in place (flatten)
 	// strLazy retains immutable source bytes in s (Go text, WTF-8 or JSON
-	// contents) and n == -1; p points to a lazyStringData, which publishes
+	// contents) and negative n; p points to a lazyStringData, which publishes
 	// one decoded flat String (content and length) on demand.
 	strLazy
 )
@@ -35,6 +35,12 @@ const (
 	// (hostHeap.str): a string that shares its units does not keep it
 	// (shareRoot), which would keep the slab and its other strings.
 	strHost
+	// Lazy modes occupy bits 4 and 5; bit 6 is a checked wide JSON escape.
+	lazyModeShift   = 4
+	strLazyJSONWide = 1 << 6
+	// strLazyCharged marks a lazy string a realm with a memory limit made:
+	// its p points at a chargedLazyData (string_lazy.go).
+	strLazyCharged = 1 << 7
 )
 
 // jsonPlain marks ASCII bytes with nothing JSON quoting escapes; 0 is unknown.
@@ -72,18 +78,20 @@ type String struct {
 	// field for all keeps String in the 48-byte size class. units and
 	// children read it.
 	p unsafe.Pointer
-	// right is a strRope's right child. A flat string that shares the
+	// right publishes a strLazy's decoded cache atomically, or is a
+	// strRope's right child. A flat string that shares the
 	// units of another, a substring or a value JSON.parse read out of a
 	// text, keeps that string here (its share root, shareRoot): the units
 	// it shares keep the whole of the root's alive, which the live
 	// measurement counts once (memlive.go).
 	right *String
-	n     int32  // code-unit length; -1 for a lazy string (see unitLen)
+	n     int32  // code-unit length; negative for lazy strings (see unitLen)
 	hash  uint32 // 0 = not computed
 	atom  uint32 // 0 = not interned
 	kind  uint8
-	// flags holds strInBuf, strCharged, strConst and strHost, set when the
-	// String is made and never changed.
+	// flags holds strInBuf, strCharged, strConst and strHost, and a lazy
+	// string's mode, plan and account bits, set before the String is
+	// published and never changed.
 	flags uint8
 	// numeric marks an atom that is a canonical numeric string other than
 	// an array index ("-0", "1.5", "NaN"): the keys a typed array answers
@@ -569,6 +577,9 @@ func (s *String) Substring(start, end int) *String {
 // FromGo carved from its slab (strHost), whose units are the host's Go
 // string: a substring keeps those alone, as before, uncounted.
 func (s *String) shareRoot() *String {
+	if s.isLazy() {
+		return s.lazyShareRoot()
+	}
 	if r := s.right; r != nil {
 		return r
 	}
@@ -611,11 +622,11 @@ func (s *String) ropeSubstring(start, end int) *String {
 
 // Hash returns the cached content hash (never 0).
 func (s *String) Hash() uint32 {
-	if s.hash != 0 {
-		return s.hash
-	}
 	if s.isLazy() {
 		return s.lazyHash()
+	}
+	if s.hash != 0 {
+		return s.hash
 	}
 	if s.kind == strRope {
 		// A rope keeps no hash: no field of it but flatten's is written
@@ -625,6 +636,13 @@ func (s *String) Hash() uint32 {
 	h := s.contentHash()
 	s.hash = h
 	return h
+}
+
+func (s *String) cachedHash() uint32 {
+	if s.isLazy() {
+		return atomic.LoadUint32(&s.hash)
+	}
+	return s.hash
 }
 
 // contentHash computes the hash of the flat string s (never 0).
@@ -653,13 +671,13 @@ func (s *String) Equals(t *String) bool {
 	if s.isEmpty() != t.isEmpty() {
 		return false
 	}
-	if s.isLazy() && t.isLazy() && s.s == t.s && sameLazyContent(s.lazyData(), t.lazyData(), s.s) {
+	if s.isLazy() && t.isLazy() && s.s == t.s && sameLazyContent(s, t) {
 		return true
 	}
 	if s.unitLen() != t.unitLen() {
 		return false
 	}
-	if s.hash != 0 && t.hash != 0 && s.hash != t.hash {
+	if sh, th := s.cachedHash(), t.cachedHash(); sh != 0 && th != 0 && sh != th {
 		return false
 	}
 	if s.needsFlat() || t.needsFlat() {

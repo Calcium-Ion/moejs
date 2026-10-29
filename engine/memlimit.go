@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"unsafe"
+	"weak"
 
 	"github.com/Calcium-Ion/moejs/bytecode"
 )
@@ -199,6 +200,9 @@ type memAccount struct {
 	// adds here atomically. The realm's goroutine folds it in at a charge,
 	// a loop back-edge, a call's return and a frame's exit (foldFlatSlow).
 	flat atomic.Int64
+	// owner is weak so a string retained by the host does not keep its
+	// entire realm alive just to notify it of deferred storage.
+	owner weak.Pointer[Realm]
 }
 
 // Sizes charged for storage that grows.
@@ -249,7 +253,7 @@ func (r *Realm) SetMemoryLimit(n int64) {
 	}
 	lz := r.lazyState()
 	if lz.mem == nil {
-		lz.mem = &memAccount{}
+		lz.mem = &memAccount{owner: weak.Make(r)}
 	}
 	lz.mem.limit = n
 	lz.mem.pace()
@@ -282,7 +286,7 @@ func (r *Realm) ResetAllocation() {
 	if m == nil {
 		return
 	}
-	if f := m.flat.Swap(0); f != 0 {
+	if f := r.takeFlat(m); f != 0 {
 		m.total += f
 	}
 	m.allocated = 0
@@ -408,7 +412,7 @@ func (r *Realm) overBudgetSlow(n int) bool {
 	case measuredNow:
 		return m.allocated+int64(n) > m.room
 	case measureWaits:
-		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.requestMeasure()
 		r.endRunSees()
 		return m.allocated+m.flat.Load()+int64(n) > m.room+m.slack()
 	}
@@ -419,8 +423,30 @@ func (r *Realm) overBudgetSlow(n int) bool {
 // account has not folded yet. It is the check a loop back-edge inlines; the
 // fold itself is foldFlatSlow.
 func (r *Realm) flatDue() bool {
-	lz := r.lazy
-	return lz != nil && lz.mem != nil && lz.mem.flat.Load() != 0
+	return r.interruptFlag.Load()&flagFlat != 0
+}
+
+// addFlat publishes storage from any goroutine and wakes the existing
+// interpreter check. Only the owner folds or measures the allocation.
+func (m *memAccount) addFlat(n int64) {
+	m.flat.Add(n)
+	if r := m.owner.Value(); r != nil {
+		r.interruptFlag.Or(flagFlat)
+	}
+}
+
+// takeFlat claims the deferred bytes for the realm's goroutine. It clears
+// the notification before taking them: a producer racing after the swap
+// leaves one for the next check, and one left by a removed account (m nil)
+// is dropped.
+func (r *Realm) takeFlat(m *memAccount) int64 {
+	if r.interruptFlag.Load()&flagFlat != 0 {
+		r.interruptFlag.And(^int32(flagFlat))
+	}
+	if m == nil || m.flat.Load() == 0 {
+		return 0
+	}
+	return m.flat.Swap(0)
 }
 
 // foldFlatSlow moves deferred rope-flatten and lazy-decode bytes into the
@@ -431,7 +457,7 @@ func (r *Realm) flatDue() bool {
 //
 //go:noinline
 func (r *Realm) foldFlatSlow(m *memAccount) bool {
-	n := m.flat.Swap(0)
+	n := r.takeFlat(m)
 	if n == 0 {
 		return false
 	}
@@ -460,7 +486,7 @@ func (r *Realm) foldFlatKeeping(v Value, err error) bool {
 	if e, ok := err.(*Exception); ok {
 		pin[1] = e.Value
 	}
-	hit := r.foldFlatSlow(r.lazy.mem)
+	hit := r.foldFlatSlow(r.mem())
 	clear(pin)
 	r.popArgs(2)
 	return hit
@@ -483,10 +509,7 @@ func (r *Realm) finishCall(res Value, err error) (Value, error) {
 //go:noinline
 func (r *Realm) chargeSlow(size int, kind memKind) {
 	m := r.lazy.mem
-	n := int64(size)
-	if m.flat.Load() != 0 {
-		n += m.flat.Swap(0)
-	}
+	n := int64(size) + r.takeFlat(m)
 	m.allocated += n
 	m.total += n
 	m.counts[kind]++
@@ -511,7 +534,7 @@ func (r *Realm) overLimit(m *memAccount, n int64) bool {
 	case measureWaits:
 		// The interpreter measures at its next check of the flag, once the
 		// builtin returned (pendingInterrupt).
-		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.requestMeasure()
 		r.endRunSees()
 		return m.allocated <= m.room+m.slack()
 	}
@@ -635,7 +658,7 @@ func (r *Realm) newChargedRope(a, b *String, n int) *String {
 // It may run on any goroutine.
 func (s *String) chargeFlatten(n int) {
 	if s.flags&strCharged != 0 {
-		(*ropeNode)(unsafe.Pointer(s)).m.flat.Add(int64(n))
+		(*ropeNode)(unsafe.Pointer(s)).m.addFlat(int64(n))
 	}
 }
 

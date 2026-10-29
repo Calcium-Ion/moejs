@@ -683,11 +683,10 @@ func jsQuotedLen(s *String) int64 {
 // invalid bytes decode to U+FFFD, measured as jsQuotedLenGo measures it.
 // WTF-8 that may encode a surrogate and escaped JSON need decoding.
 func jsQuotedLenLazy(s *String) (int64, bool) {
-	d := s.lazyData()
 	switch {
-	case d.plainJSON(s.s) || d.mode == lazyJSONVerbatim:
+	case s.plainLazyJSON() || s.lazyMode() == lazyJSONVerbatim:
 		return int64(len(s.s)) + 2, true
-	case d.mode == lazyText || d.validUTF8(s.s):
+	case s.lazyMode() == lazyText || s.validLazyUTF8():
 		return jsQuotedLenGo(s.s), true
 	}
 	return 0, false

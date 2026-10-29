@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"strconv"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 	"unsafe"
@@ -154,8 +155,8 @@ type jsonParser struct {
 	// src is valid UTF-8 shared with the caller (knownUTF8), or a WTF-8
 	// copy of a JS string's units, which may encode lone surrogates.
 	src string
-	// short holds recent short plain literals by content (strSlot): a
-	// repeated value (a role, a type, a status) is one String.
+	// short holds recent short literals by their raw contents (strSlot):
+	// repeated plain text, Unicode and escapes can share one String.
 	short [hostStrSlots]*String
 	pos   int
 	depth int
@@ -502,11 +503,14 @@ func (p *jsonParser) strSlow(start, i int) (*String, error) {
 	// Raw copying requires valid UTF-8 and stringify's exact escape spelling.
 	// Slash and Unicode escapes disable copying: stringify may spell them differently.
 	canCopyJSON := p.knownUTF8
+	// Count savings while syntax is checked, without scanning any byte run
+	// again. A later read can size its buffer without revisiting escapes.
+	saved, wide := 0, false
 	for i < len(src) {
 		switch c := src[i]; {
 		case c == '"':
 			p.pos = i + 1
-			return p.escapedString(src[start:i], canCopyJSON), nil
+			return p.escapedString(src[start:i], canCopyJSON, saved, wide), nil
 		case c < 0x20:
 			p.pos = i
 			return nil, p.r.SyntaxError("Bad control character in string literal in JSON at position %d", i)
@@ -518,11 +522,14 @@ func (p *jsonParser) strSlow(start, i int) (*String, error) {
 			}
 			switch src[i] {
 			case '"', '\\', 'b', 'f', 'n', 'r', 't':
+				saved++
 				i++
 			case '/':
+				saved++
 				canCopyJSON = false
 				i++
 			case 'u':
+				saved += 5
 				canCopyJSON = false
 				if i+4 >= len(src) {
 					p.pos = len(src)
@@ -535,6 +542,7 @@ func (p *jsonParser) strSlow(start, i int) (*String, error) {
 						return nil, p.r.SyntaxError("Bad Unicode escape in JSON at position %d", p.pos)
 					}
 				}
+				wide = wide || wideEscape(src, i+1)
 				i += 5
 			default:
 				p.pos = i
@@ -549,33 +557,81 @@ func (p *jsonParser) strSlow(start, i int) (*String, error) {
 	return nil, p.r.SyntaxError("Unterminated string in JSON at position %d", len(src))
 }
 
+// shortLazy finds the String this parse made for the short literal text
+// in mode: equal raw contents decode alike, so the two share one String and
+// its decoding. slot is where a new String for text goes, -1 when text is
+// too long to keep (jsonShortMax).
+func (p *jsonParser) shortLazy(text string, mode lazyStringMode) (s *String, slot int) {
+	if len(text) > jsonShortMax {
+		return nil, -1
+	}
+	slot = strSlot(text)
+	if s = p.short[slot]; s != nil && s.isLazy() && s.lazyMode() == mode && s.s == text {
+		return s, slot
+	}
+	return nil, slot
+}
+
 // unescapedString inherits the parser's encoding knowledge without revalidation.
 func (p *jsonParser) unescapedString(text string) *String {
-	s := p.r.lazyString(text, lazyWTF8)
+	s, slot := p.shortLazy(text, lazyWTF8)
+	if s != nil {
+		return s
+	}
+	s = p.r.lazyString(text, lazyWTF8)
 	if p.knownUTF8 && s.isLazy() {
 		s.lazyData().facts.Store(factUTF8Valid)
+	}
+	if slot >= 0 {
+		p.short[slot] = s
 	}
 	return s
 }
 
-func (p *jsonParser) escapedString(text string, canCopyJSON bool) *String {
+func (p *jsonParser) escapedString(text string, canCopyJSON bool, saved int, wide bool) *String {
 	mode := lazyJSONContents
 	if canCopyJSON {
 		mode = lazyJSONVerbatim
 	}
-	return p.r.lazyString(text, mode)
+	s, slot := p.shortLazy(text, mode)
+	if s != nil {
+		return s
+	}
+	s = p.r.lazyString(text, mode)
+	if saved <= 1<<31-3 {
+		s.n = -int32(saved) - 2
+	}
+	if wide {
+		s.flags |= strLazyJSONWide
+	}
+	if slot >= 0 {
+		p.short[slot] = s
+	}
+	return s
 }
 
-// decodeJSONContents is shared by eager and lazy strings. strSlow has already
+// decodeJSONContents decodes lazy strings. strSlow has already
 // checked the JSON syntax; src excludes the quotes and may contain WTF-8.
 // This step decodes content, including escapes and lone UTF-16 surrogates.
-func decodeJSONContents(sb *StringBuilder, src string) {
-	var units []uint16 // scratch for the runs that are not ASCII
-	i := jsonScan(src, 0, 0)
-	sb.Grow(i + 16)
+func decodeJSONContents(sb *StringBuilder, src string, saved int, wide bool) (coallocated *String) {
+	// Syntax is already checked. Measure the decoded units and storage
+	// kind before allocating, including a wide unit after a long ASCII
+	// prefix. This avoids builder growth, upgrades and scratch copies.
+	n, wide := jsonDecodedUnits(src, saved, wide)
+	if wide {
+		if n <= utf16BufMax {
+			coallocated, sb.u = newUTF16Buf(n)
+			sb.u = sb.u[:0]
+		} else {
+			sb.u = make([]uint16, 0, n)
+		}
+	} else {
+		sb.Grow(n)
+	}
+	i := jsonNextEscape(src, 0)
 	run := 0
 	for i < len(src) {
-		units = writeWTF8Run(sb, src[run:i], units)
+		writeJSONRun(sb, src[run:i])
 		i++ // the backslash
 		switch src[i] {
 		case '"', '\\', '/':
@@ -599,9 +655,66 @@ func decodeJSONContents(sb *StringBuilder, src string) {
 			i += 4
 		}
 		run = i + 1
-		i = jsonScan(src, run, 0)
+		i = jsonNextEscape(src, run)
 	}
-	writeWTF8Run(sb, src[run:], units)
+	writeJSONRun(sb, src[run:])
+	return coallocated
+}
+
+// jsonNextEscape scans checked contents, where only a backslash needs
+// decoding. Quotes and controls were checked by the parser, so the byte
+// search can use the standard library's vectorized path.
+func jsonNextEscape(src string, start int) int {
+	if off := strings.IndexByte(src[start:], '\\'); off >= 0 {
+		return start + off
+	}
+	return len(src)
+}
+
+// jsonDecodedUnits counts the code units syntax-checked JSON contents
+// decode to, and reports whether one is not ASCII. strSlow's plan, the
+// bytes the escapes save and whether one is wide, spares a second scan of
+// the escapes; saved < 0 is no plan. A Unicode escape is one unit, a lone
+// surrogate included.
+func jsonDecodedUnits(src string, saved int, wide bool) (int, bool) {
+	n := len(src)
+	if !isASCIILong(src) {
+		n, wide = wtf8Units(src), true
+	}
+	if saved >= 0 {
+		return n - saved, wide
+	}
+	for run := 0; run < len(src); {
+		off := strings.IndexByte(src[run:], '\\')
+		if off < 0 {
+			break
+		}
+		i := run + off
+		if src[i+1] == 'u' {
+			n -= 5
+			wide = wide || wideEscape(src, i+2)
+			run = i + 6
+		} else {
+			n--
+			run = i + 2
+		}
+	}
+	return n, wide
+}
+
+// wideEscape reports whether the checked \u escape whose hex digits start
+// at h decodes to a unit >= 0x80, which ASCII storage cannot hold.
+func wideEscape(src string, h int) bool {
+	return src[h] != '0' || src[h+1] != '0' || hexDigits[src[h+2]] >= 8
+}
+
+// writeJSONRun writes directly into the final, pre-sized representation.
+func writeJSONRun(sb *StringBuilder, text string) {
+	if sb.u != nil {
+		sb.u = appendWTF8Units(sb.u, text)
+	} else {
+		sb.writeASCIIBytes(text)
+	}
 }
 
 // hexEscape returns the unit of the \u escape whose u is at i.
@@ -642,18 +755,6 @@ var hexDigits = func() (t [256]byte) {
 	}
 	return
 }()
-
-// writeWTF8Run appends the WTF-8 run s to sb, decoding it through scratch
-// when it is not ASCII; it returns scratch for the next run.
-func writeWTF8Run(sb *StringBuilder, s string, scratch []uint16) []uint16 {
-	if isASCII(s) {
-		sb.writeASCIIBytes(s)
-		return scratch
-	}
-	scratch = appendWTF8Units(scratch[:0], s)
-	sb.WriteUTF16(scratch)
-	return scratch
-}
 
 // appendWTF8Units decodes a WTF-8 byte run into UTF-16 code units.
 func appendWTF8Units(u []uint16, s string) []uint16 {
@@ -1356,9 +1457,8 @@ func (js *jsonStringifier) quote(s *String) error {
 // output modes; AppendJSON's UTF-8 output also copies verbatim JSON and
 // quotes valid UTF-8 text in place (quoteBytes), as quoteGo does.
 func (js *jsonStringifier) quoteLazy(s *String) error {
-	d := s.lazyData()
-	copyJSON := d.plainJSON(s.s) || js.raw && d.mode == lazyJSONVerbatim
-	if !copyJSON && !(js.raw && d.validUTF8(s.s)) {
+	copyJSON := s.plainLazyJSON() || js.raw && s.lazyMode() == lazyJSONVerbatim
+	if !copyJSON && !(js.raw && s.validLazyUTF8()) {
 		return js.quote(s.resolved())
 	}
 	if copyJSON {

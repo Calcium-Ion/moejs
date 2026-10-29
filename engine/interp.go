@@ -460,10 +460,8 @@ func (r *Realm) enterFrame(fn *Object, fd *FunctionData, this Value, args []Valu
 // enterFrame rather than calling it, so a first call is no deeper on the Go
 // stack than the next ones.
 func (r *Realm) enterFrameSlow(fn *Object, fd *FunctionData, this Value, args []Value) (res Value, done bool, err error) {
-	if r.interruptFlag.Load() != 0 {
-		if err := r.pendingInterrupt(); err != nil {
-			return Undefined(), true, err
-		}
+	if err := r.frameInterrupt(); err != nil {
+		return Undefined(), true, err
 	}
 	if fd.icBase == icUnbound {
 		if fd.meta.dyn != 0 {

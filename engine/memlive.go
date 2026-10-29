@@ -579,7 +579,7 @@ func (r *Realm) RebaseAllocation(roots func(add func(Value))) error {
 // account's base. It reports false, changing nothing but moving the flat
 // charges into the counts, when an Interrupt ended the measurement.
 func (r *Realm) rebase(m *memAccount, roots func(add func(Value))) bool {
-	if f := m.flat.Swap(0); f != 0 {
+	if f := r.takeFlat(m); f != 0 {
 		m.total += f
 		m.allocated += f
 	}
@@ -591,7 +591,7 @@ func (r *Realm) rebase(m *memAccount, roots func(add func(Value))) bool {
 	}
 	m.lastLive, m.allocated, m.mark, m.last = live, 0, m.total, nil
 	m.pace()
-	r.interruptFlag.CompareAndSwap(flagMeasure, 0) // what a pending one would do
+	r.takeMeasure() // what a pending one would do
 	return true
 }
 
@@ -717,7 +717,7 @@ func (r *Realm) measurePending() {
 //
 //go:noinline
 func (r *Realm) measureAfterCall(res Value) error {
-	if !r.interruptFlag.CompareAndSwap(flagMeasure, 0) {
+	if !r.takeMeasure() {
 		return nil
 	}
 	m := r.mem()
@@ -1699,13 +1699,13 @@ func (w *liveWalker) str(s *String) {
 		// Its data, its source (or the text it was parsed from, its share
 		// root) and what it decoded to, which another goroutine may be
 		// publishing meanwhile (resolve).
-		w.size += int64(unsafe.Sizeof(lazyStringBlock{})) - int64(stringHeaderSize)
-		if s.right != nil {
-			w.str(s.right)
+		w.size += int64(s.lazyBlockSize() - stringHeaderSize)
+		if root := s.lazyShareRoot(); root != nil {
+			w.str(root)
 		} else {
 			w.size += int64(len(s.s))
 		}
-		f := s.lazyData().published()
+		f := s.lazyPublished()
 		switch {
 		case f == nil:
 		case f.kind == strASCII && f.flags&strInBuf == 0 && unsafe.StringData(f.s) == unsafe.StringData(s.s):

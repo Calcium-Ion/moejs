@@ -741,7 +741,7 @@ const jsonScalarMax = 25
 // Lazy strings use a bound based on source bytes without decoding their length.
 func jsonQuotedMax(s *String) int64 {
 	if s.isLazy() {
-		if s.lazyData().plainJSON(s.s) {
+		if s.plainLazyJSON() {
 			return int64(len(s.s)) + 2
 		}
 		return jsonGoQuotedMax(s.s)

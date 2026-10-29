@@ -283,7 +283,7 @@ func (h *hostHeap) str(g string) *String {
 		s = &h.strings[n]
 		*s = String{s: g, n: int32(len(g)), kind: strASCII, flags: strHost}
 	} else {
-		s = newLazyString(g, lazyText)
+		s = newAccountedLazyString(g, lazyText, h.r.mem())
 		h.r.accountLazy(s)
 	}
 	h.strs[slot] = s
