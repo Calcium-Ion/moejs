@@ -18,11 +18,14 @@ const (
 	lazyText lazyStringMode = iota
 
 	// lazyWTF8 holds text that may encode lone UTF-16 surrogates, which
-	// decoding preserves.
+	// decoding preserves. The text must be well-formed WTF-8, as the JSON
+	// parser's source is (valid UTF-8, or wtf8FromUTF16 of a JS string):
+	// decoding sizes it with wtf8Units, which counts lead bytes and does
+	// not see invalid ones.
 	lazyWTF8
 
 	// lazyJSONContents holds JSON contents without quotes; strSlow checked
-	// their JSON syntax. Byte runs may be WTF-8.
+	// their JSON syntax. Byte runs may be WTF-8, well-formed as lazyWTF8's.
 	lazyJSONContents
 
 	// lazyJSONVerbatim holds valid UTF-8 JSON contents in stringify's exact
@@ -148,7 +151,10 @@ func decodeLazyStringPlanned(text string, mode lazyStringMode, saved int, wide b
 		return asciiString(text), stringHeaderSize
 	}
 	// Reserve code units, not source bytes: UTF-8 CJK takes three bytes
-	// for one unit. Invalid Go text follows range's replacement semantics.
+	// for one unit. The count must equal what the append below writes:
+	// wtf8Units holds for well-formed WTF-8 only (lazyWTF8), and Go text,
+	// which may be invalid, is counted with range's replacement semantics,
+	// as appendUTF16 decodes it.
 	n := 0
 	if mode == lazyWTF8 {
 		n = wtf8Units(text)
