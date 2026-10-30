@@ -17,15 +17,17 @@ const (
 	// FromGoString replaces them.
 	lazyText lazyStringMode = iota
 
-	// lazyWTF8 holds text that may encode lone UTF-16 surrogates, which
-	// decoding preserves. The text must be well-formed WTF-8, as the JSON
-	// parser's source is (valid UTF-8, or wtf8FromUTF16 of a JS string):
-	// decoding sizes it with wtf8Units, which counts lead bytes and does
-	// not see invalid ones.
+	// lazyWTF8 holds well-formed WTF-8 text that may encode lone UTF-16
+	// surrogates, which decoding preserves. Only jsonParser constructs it,
+	// after JSONParseGoString checked utf8.ValidString (falling back to
+	// FromGoString on invalid bytes) or String.wtf8 encoded a JS string's
+	// UTF-16 units; arbitrary Go strings may contain ill-formed bytes and
+	// must use lazyText so decoding does not size them with wtf8Units.
 	lazyWTF8
 
 	// lazyJSONContents holds JSON contents without quotes; strSlow checked
-	// their JSON syntax. Byte runs may be WTF-8, well-formed as lazyWTF8's.
+	// their JSON syntax. Byte runs between escapes come from the same
+	// well-formed jsonParser source as lazyWTF8 and are sized with wtf8Units.
 	lazyJSONContents
 
 	// lazyJSONVerbatim holds valid UTF-8 JSON contents in stringify's exact
@@ -150,11 +152,15 @@ func decodeLazyStringPlanned(text string, mode lazyStringMode, saved int, wide b
 	if isASCIILong(text) {
 		return asciiString(text), stringHeaderSize
 	}
-	// Reserve code units, not source bytes: UTF-8 CJK takes three bytes
-	// for one unit. The count must equal what the append below writes:
-	// wtf8Units holds for well-formed WTF-8 only (lazyWTF8), and Go text,
-	// which may be invalid, is counted with range's replacement semantics,
-	// as appendUTF16 decodes it.
+	// Reserve exact code units, not source bytes (UTF-8 CJK is three bytes
+	// per unit). newUTF16Buf(n) binds s to u of length n before append
+	// fills u[:0] in place, so n must equal the units written: an
+	// undercount reallocates inside append and truncates the tail, and an
+	// overcount leaves trailing zero units. lazyWTF8 comes from validated
+	// jsonParser text and uses the 8-byte wtf8Units counter, which agrees
+	// with appendWTF8Units on well-formed WTF-8; lazyText may contain
+	// invalid UTF-8 bytes and counts with range, matching appendUTF16's
+	// U+FFFD replacement.
 	n := 0
 	if mode == lazyWTF8 {
 		n = wtf8Units(text)

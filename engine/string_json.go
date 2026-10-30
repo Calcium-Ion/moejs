@@ -184,10 +184,16 @@ func jsonHasEscapeU(s string) bool {
 	return false
 }
 
-// wtf8Units returns the number of UTF-16 code units of the WTF-8 text s:
-// one per byte that is not a continuation byte (10xxxxxx), and two for a
-// four-byte sequence (its lead is 11110xxx). Eight bytes a step, the flags
-// in the top bit of each byte summed by a multiplication.
+// wtf8Units returns the number of UTF-16 code units of the well-formed
+// WTF-8 text s: one per byte that is not a continuation byte (10xxxxxx),
+// and two for a four-byte sequence (its lead is 11110xxx). Eight bytes a
+// step, the flags in the top bit of each byte summed by a multiplication.
+//
+// Unlike appendWTF8Units, which accepts arbitrary bytes and turns ill-formed
+// ones into U+FFFD via utf8.DecodeRuneInString, wtf8Units requires
+// well-formed WTF-8: it does not validate multi-byte sequences, because
+// recognizing ill-formed bytes would take a byte-by-byte scan as slow as
+// decoding and defeat counting first.
 //
 // GC safety: as in isASCII, the []byte view of s is read-only and local.
 func wtf8Units(s string) int {

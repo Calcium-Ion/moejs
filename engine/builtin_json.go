@@ -756,7 +756,11 @@ var hexDigits = func() (t [256]byte) {
 	return
 }()
 
-// appendWTF8Units decodes a WTF-8 byte run into UTF-16 code units.
+// appendWTF8Units decodes a WTF-8 byte run into UTF-16 code units. It
+// accepts broader input than wtf8Units, since utf8.DecodeRuneInString turns
+// ill-formed bytes into U+FFFD (used by fromWTF8 and fromWTF8Text); callers
+// that pre-size u with wtf8Units must pass well-formed WTF-8 so the units
+// written here match the pre-counted length.
 func appendWTF8Units(u []uint16, s string) []uint16 {
 	for i := 0; i < len(s); {
 		c := s[i]
