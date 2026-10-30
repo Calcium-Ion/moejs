@@ -402,10 +402,8 @@ func (r *Realm) noBodyPromise() error {
 // enterModuleFrame is enterFrame for a module body, which starts at
 // Module.BodyPC in the environment the prologue filled.
 func (r *Realm) enterModuleFrame(fn *Object) (Value, error) {
-	if r.interruptFlag.Load() != 0 {
-		if err := r.pendingInterrupt(); err != nil {
-			return Undefined(), err
-		}
+	if err := r.frameInterrupt(); err != nil {
+		return Undefined(), err
 	}
 	fd := fn.internal.(*FunctionData)
 	code := fd.code

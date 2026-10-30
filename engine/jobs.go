@@ -176,7 +176,7 @@ func (r *Realm) endRun(err error) error {
 //go:noinline
 func (r *Realm) endRunSlow(err error) error {
 	m := r.mem()
-	if r.interruptFlag.CompareAndSwap(flagMeasure, 0) && m != nil && m.allocated > m.room && !m.measuring && !m.hitting {
+	if r.takeMeasure() && m != nil && m.allocated > m.room && !m.measuring && !m.hitting {
 		if r.rebase(m, nil) && m.lastLive > m.limit {
 			r.memoryLimitHit(m)
 		}

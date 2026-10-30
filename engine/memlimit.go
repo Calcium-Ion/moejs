@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"unsafe"
+	"weak"
 
 	"github.com/MoeForge/moejs/bytecode"
 )
@@ -193,12 +194,15 @@ type memAccount struct {
 	// (ChargeMemory), which with no frame running measures at once
 	// (builtinRuns).
 	hostCharge bool
-	// flat is what flattening this realm's ropes allocated since the last
-	// charge: a rope flattens wherever it is first read, which may be on
-	// another goroutine than the realm's (a value the host kept), so the
-	// rope (ropeNode) adds here atomically and the next charge takes it
-	// over.
+	// flat is what flattening this realm's ropes, and decoding its lazy
+	// strings, allocated since the last fold. Either can happen on another
+	// goroutine than the realm's (a value the host kept), so the producer
+	// adds here atomically. The realm's goroutine folds it in at a charge,
+	// a loop back-edge, a call's return and a frame's exit (foldFlatSlow).
 	flat atomic.Int64
+	// owner is weak so a string retained by the host does not keep its
+	// entire realm alive just to notify it of deferred storage.
+	owner weak.Pointer[Realm]
 }
 
 // Sizes charged for storage that grows.
@@ -249,7 +253,7 @@ func (r *Realm) SetMemoryLimit(n int64) {
 	}
 	lz := r.lazyState()
 	if lz.mem == nil {
-		lz.mem = &memAccount{}
+		lz.mem = &memAccount{owner: weak.Make(r)}
 	}
 	lz.mem.limit = n
 	lz.mem.pace()
@@ -282,7 +286,7 @@ func (r *Realm) ResetAllocation() {
 	if m == nil {
 		return
 	}
-	if f := m.flat.Swap(0); f != 0 {
+	if f := r.takeFlat(m); f != 0 {
 		m.total += f
 	}
 	m.allocated = 0
@@ -408,11 +412,95 @@ func (r *Realm) overBudgetSlow(n int) bool {
 	case measuredNow:
 		return m.allocated+int64(n) > m.room
 	case measureWaits:
-		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.requestMeasure()
 		r.endRunSees()
 		return m.allocated+m.flat.Load()+int64(n) > m.room+m.slack()
 	}
 	return true
+}
+
+// flatDue reports that rope flattening or lazy decoding has added bytes the
+// account has not folded yet. It is the check a loop back-edge inlines; the
+// fold itself is foldFlatSlow.
+func (r *Realm) flatDue() bool {
+	return r.interruptFlag.Load()&flagFlat != 0
+}
+
+// addFlat publishes storage from any goroutine and wakes the existing
+// interpreter check. Only the owner folds or measures the allocation.
+func (m *memAccount) addFlat(n int64) {
+	m.flat.Add(n)
+	if r := m.owner.Value(); r != nil {
+		r.interruptFlag.Or(flagFlat)
+	}
+}
+
+// takeFlat claims the deferred bytes for the realm's goroutine. It clears
+// the notification before taking them: a producer racing after the swap
+// leaves one for the next check, and one left by a removed account (m nil)
+// is dropped.
+func (r *Realm) takeFlat(m *memAccount) int64 {
+	if r.interruptFlag.Load()&flagFlat != 0 {
+		r.interruptFlag.And(^int32(flagFlat))
+	}
+	if m == nil || m.flat.Load() == 0 {
+		return 0
+	}
+	return m.flat.Swap(0)
+}
+
+// foldFlatSlow moves deferred rope-flatten and lazy-decode bytes into the
+// account and interrupts the realm when they pass the limit. It reports
+// whether that raised the interrupt. Producers only add to flat, from any
+// goroutine; the realm's goroutine folds at a loop back-edge and as a call
+// returns, which is where a script is stopped.
+//
+//go:noinline
+func (r *Realm) foldFlatSlow(m *memAccount) bool {
+	n := r.takeFlat(m)
+	if n == 0 {
+		return false
+	}
+	m.allocated += n
+	m.total += n
+	if m.allocated <= m.room {
+		return false
+	}
+	hits := m.hits
+	// 0: the folded bytes are allocated already, and a measurement finds
+	// the ones still reachable.
+	if !r.overLimit(m, 0) {
+		r.memoryLimitHit(m)
+	}
+	return m.hits != hits
+}
+
+// foldFlatKeeping is foldFlatSlow where v and the value err throws are
+// held only by Go: the measurement the fold may make takes them as roots.
+// A caller in run returns right after it, as pushArgs may grow the stack.
+//
+//go:noinline
+func (r *Realm) foldFlatKeeping(v Value, err error) bool {
+	pin := r.pushArgs(2)
+	pin[0] = v
+	if e, ok := err.(*Exception); ok {
+		pin[1] = e.Value
+	}
+	hit := r.foldFlatSlow(r.mem())
+	clear(pin)
+	r.popArgs(2)
+	return hit
+}
+
+// finishCall folds deferred storage on normal and exceptional returns.
+// A newly raised memory interrupt replaces the result or an ordinary
+// error. An existing InterruptedError is preserved, even if its flag was
+// cleared while unwinding.
+func (r *Realm) finishCall(res Value, err error) (Value, error) {
+	if _, interrupted := err.(*InterruptedError); interrupted || !r.flatDue() || !r.foldFlatKeeping(res, err) {
+		return res, err
+	}
+	return Undefined(), r.interruptError()
 }
 
 // chargeSlow adds n bytes of kind to the account and interrupts the realm
@@ -421,10 +509,7 @@ func (r *Realm) overBudgetSlow(n int) bool {
 //go:noinline
 func (r *Realm) chargeSlow(size int, kind memKind) {
 	m := r.lazy.mem
-	n := int64(size)
-	if m.flat.Load() != 0 {
-		n += m.flat.Swap(0)
-	}
+	n := int64(size) + r.takeFlat(m)
 	m.allocated += n
 	m.total += n
 	m.counts[kind]++
@@ -449,7 +534,7 @@ func (r *Realm) overLimit(m *memAccount, n int64) bool {
 	case measureWaits:
 		// The interpreter measures at its next check of the flag, once the
 		// builtin returned (pendingInterrupt).
-		r.interruptFlag.CompareAndSwap(0, flagMeasure)
+		r.requestMeasure()
 		r.endRunSees()
 		return m.allocated <= m.room+m.slack()
 	}
@@ -488,17 +573,18 @@ func (r *Realm) memoryLimitHit(m *memAccount) {
 }
 
 // shareText sets the share root of the strings a parse reads out of src
-// (jsonParser.plain): text, whose units src is, or a String of its own for
-// the host's text, a working copy or a text FromGo carved (shareRoot),
-// which keeps its bytes for the live measurement to count; its kind is
-// strASCII whatever the bytes, and it is never a value.
+// (jsonParser.plain, lazyJSONString): text, whose units or lazy source src
+// is, or a String of its own for the host's text, a working copy or a text
+// FromGo carved (shareRoot), which keeps its bytes for the live measurement
+// to count; its kind is strASCII whatever the bytes, and it is never a
+// value.
 func (m *memAccount) shareText(src string, text *String) {
 	switch {
 	case len(src) < shareMin:
 		text = nil // values count their own units (shareRoot)
 	case text == nil:
 		text = &String{s: src, kind: strASCII}
-	case text.kind != strRope:
+	case !text.needsFlat():
 		if text = text.shareRoot(); text == nil {
 			text = &String{s: src, kind: strASCII}
 		}
@@ -515,7 +601,7 @@ func (r *Realm) substring(s *String, start, end int) *String {
 		// view (flat), which only its kind is read of, so it stays on the
 		// stack.
 		f := s
-		if s.kind == strRope {
+		if s.needsFlat() {
 			f = s.flat(new(String))
 		}
 		n := 0
@@ -572,7 +658,7 @@ func (r *Realm) newChargedRope(a, b *String, n int) *String {
 // It may run on any goroutine.
 func (s *String) chargeFlatten(n int) {
 	if s.flags&strCharged != 0 {
-		(*ropeNode)(unsafe.Pointer(s)).m.flat.Add(int64(n))
+		(*ropeNode)(unsafe.Pointer(s)).m.addFlat(int64(n))
 	}
 }
 

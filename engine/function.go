@@ -423,15 +423,22 @@ func (r *Realm) CallObject(fn *Object, this Value, args []Value) (Value, error) 
 		res Value
 		err error
 	)
-	switch fd.kind {
-	case FuncNative:
-		res, err = fd.native(r, this, args)
-	case FuncBytecode:
+	if fd.kind == FuncBytecode {
+		// run settles deferred storage at returns, uncaught exceptions and
+		// suspension, while its values are still rooted in the frame.
 		res, err = r.enterFrame(fn, fd, this, args)
-	default:
-		res, err = r.callOther(fd, this, args)
+		r.callDepth--
+	} else {
+		if fd.kind == FuncNative {
+			res, err = fd.native(r, this, args)
+		} else {
+			res, err = r.callOther(fd, this, args)
+		}
+		r.callDepth--
+		if r.flatDue() {
+			res, err = r.finishCall(res, err)
+		}
 	}
-	r.callDepth--
 	if r.callDepth == 0 && r.jobsPending {
 		if j := r.lazy.jobs; !j.draining {
 			j.result = res
@@ -486,6 +493,9 @@ func (r *Realm) Construct(fn Value, args []Value, newTarget *Object) (Value, err
 		res, err = constructFunction(r, f, fd, args, newTarget)
 	}
 	r.callDepth--
+	if r.flatDue() {
+		res, err = r.finishCall(res, err)
+	}
 	if r.callDepth == 0 && r.jobsPending {
 		if j := r.lazy.jobs; !j.draining {
 			j.result = res

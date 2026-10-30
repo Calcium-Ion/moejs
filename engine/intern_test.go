@@ -128,7 +128,7 @@ func contentIn(a, b *String) bool {
 		if s.kind == strASCII {
 			return uintptr(unsafe.Pointer(unsafe.StringData(s.s))), uintptr(len(s.s))
 		}
-		return uintptr(unsafe.Pointer(unsafe.SliceData(s.units()))), 2 * uintptr(s.n)
+		return uintptr(unsafe.Pointer(unsafe.SliceData(s.units()))), 2 * uintptr(s.Len())
 	}
 	p, _ := span(a)
 	q, n := span(b)
@@ -172,7 +172,7 @@ func TestInternIdentityAcrossCopies(t *testing.T) {
 			require.Nil(t, lookup(), "the name is new to the process")
 			big := name + strings.Repeat(tc.fill, 4096)
 			bigJS := FromGoString(big)
-			sub := bigJS.Substring(0, int(js.n))
+			sub := bigJS.Substring(0, js.Len())
 			require.True(t, contentIn(sub, bigJS), "the substring shares the large string")
 
 			var atom *String
